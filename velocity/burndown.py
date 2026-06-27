@@ -1,0 +1,88 @@
+"""Backlog burndown: historical completion, forward projection, and a
+per-week assignment of which backlog tasks finish when. All pure.
+"""
+
+from __future__ import annotations
+
+import math
+from datetime import date, datetime, timedelta
+
+from . import points
+from .models import STATUS_BACKLOG, ProjectItem, has_status
+from .velocity import current_week_start, weekly_completed_points
+
+DEFAULT_HISTORY_WEEKS = 8  # ~2 months
+
+
+def completed_history(
+    items: list[ProjectItem],
+    weeks_back: int = DEFAULT_HISTORY_WEEKS,
+    now: datetime | None = None,
+) -> list[tuple[date, int]]:
+    """Points completed per week for the last ``weeks_back`` weeks.
+
+    Ends with the current (partial) week and is zero-filled so every week is
+    present in chronological order.
+    """
+    totals = weekly_completed_points(items)
+    end = current_week_start(now)
+    weeks = [end - timedelta(days=7 * i) for i in range(weeks_back)]
+    weeks.reverse()
+    return [(wk, totals.get(wk, 0)) for wk in weeks]
+
+
+def backlog_items(items: list[ProjectItem]) -> list[ProjectItem]:
+    """Items whose Status is Backlog, preserving input (priority) order."""
+    return [item for item in items if has_status(item, STATUS_BACKLOG)]
+
+
+def backlog_total(items: list[ProjectItem]) -> int:
+    """Total normalized points remaining in the backlog."""
+    return sum(points.normalize(item) for item in backlog_items(items))
+
+
+def project_burndown(
+    items: list[ProjectItem],
+    velocity: float,
+    now: datetime | None = None,
+) -> list[tuple[date, float]]:
+    """Forward weekly remaining-points series from now until the backlog is 0.
+
+    Index 0 is the current week at the full backlog total. With a non-positive
+    velocity the backlog can't be projected, so only the starting point is
+    returned.
+    """
+    total = backlog_total(items)
+    start = current_week_start(now)
+    if velocity <= 0 or total <= 0:
+        return [(start, float(total))]
+    weeks_needed = math.ceil(total / velocity)
+    return [
+        (start + timedelta(days=7 * w), max(total - velocity * w, 0.0))
+        for w in range(weeks_needed + 1)
+    ]
+
+
+def assign_tasks_to_weeks(
+    backlog_in_priority_order: list[ProjectItem],
+    velocity: float,
+    now: datetime | None = None,
+) -> list[tuple[date, ProjectItem]]:
+    """Project which week each backlog task is completed in.
+
+    Walks the backlog in priority order, treating each week as ``velocity``
+    points of capacity; a task is assigned to the week in which its cumulative
+    point total finishes. Zero-point bugs don't consume capacity, so they ride
+    along in whatever week the cursor currently sits.
+    """
+    start = current_week_start(now)
+    assignments: list[tuple[date, ProjectItem]] = []
+    cumulative = 0
+    for item in backlog_in_priority_order:
+        cumulative += points.normalize(item)
+        if velocity <= 0:
+            week_index = 1
+        else:
+            week_index = max(math.ceil(cumulative / velocity - 1e-9), 1)
+        assignments.append((start + timedelta(days=7 * (week_index - 1)), item))
+    return assignments

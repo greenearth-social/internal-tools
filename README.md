@@ -1,2 +1,58 @@
 # internal-tools
-Internal tools for GreenEarth
+
+Internal tools for GreenEarth.
+
+## Velocity & backlog projection
+
+Pivotal-Tracker-style velocity tracking and backlog projection for GitHub
+Project [#2](https://github.com/orgs/greenearth-social/projects/2/views/3). See
+issue [#1](https://github.com/greenearth-social/internal-tools/issues/1).
+
+- `velocity/` — tested library. All computation lives here:
+  - `points.py` — point/type normalization (blank type → feature, bugs → 0
+    points, unpointed → 2 points).
+  - `velocity.py` — weekly completed points and the 3-week velocity average.
+  - `burndown.py` — completion history, forward burndown projection, and which
+    week each backlog task is projected to finish.
+  - `github_project.py` — the only I/O: fetches project items via `gh api
+    graphql`.
+- `notebooks/velocity.ipynb` — presentation only (charts + projection table).
+
+### Setup
+
+```bash
+pipenv install --dev
+
+# One-time: the gh CLI needs the project scope to read Projects v2 data.
+gh auth refresh -s read:project
+```
+
+The library shells out to the `gh` CLI, so `gh` must be installed and
+authenticated.
+
+### Run the tests
+
+```bash
+pipenv run pytest
+```
+
+Tests are co-located with the source (`*_test.py`) and run entirely on fixture
+data — no network access required.
+
+### Run the notebook
+
+```bash
+pipenv run jupyter notebook notebooks/velocity.ipynb
+```
+
+### Assumptions
+
+- A task is completed when its Status is `Done`; the week it counts toward is
+  taken from the underlying issue's `closedAt` timestamp.
+- Points come from the project's single-select `Points` field (Fibonacci
+  options). A task's type is GitHub's native issue type (e.g. `Bug`); items with
+  no issue type are treated as features.
+- Velocity is the average completed points over the last 3 completed weeks (the
+  current partial week is excluded).
+- Backlog items are read in the GraphQL API's board order, which is treated as
+  priority order. Per-view (view #3) custom sorting is not exposed by the API.
