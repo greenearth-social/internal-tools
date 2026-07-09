@@ -86,3 +86,22 @@ def assign_tasks_to_weeks(
             week_index = max(math.ceil(cumulative / velocity - 1e-9), 1)
         assignments.append((start + timedelta(days=7 * (week_index - 1)), item))
     return assignments
+
+
+def upcoming_weeks(
+    assignments: list[tuple[date, ProjectItem]],
+    weeks: int = 4,
+    now: datetime | None = None,
+) -> list[tuple[date, list[ProjectItem]]]:
+    """Group task assignments into the next ``weeks`` weeks, oldest first.
+
+    Tasks projected beyond the window are dropped. Weeks inside the window with
+    no tasks are still included (as empty lists) so the picture is complete.
+    Item order within each week is preserved (priority order).
+    """
+    window = [current_week_start(now) + timedelta(days=7 * i) for i in range(weeks)]
+    grouped: dict[date, list[ProjectItem]] = {wk: [] for wk in window}
+    for wk, item in assignments:
+        if wk in grouped:
+            grouped[wk].append(item)
+    return [(wk, grouped[wk]) for wk in window]

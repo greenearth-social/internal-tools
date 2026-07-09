@@ -30,3 +30,13 @@ def normalize(item: ProjectItem) -> int:
     if item.raw_points is None:
         return UNPOINTED_DEFAULT
     return int(round(item.raw_points))
+
+
+def is_estimated(item: ProjectItem) -> bool:
+    """True when the normalized points are auto-assigned rather than real.
+
+    This is the unpointed-non-bug case where we fall back to
+    ``UNPOINTED_DEFAULT``. Bugs (deterministically 0) and items with a real
+    point value are not "estimated".
+    """
+    return effective_type(item) != BUG_TYPE and item.raw_points is None

@@ -27,3 +27,12 @@ def test_pointed_item_uses_its_value():
 
 def test_fractional_points_are_rounded():
     assert points.normalize(make_item(raw_points=2.6)) == 3
+
+
+def test_is_estimated_only_for_unpointed_non_bugs():
+    assert points.is_estimated(make_item(raw_type="feature", raw_points=None)) is True
+    assert points.is_estimated(make_item(raw_type=None, raw_points=None)) is True
+    # real points -> not estimated
+    assert points.is_estimated(make_item(raw_points=3)) is False
+    # bugs are deterministically 0, not an estimate
+    assert points.is_estimated(make_item(raw_type="bug", raw_points=None)) is False

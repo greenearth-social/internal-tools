@@ -45,6 +45,23 @@ data — no network access required.
 pipenv run jupyter notebook notebooks/velocity.ipynb
 ```
 
+The notebook has `%autoreload 2` at the top, so edits to the `velocity` library
+are picked up on the next cell run without restarting the kernel.
+
+### Editing the notebook
+
+Keep logic in the `velocity/` library (it's unit-tested); the notebook should
+stay presentation-only. To verify a change headlessly without a running kernel:
+
+```bash
+pipenv run jupyter nbconvert --to notebook --execute \
+  --output /tmp/velocity-check.ipynb notebooks/velocity.ipynb
+```
+
+Note that `gh` colorizes JSON when it detects a color-forcing environment (some
+Jupyter kernels set `CLICOLOR_FORCE`), which would break parsing — the fetcher
+in `github_project.py` forces color off to avoid this.
+
 ### Assumptions
 
 - A task is completed when its Status is `Done`; the week it counts toward is
