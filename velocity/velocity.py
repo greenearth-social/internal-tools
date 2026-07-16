@@ -51,7 +51,7 @@ def weekly_completed_points(items: list[ProjectItem]) -> dict[date, int]:
 
 def completed_weeks(
     items: list[ProjectItem],
-    weeks: int,
+    weeks: int = DEFAULT_VELOCITY_WEEKS,
     now: datetime | None = None,
 ) -> list[tuple[date, int]]:
     """Return the (week_start, points) for the last ``weeks`` completed weeks.
