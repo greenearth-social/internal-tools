@@ -8,7 +8,7 @@ import math
 from datetime import date, datetime, timedelta
 
 from . import points
-from .models import STATUS_BACKLOG, ProjectItem, has_status
+from .models import ProjectItem, in_backlog
 from .velocity import current_week_start, weekly_completed_points
 
 DEFAULT_HISTORY_WEEKS = 8  # ~2 months
@@ -16,24 +16,32 @@ DEFAULT_HISTORY_WEEKS = 8  # ~2 months
 
 def completed_history(
     items: list[ProjectItem],
-    weeks_back: int = DEFAULT_HISTORY_WEEKS,
+    min_weeks: int = DEFAULT_HISTORY_WEEKS,
     now: datetime | None = None,
 ) -> list[tuple[date, int]]:
-    """Points completed per week for the last ``weeks_back`` weeks.
+    """Points completed per week, chronological and zero-filled.
 
-    Ends with the current (partial) week and is zero-filled so every week is
-    present in chronological order.
+    Spans from the earliest week with completed work (or ``min_weeks`` back,
+    whichever is earlier) through the last *completed* week. The current,
+    partial week is excluded because it isn't counted toward velocity yet.
     """
     totals = weekly_completed_points(items)
-    end = current_week_start(now)
-    weeks = [end - timedelta(days=7 * i) for i in range(weeks_back)]
-    weeks.reverse()
+    end = current_week_start(now) - timedelta(days=7)  # last completed week
+    earliest_data = min([wk for wk in totals if wk <= end], default=end)
+    floor = end - timedelta(days=7 * (min_weeks - 1))
+    start = min(earliest_data, floor)
+
+    weeks: list[date] = []
+    wk = start
+    while wk <= end:
+        weeks.append(wk)
+        wk += timedelta(days=7)
     return [(wk, totals.get(wk, 0)) for wk in weeks]
 
 
 def backlog_items(items: list[ProjectItem]) -> list[ProjectItem]:
-    """Items whose Status is Backlog, preserving input (priority) order."""
-    return [item for item in items if has_status(item, STATUS_BACKLOG)]
+    """Unified-backlog items, preserving input (priority) order."""
+    return [item for item in items if in_backlog(item)]
 
 
 def backlog_total(items: list[ProjectItem]) -> int:
@@ -105,3 +113,26 @@ def upcoming_weeks(
         if wk in grouped:
             grouped[wk].append(item)
     return [(wk, grouped[wk]) for wk in window]
+
+
+def is_task(item: ProjectItem) -> bool:
+    """True for real backlog tasks (i.e. not release markers)."""
+    return not points.is_release_marker(item)
+
+
+def release_marker_dates(
+    backlog_in_priority_order: list[ProjectItem],
+    velocity: float,
+    now: datetime | None = None,
+) -> list[tuple[date, ProjectItem]]:
+    """Projected release date for each release marker in the backlog.
+
+    A marker itself is worth 0 points, so its assigned week is exactly the week
+    all higher-priority work above it is projected to finish. Returned in
+    backlog (priority) order.
+    """
+    return [
+        (wk, item)
+        for wk, item in assign_tasks_to_weeks(backlog_in_priority_order, velocity, now)
+        if points.is_release_marker(item)
+    ]

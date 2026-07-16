@@ -21,6 +21,7 @@ def make_item(
     raw_points: float | None = None,
     closed_at: datetime | None = None,
     url: str | None = "https://example.test/1",
+    state_reason: str | None = None,
 ) -> ProjectItem:
     return ProjectItem(
         id=id,
@@ -30,6 +31,7 @@ def make_item(
         raw_type=raw_type,
         raw_points=raw_points,
         closed_at=closed_at,
+        state_reason=state_reason,
     )
 
 

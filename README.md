@@ -65,11 +65,22 @@ in `github_project.py` forces color off to avoid this.
 ### Assumptions
 
 - A task is completed when its Status is `Done`; the week it counts toward is
-  taken from the underlying issue's `closedAt` timestamp.
+  taken from the underlying issue's `closedAt` timestamp. Tasks closed as "not
+  planned" (wontfix) or "duplicate" are excluded — they delivered no work, so
+  their points don't count toward velocity.
 - Points come from the project's single-select `Points` field (Fibonacci
   options). A task's type is GitHub's native issue type (e.g. `Bug`); items with
   no issue type are treated as features.
 - Velocity is the average completed points over the last 3 completed weeks (the
   current partial week is excluded).
+- The backlog matches the **Backlog - Unified** view (project view #13): every
+  item whose Status is `Backlog`, `In Progress`, `In Review`, or `On Hold`,
+  across all repos.
 - Backlog items are read in the GraphQL API's board order, which is treated as
-  priority order. Per-view (view #3) custom sorting is not exposed by the API.
+  priority order. Per-view (view #13) custom sorting is not exposed by the API.
+- Titles containing a release-marker emoji (🚀 rocket, ✅/✔/☑ check, or 🚢/🛳
+  ship) are **release markers**, not tasks: they carry 0 points and are excluded
+  from the task list. Each marker's projected release date comes from its
+  position in the backlog (when all higher-priority work is projected to finish)
+  and is shown as a vertical line on the burndown plus a row in the release
+  table.

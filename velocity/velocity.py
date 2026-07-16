@@ -11,7 +11,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from . import points
-from .models import STATUS_DONE, ProjectItem, has_status
+from .models import STATUS_DONE, ProjectItem, has_status, is_completed_work
 
 DEFAULT_VELOCITY_WEEKS = 3
 
@@ -35,11 +35,15 @@ def current_week_start(now: datetime | None = None) -> date:
 def weekly_completed_points(items: list[ProjectItem]) -> dict[date, int]:
     """Map each week (Monday) to the points completed in it.
 
-    Only Done items with a ``closed_at`` are counted.
+    Only Done items with a ``closed_at`` are counted, and tasks closed as
+    "not planned" (wontfix) or "duplicate" are excluded since they delivered no
+    work.
     """
     totals: dict[date, int] = defaultdict(int)
     for item in items:
         if not has_status(item, STATUS_DONE) or item.closed_at is None:
+            continue
+        if not is_completed_work(item):
             continue
         totals[week_start(item.closed_at)] += points.normalize(item)
     return dict(totals)

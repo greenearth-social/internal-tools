@@ -30,6 +30,18 @@ def test_weekly_completed_points_buckets_and_ignores_non_done():
     assert totals == {date(2026, 6, 15): 6}  # 5 + 1, bug contributes 0
 
 
+def test_weekly_completed_points_excludes_wontfix_and_duplicate():
+    items = [
+        _done(datetime(2026, 6, 16, tzinfo=timezone.utc), raw_points=5, state_reason="COMPLETED"),
+        _done(datetime(2026, 6, 16, tzinfo=timezone.utc), raw_points=8, state_reason="NOT_PLANNED"),
+        _done(datetime(2026, 6, 16, tzinfo=timezone.utc), raw_points=13, state_reason="DUPLICATE"),
+        # no close reason (e.g. merged PR) still counts
+        _done(datetime(2026, 6, 16, tzinfo=timezone.utc), raw_points=2, state_reason=None),
+    ]
+    totals = velocity.weekly_completed_points(items)
+    assert totals == {date(2026, 6, 15): 7}  # 5 + 2 only
+
+
 def test_completed_weeks_excludes_current_week_and_zero_fills():
     items = [
         _done(datetime(2026, 6, 16, tzinfo=timezone.utc), raw_points=5),  # wk 06-15

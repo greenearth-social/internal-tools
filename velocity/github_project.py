@@ -57,7 +57,7 @@ query($org: String!, $number: Int!, $pageSize: Int!, $after: String) {
           }
           content {
             __typename
-            ... on Issue { title url closedAt issueType { name } }
+            ... on Issue { title url closedAt stateReason issueType { name } }
             ... on PullRequest { title url closedAt }
             ... on DraftIssue { title }
           }
@@ -83,9 +83,9 @@ _GH_ENV = {
 }
 
 
-def _run_graphql(variables: dict) -> dict:
-    """Execute the GraphQL query via ``gh`` and return the parsed ``data``."""
-    args = ["gh", "api", "graphql", "-f", f"query={_QUERY}"]
+def _graphql(query: str, variables: dict) -> dict:
+    """Execute a GraphQL query via ``gh`` and return the parsed ``data``."""
+    args = ["gh", "api", "graphql", "-f", f"query={query}"]
     for key, value in variables.items():
         flag = "-F" if isinstance(value, int) else "-f"
         args += [flag, f"{key}={value}"]
@@ -107,6 +107,11 @@ def _run_graphql(variables: dict) -> dict:
     if "errors" in payload:
         raise RuntimeError(f"GraphQL errors: {payload['errors']}")
     return payload["data"]
+
+
+def _run_graphql(variables: dict) -> dict:
+    """Run the project-items query."""
+    return _graphql(_QUERY, variables)
 
 
 def _field_name(node: dict) -> str:
@@ -149,6 +154,7 @@ def _parse_item(node: dict) -> ProjectItem | None:
         raw_type=raw_type,
         raw_points=raw_points,
         closed_at=closed_at,
+        state_reason=content.get("stateReason"),
     )
 
 
@@ -178,3 +184,42 @@ def fetch_items(
             break
         after = page["endCursor"]
     return items
+
+
+# GitHub single-select option color enum -> hex, approximating the palette
+# GitHub uses for project status labels (each dark enough for white text).
+GITHUB_OPTION_COLORS = {
+    "GRAY": "#59636e",
+    "BLUE": "#0969da",
+    "GREEN": "#1a7f37",
+    "YELLOW": "#9a6700",
+    "ORANGE": "#bc4c00",
+    "RED": "#cf222e",
+    "PURPLE": "#8250df",
+    "PINK": "#bf3989",
+}
+
+_STATUS_COLORS_QUERY = """
+query($org: String!, $number: Int!) {
+  organization(login: $org) {
+    projectV2(number: $number) {
+      field(name: "Status") {
+        ... on ProjectV2SingleSelectField { options { name color } }
+      }
+    }
+  }
+}
+"""
+
+
+def fetch_status_colors(
+    org: str = DEFAULT_ORG,
+    project_number: int = DEFAULT_PROJECT_NUMBER,
+) -> dict[str, str]:
+    """Map each Status option name to a hex color from GitHub's option colors."""
+    data = _graphql(_STATUS_COLORS_QUERY, {"org": org, "number": project_number})
+    options = data["organization"]["projectV2"]["field"]["options"]
+    return {
+        opt["name"]: GITHUB_OPTION_COLORS.get(opt["color"], GITHUB_OPTION_COLORS["GRAY"])
+        for opt in options
+    }

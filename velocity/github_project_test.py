@@ -53,6 +53,17 @@ def test_parse_item_null_issue_type_is_none():
     assert item.raw_points == 2.0
 
 
+def test_parse_item_reads_state_reason():
+    node = _node(
+        field_values=[],
+        content={"title": "t", "url": None, "closedAt": None, "stateReason": "DUPLICATE"},
+    )
+    assert github_project._parse_item(node).state_reason == "DUPLICATE"
+    # absent stateReason (e.g. PR/draft) -> None
+    node2 = _node(field_values=[], content={"title": "t", "url": None})
+    assert github_project._parse_item(node2).state_reason is None
+
+
 def test_parse_item_skips_items_without_content():
     assert github_project._parse_item(_node([], content=None)) is None
 

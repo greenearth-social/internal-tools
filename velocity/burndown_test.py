@@ -8,26 +8,61 @@ def _backlog(points_, **kw):
     return make_item(status="Backlog", raw_points=points_, **kw)
 
 
-def test_completed_history_zero_filled_and_chronological():
+def test_completed_history_spans_to_last_completed_week():
+    # NOW = 2026-06-24 (Wed) -> current week 06-22, last completed week 06-15.
     items = [
         make_item(status="Done", closed_at=datetime(2026, 6, 16, tzinfo=timezone.utc), raw_points=4),
     ]
-    hist = burndown.completed_history(items, weeks_back=3, now=NOW)
+    hist = burndown.completed_history(items, min_weeks=3, now=NOW)
+    # ends at 06-15 (current partial week 06-22 excluded), zero-filled back min_weeks
     assert hist == [
+        (date(2026, 6, 1), 0),
         (date(2026, 6, 8), 0),
         (date(2026, 6, 15), 4),
-        (date(2026, 6, 22), 0),
     ]
 
 
-def test_backlog_total_only_counts_backlog_status():
+def test_completed_history_extends_back_for_older_data():
+    items = [
+        make_item(status="Done", closed_at=datetime(2026, 4, 20, tzinfo=timezone.utc), raw_points=2),
+        make_item(status="Done", closed_at=datetime(2026, 6, 16, tzinfo=timezone.utc), raw_points=4),
+    ]
+    hist = burndown.completed_history(items, min_weeks=3, now=NOW)
+    weeks = [wk for wk, _ in hist]
+    # spans from the older data week (04-20) through the last completed week (06-15)
+    assert weeks[0] == date(2026, 4, 20)
+    assert weeks[-1] == date(2026, 6, 15)
+    assert dict(hist)[date(2026, 4, 20)] == 2
+    assert dict(hist)[date(2026, 6, 15)] == 4
+
+
+def test_backlog_total_counts_unified_view_statuses():
     items = [
         _backlog(3),
         _backlog(None),  # unpointed -> 2
         _backlog(8, raw_type="bug"),  # bug -> 0
-        make_item(status="Done", raw_points=99),  # not backlog
+        make_item(status="In Progress", raw_points=5),  # in unified backlog
+        make_item(status="On Hold", raw_points=1),  # in unified backlog
+        make_item(status="Done", raw_points=99),  # excluded
+        make_item(status="Icebox", raw_points=99),  # excluded
     ]
-    assert burndown.backlog_total(items) == 3 + 2 + 0
+    assert burndown.backlog_total(items) == 3 + 2 + 0 + 5 + 1
+
+
+def test_release_marker_dates_use_position_not_points():
+    # velocity 5; a marker sits after 5 pts of work, so it lands in week 1
+    items = [
+        _backlog(5, id="a"),
+        make_item(status="Backlog", title="🚀 GA demarcator ✅", id="mark"),
+        _backlog(5, id="b"),
+    ]
+    markers = burndown.release_marker_dates(items, velocity=5, now=NOW)
+    assert len(markers) == 1
+    wk, item = markers[0]
+    assert item.id == "mark"
+    assert wk == date(2026, 6, 22)  # everything above (5 pts) done in week 1
+    # the marker contributes no points to the backlog total
+    assert burndown.backlog_total(items) == 10
 
 
 def test_project_burndown_counts_down_to_zero():
