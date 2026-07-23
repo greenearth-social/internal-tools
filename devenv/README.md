@@ -282,11 +282,10 @@ Two things make that work, both of which are otherwise dead ends locally:
   writes `feed_cache` but never `feed_snapshots`, which is what this UI reads.
   The api refuses to start with `GE_DEV_SESSION_SECRET` set in a deployed
   environment.
-- **The UI reports on one feed, and here it's `popularity`.** Its default,
-  `your-feed`, needs the Perspective API and the trained ranking models, so it
-  can't run locally. `GE_FEED_TRANSPARENCY_FEED` overrides which feed it reads;
-  devenv points it at `popularity`. Generate a feed for whatever this is set
-  to — the UI ignores the rest.
+- **The UI reports on every feed you've loaded**, so generate whichever one
+  you're working on. `your-feed` won't run here — it needs the Perspective API
+  and the trained ranking models — but `popularity`, `random` and
+  `post-similarity` all work.
 
 Snapshots are only kept for 15 minutes, so an untouched tab goes empty again;
 run `devctl feed` and reload.

@@ -232,10 +232,6 @@ services:
       # the AT Protocol JWT the real path needs. The api refuses to start with
       # this set in a deployed environment.
       - GE_DEV_SESSION_SECRET=${GE_DEV_SESSION_SECRET:-ge-dev-session}
-      # The transparency UI reports on one feed. Point it at one that actually
-      # runs here: the default, "your-feed", needs the Perspective API and the
-      # trained models.
-      - GE_FEED_TRANSPARENCY_FEED=${GE_DEV_TRANSPARENCY_FEED:-popularity}
       - GE_INFERENCE_BASE_URL=http://inference-stub:8000
       - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
       - GE_METRICS_EXPORT_INTERVAL_SEC=86400
