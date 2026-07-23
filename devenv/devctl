@@ -166,7 +166,7 @@ cmd_setup() {
   ensure_runtime
   echo "devctl: pulling and building images (first run takes a few minutes)..."
   compose --profile tools build es-init api firebase frontend
-  compose --profile tools pull elasticsearch inference-stub dev-auth seed-rebase seed-megastream --ignore-buildable
+  compose --profile tools pull elasticsearch inference-stub perspective-stub dev-auth seed-rebase seed-megastream --ignore-buildable
   echo "devctl: setup complete."
   have_fixtures || fixtures_hint
   echo "Next: devctl up && devctl seed"
@@ -179,7 +179,7 @@ cmd_up() {
   # --remove-orphans clears containers for services this file no longer
   # defines — e.g. the standalone `firestore` emulator that the Firebase
   # suite replaced, which would otherwise linger holding its old port.
-  compose up -d --remove-orphans elasticsearch firebase dev-auth inference-stub
+  compose up -d --remove-orphans elasticsearch firebase dev-auth inference-stub perspective-stub
   echo "devctl: initializing Elasticsearch (templates, indexes, API keys)..."
   compose run --rm es-init
   compose up -d api frontend
