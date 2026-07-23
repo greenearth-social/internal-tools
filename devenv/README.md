@@ -200,9 +200,65 @@ Both mint an unsigned custom token, which only an emulator will accept — the
 Auth emulator ignores the signature, real Firebase would reject it outright.
 Tokens last an hour.
 
-To exercise the genuine OAuth flow (with real secrets in `devenv.local.env`),
-set `GE_DEV_FUNCTIONS_TARGET=firebase:15001` to take `dev-auth` out of the
-path.
+### Working on real Bluesky auth
+
+The shim above is for *using* the app. To work on the OAuth flow itself, take
+`dev-auth` out of the path so `/auth/bluesky` reaches the real function again:
+
+```bash
+# devenv.local.env
+GE_DEV_FUNCTIONS_TARGET=firebase:15001
+```
+
+The functions read six variables, all passed straight through from
+`devenv.local.env` to the emulator:
+
+| Variable | Purpose |
+| --- | --- |
+| `APP_ORIGIN` | Derives `client_id` (`$APP_ORIGIN/.well-known/oauth-client-metadata`) and `redirect_uri` (`$APP_ORIGIN/oauth/callback`) |
+| `BLUESKY_OAUTH_CLIENT_KID` | Key id in the client assertion |
+| `BLUESKY_OAUTH_CLIENT_PRIVATE_KEY` | Signs the client assertion (prod key) |
+| `BLUESKY_OAUTH_CLIENT_PRIVATE_KEY_STAGE` | Same, for the `*Stage` function variants |
+| `BLUESKY_OAUTH_PUBLIC_JWKS` | Served by `oauthJwks` for Bluesky to verify the assertion |
+| `OAUTH_STATE_ENCRYPTION_KEY` | Encrypts the OAuth state parameter |
+
+**`APP_ORIGIN` has to be publicly reachable.** Bluesky's authorization server
+fetches your client metadata from it and redirects the browser back to it, so
+the default `http://localhost:3000` cannot work — the handshake fails at the
+authorization server, not in our code. Point it at a tunnel, and tell Vite to
+accept that hostname:
+
+```bash
+# devenv.local.env
+GE_DEV_APP_ORIGIN=https://your-subdomain.ngrok.dev
+GE_DEV_FRONTEND_ALLOWED_HOSTS=localhost,your-subdomain.ngrok.dev
+GE_DEV_FUNCTIONS_TARGET=firebase:15001
+```
+
+Then `devctl up` and browse the tunnel URL rather than localhost. Any origin
+change is also a fresh Firebase auth origin, so you'll be signed out — expected,
+not a bug.
+
+Sanity checks:
+
+```bash
+# Confirms APP_ORIGIN: the client_id and redirect_uris it returns are exactly
+# what Bluesky will be asked to fetch and redirect to. If these say
+# "localhost", the handshake cannot work.
+curl -s localhost:5001/greenearth-471522/us-central1/oauthClientMetadata
+
+# Confirms BLUESKY_OAUTH_PUBLIC_JWKS — unset, it answers {"error":"Failed to
+# load JWKS"}.
+curl -s localhost:5001/greenearth-471522/us-central1/oauthJwks
+
+# Per-request function logs, including thrown errors.
+devctl logs firebase
+```
+
+`authBluesky` names the variable it's missing (`APP_ORIGIN not configured`,
+`BLUESKY_OAUTH_CLIENT_KID not configured`); the others report generically, so
+for those an error means "check the emulator logs" rather than pointing at a
+specific variable.
 
 ### What the frontend can and can't show
 

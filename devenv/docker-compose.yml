@@ -70,9 +70,20 @@ services:
     command: ["bash", "/firebase/start.sh"]
     environment:
       - GE_DEV_FIREBASE_PROJECT=${GE_DEV_FIREBASE_PROJECT:-greenearth-471522}
-      # Consumed by functions/src at runtime. The Bluesky OAuth flow needs real
-      # secrets we deliberately don't ship; see README (frontend auth).
-      - APP_ORIGIN=http://localhost:${GE_DEV_PORT_FRONTEND:-3000}
+      # --- consumed by functions/src at runtime ---
+      # APP_ORIGIN derives the OAuth client_id and redirect_uri. Bluesky's
+      # authorization server has to fetch the client metadata from it, so
+      # working on real auth means pointing this (and the frontend's allowed
+      # hosts) at a public tunnel. See README, "Working on real Bluesky auth".
+      - APP_ORIGIN=${GE_DEV_APP_ORIGIN:-http://localhost:${GE_DEV_PORT_FRONTEND:-3000}}
+      # Empty by default: the environment runs credential-free, and dev-auth
+      # stands in for this flow. Set them in devenv.local.env to use the real
+      # one.
+      - BLUESKY_OAUTH_CLIENT_KID=${BLUESKY_OAUTH_CLIENT_KID:-}
+      - BLUESKY_OAUTH_CLIENT_PRIVATE_KEY=${BLUESKY_OAUTH_CLIENT_PRIVATE_KEY:-}
+      - BLUESKY_OAUTH_CLIENT_PRIVATE_KEY_STAGE=${BLUESKY_OAUTH_CLIENT_PRIVATE_KEY_STAGE:-}
+      - BLUESKY_OAUTH_PUBLIC_JWKS=${BLUESKY_OAUTH_PUBLIC_JWKS:-}
+      - OAUTH_STATE_ENCRYPTION_KEY=${OAUTH_STATE_ENCRYPTION_KEY:-}
     ports:
       - "127.0.0.1:${GE_DEV_PORT_FIRESTORE:-8080}:18080"
       - "127.0.0.1:${GE_DEV_PORT_FIREBASE_AUTH:-9099}:19099"
