@@ -11,13 +11,20 @@
 #   python3 fixtures/generate_sample.py --source prod-es
 #   fixtures/publish_fixture.sh
 #
+# Takes an optional fixture directory, defaulting to fixtures/data/. Passing
+# one lets a freshly generated set be published straight out of its staging
+# directory (see regen_fixture.sh) without first overwriting the fixture the
+# local environment is currently seeded from:
+#
+#   fixtures/publish_fixture.sh fixtures/data.staging
+#
 # Each publish creates a new dated release; `devctl fetch-fixture` picks the
 # most recent one. Delete old releases when they stop being useful — unlike
 # git history, they can be reclaimed.
 set -euo pipefail
 
 FIXTURES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR="$FIXTURES_DIR/data"
+DATA_DIR="${1:-$FIXTURES_DIR/data}"
 REPO="${GE_DEV_FIXTURE_REPO:-greenearth-social/internal-tools}"
 ASSET_NAME="ge-dev-fixture.tar"
 
