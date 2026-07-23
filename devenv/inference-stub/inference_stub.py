@@ -69,6 +69,12 @@ def cosine(a: list[float], b: list[float]) -> float:
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Keep-alive plus the larger backlog on Server below: the api can issue
+    # many inference calls in quick succession, and HTTP/1.0 would open a
+    # fresh connection for each. Safe because every response below sends an
+    # accurate Content-Length.
+    protocol_version = "HTTP/1.1"
+
     def _send(self, status: int, body: dict) -> None:
         payload = json.dumps(body).encode()
         self.send_response(status)
@@ -142,7 +148,12 @@ class Handler(BaseHTTPRequestHandler):
         print(f"inference-stub: {format % args}")
 
 
+class Server(ThreadingHTTPServer):
+    request_queue_size = 128
+    daemon_threads = True
+
+
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("0.0.0.0", 8000), Handler)
+    server = Server(("0.0.0.0", 8000), Handler)
     print("inference-stub listening on :8000")
     server.serve_forever()

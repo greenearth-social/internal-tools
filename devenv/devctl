@@ -231,7 +231,7 @@ cmd_seed() {
   echo "devctl: seed complete (persona: ${persona:-unset})."
   if [[ $api_running -eq 1 ]]; then
     echo "Try a feed:"
-    echo "  devctl feed popularity"
+    echo "  devctl feed"
   else
     # Don't suggest a feed request with nothing to serve it.
     echo "The api isn't running — start it with: devctl up"
@@ -246,12 +246,12 @@ cmd_feed() {
   # path and records a snapshot for the transparency UI), the persona DID, the
   # ES read key, and the Firestore config for the per-post pipeline detail.
   #
-  #   devctl feed popularity
+  #   devctl feed
   #   devctl feed your-feed --user did:plc:... --limit 50 --pages 2
-  #   devctl feed popularity --json      # raw getFeedSkeleton, the old output
+  #   devctl feed --json                 # raw getFeedSkeleton, the old output
   #
   # All arguments pass through to scripts/feed_view.py (feed defaults to
-  # popularity). See feed_view.py --help for the full flag set.
+  # your-feed). See feed_view.py --help for the full flag set.
   compose ps --status running api | grep -q api ||
     die "the api isn't running — start it with: devctl up"
   # Give the viewer a TTY when stdout is a terminal so rich colorizes; drop it
@@ -316,7 +316,7 @@ Usage: devctl <command> [args]
   fetch-fixture  download the published fixture set (no account or auth needed)
   up             start the stack (ES + Firestore emulator + inference stub + api)
   seed           load fixtures: rebase timestamps, ingest posts, load likes
-  feed [feed]    view a hydrated feed in the terminal (default: popularity;
+  feed [feed]    view a hydrated feed in the terminal (default: your-feed;
                  --user <did>, --limit, --pages, --json for raw skeleton)
   login [did]    print a sign-in URL for the frontend as the seeded persona
   status         container status + index doc counts

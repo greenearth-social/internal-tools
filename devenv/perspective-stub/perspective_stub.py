@@ -41,6 +41,15 @@ def attribute_score(text: str, attribute: str) -> float:
 
 
 class Handler(BaseHTTPRequestHandler):
+    # The api scores every candidate in a feed concurrently — a burst of ~100
+    # requests — against a 1s per-request timeout. Two stdlib defaults make
+    # that burst time out even though each response takes milliseconds:
+    # HTTP/1.0 gives no keep-alive, so every score opens its own connection,
+    # and the listen backlog below is only 5, so the rest queue past the
+    # timeout. HTTP/1.1 is safe here because every response sends an accurate
+    # Content-Length.
+    protocol_version = "HTTP/1.1"
+
     def _send(self, status: int, body: dict) -> None:
         payload = json.dumps(body).encode()
         self.send_response(status)
@@ -92,7 +101,14 @@ class Handler(BaseHTTPRequestHandler):
         print(f"perspective-stub: {format % args}")
 
 
+class Server(ThreadingHTTPServer):
+    # See Handler.protocol_version: a feed scores its whole candidate set at
+    # once, so the default backlog of 5 drops the rest of the burst.
+    request_queue_size = 128
+    daemon_threads = True
+
+
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("0.0.0.0", 8000), Handler)
+    server = Server(("0.0.0.0", 8000), Handler)
     print("perspective-stub listening on :8000")
     server.serve_forever()

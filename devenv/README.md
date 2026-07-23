@@ -37,7 +37,7 @@ cd internal-tools/devenv
 ./devctl fetch-fixture   # downloads the published sample (~170MB)
 ./devctl up              # ES + Firebase emulators + inference stub + api + frontend
 ./devctl seed            # rebase timestamps, ingest posts, load likes
-./devctl feed popularity
+./devctl feed
 ```
 
 `devctl feed <feed>` shows a feed in the terminal: it requests
@@ -45,13 +45,13 @@ cd internal-tools/devenv
 post from this environment's Elasticsearch (no AppView call, so it works
 entirely against fixture data), and prints author, timestamp, like count, text,
 and per-post pipeline detail (which generator retrieved it, its rank and ranker
-score). Defaults to the `popularity` feed and the seeded persona.
+score). Defaults to `your-feed` and the seeded persona.
 
 ```bash
-./devctl feed popularity                 # the seeded persona's popularity feed
+./devctl feed                            # the seeded persona's your-feed
 ./devctl feed your-feed --user did:plc:… # a different feed as a chosen persona
 ./devctl feed random --limit 50 --pages 2  # page through more of the feed
-./devctl feed popularity --json          # the raw getFeedSkeleton response
+./devctl feed --json                     # the raw getFeedSkeleton response
 ```
 
 The persona defaults to the fixture manifest's DID (via `.runtime/probe.env`)
@@ -273,7 +273,7 @@ The frontend is a feed-*transparency* UI: it reports on feeds the api has
 already served to you. To put something in it, generate a feed:
 
 ```bash
-devctl feed popularity     # then reload the frontend
+devctl feed                # then reload the frontend
 ```
 
 Two things make that work, both of which are otherwise dead ends locally:
