@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from . import github_project
 
@@ -40,7 +40,7 @@ def test_parse_item_reads_number_field_fallback_and_closed_at():
     )
     item = github_project._parse_item(node)
     assert item.raw_points == 3.0
-    assert item.closed_at == datetime(2026, 6, 16, 10, 0, tzinfo=timezone.utc)
+    assert item.closed_at == datetime(2026, 6, 16, 10, 0, tzinfo=UTC)
 
 
 def test_parse_item_null_issue_type_is_none():

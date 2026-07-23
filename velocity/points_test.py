@@ -1,5 +1,5 @@
-from .conftest import make_item
 from . import points
+from .conftest import make_item
 
 
 def test_blank_type_defaults_to_feature():

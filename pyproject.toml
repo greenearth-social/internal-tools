@@ -1,0 +1,30 @@
+[tool.pytest.ini_options]
+# devenv's scripts are standalone container entrypoints rather than an
+# importable package, so tests import them by name from their own directory
+# (pytest prepends each test file's directory to sys.path). "importmode=prepend"
+# is the default that makes that work; stated here so it isn't changed by
+# accident.
+testpaths = ["velocity", "devenv"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# Notebooks are presentation surfaces, not library code: re-importing a symbol
+# in a later cell and keeping an import around for exploration are normal there
+# but read as errors (F811/F401) to the linter.
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "UP", # pyupgrade
+]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
