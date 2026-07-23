@@ -157,6 +157,7 @@ services:
     image: python:3.13-slim
     command: ["python", "/dev-auth/app.py"]
     environment:
+      - PYTHONUNBUFFERED=1
       - GE_DEV_FUNCTIONS_UPSTREAM=http://firebase:15001
     volumes:
       - ./dev-auth:/dev-auth:ro
@@ -180,6 +181,7 @@ services:
     image: python:3.13-slim
     command: ["python", "/stub/inference_stub.py"]
     environment:
+      - PYTHONUNBUFFERED=1
       - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
     volumes:
       - ./inference-stub:/stub:ro
@@ -199,6 +201,8 @@ services:
   perspective-stub:
     image: python:3.13-slim
     command: ["python", "/stub/perspective_stub.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
     volumes:
       - ./perspective-stub:/stub:ro
     healthcheck:
@@ -230,6 +234,7 @@ services:
         condition: service_healthy
     environment:
       - ENVIRONMENT=local
+      - PYTHONUNBUFFERED=1
       - PIPENV_VENV_IN_PROJECT=1
       # The api checkout may carry a developer's .env (host-machine addresses,
       # real keys); pipenv would auto-load it and override this container
@@ -282,6 +287,8 @@ services:
     image: python:3.13-slim
     profiles: ["tools"]
     command: ["python", "/seedscripts/rebase.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
     volumes:
       - ./seed:/seedscripts:ro
       - ./fixtures/data:/fixtures:ro
@@ -324,6 +331,7 @@ services:
       elasticsearch:
         condition: service_healthy
     environment:
+      - PYTHONUNBUFFERED=1
       - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
     env_file:
       - ./.runtime/es_key_rw.env
@@ -339,6 +347,7 @@ services:
       elasticsearch:
         condition: service_healthy
     environment:
+      - PYTHONUNBUFFERED=1
       - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
     env_file:
       - ./.runtime/es_key_rw.env

@@ -60,7 +60,8 @@ signed-in path and records a snapshot. The viewer is a read-only client — it
 never posts, likes, or writes anything. `--no-pipeline` skips the snapshot
 lookup and shows the feed as a plain client would.
 
-Other commands: `devctl status`, `devctl logs [service]`, `devctl down`
+Other commands: `devctl status`, `devctl logs [service]` (add `-t` to
+follow), `devctl down`
 (stop, keep data), `devctl nuke` (delete everything). Data is disposable by
 design — when in doubt, `nuke` and re-`seed`.
 
@@ -259,7 +260,7 @@ curl -s localhost:5001/greenearth-471522/us-central1/oauthClientMetadata
 curl -s localhost:5001/greenearth-471522/us-central1/oauthJwks
 
 # Per-request function logs, including thrown errors.
-devctl logs firebase
+devctl logs -t firebase
 ```
 
 `authBluesky` names the variable it's missing (`APP_ORIGIN not configured`,
@@ -300,7 +301,7 @@ run `devctl feed` and reload.
 
 | Service | Address | Notes |
 | --- | --- | --- |
-| api | `http://127.0.0.1:8300` | first start runs `pipenv install` into a cached volume — watch `devctl logs api` |
+| api | `http://127.0.0.1:8300` | first start runs `pipenv install` into a cached volume — watch `devctl logs -t api` |
 | Elasticsearch | `http://127.0.0.1:9201` | user `elastic` / `ge-dev-elastic`, or the minted keys |
 | frontend | `http://127.0.0.1:3000` | Vite dev server; first start runs `npm install` |
 | Firestore emulator | `127.0.0.1:8080` | project `greenearth-471522` |
