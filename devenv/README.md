@@ -226,10 +226,12 @@ attach to until one exists.
 | Firestore emulator | `127.0.0.1:8080` | project `greenearth-471522` |
 | Firebase Auth emulator | `127.0.0.1:9099` | |
 | Functions emulator | `127.0.0.1:5001` | |
+| Firebase Emulator UI | `http://127.0.0.1:4000` | browse Firestore data, auth users, function logs |
 
 Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 `GE_DEV_PORT_ES`, `GE_DEV_PORT_FIRESTORE`, `GE_DEV_PORT_FRONTEND`,
-`GE_DEV_PORT_FIREBASE_AUTH`, `GE_DEV_PORT_FUNCTIONS`, `GE_DEV_ES_HEAP`, `GE_DEV_NAME`
+`GE_DEV_PORT_FIREBASE_AUTH`, `GE_DEV_PORT_FUNCTIONS`, `GE_DEV_PORT_FIREBASE_UI`,
+`GE_DEV_ES_HEAP`, `GE_DEV_NAME`
 (compose project name), `GE_DEV_API_RELOAD=1` (uvicorn --reload watch mode).
 
 ## Current limitations (by milestone)

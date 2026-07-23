@@ -28,6 +28,7 @@ ES_PORT="${GE_DEV_PORT_ES:-9201}"
 FIRESTORE_PORT="${GE_DEV_PORT_FIRESTORE:-8080}"
 AUTH_PORT="${GE_DEV_PORT_FIREBASE_AUTH:-9099}"
 FUNCTIONS_PORT="${GE_DEV_PORT_FUNCTIONS:-5001}"
+FIREBASE_UI_PORT="${GE_DEV_PORT_FIREBASE_UI:-4000}"
 FRONTEND_PORT="${GE_DEV_PORT_FRONTEND:-3000}"
 PROBE_SECRET="${GE_DEV_PROBE_SECRET:-ge-dev-probe}"
 
@@ -188,6 +189,7 @@ devctl: environment is up.
   firestore     127.0.0.1:${FIRESTORE_PORT}    (emulator, from the frontend checkout)
   firebase auth 127.0.0.1:${AUTH_PORT}
   functions     127.0.0.1:${FUNCTIONS_PORT}
+  emulator UI   http://127.0.0.1:${FIREBASE_UI_PORT}    (browse Firestore data, auth users, function logs)
 EOF
   # The posts alias doesn't exist until the first seed (the ingest binary
   # creates it, as in prod) — treat a missing alias like an empty index.

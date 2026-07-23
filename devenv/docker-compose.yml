@@ -77,6 +77,10 @@ services:
       - "127.0.0.1:${GE_DEV_PORT_FIRESTORE:-8080}:18080"
       - "127.0.0.1:${GE_DEV_PORT_FIREBASE_AUTH:-9099}:19099"
       - "127.0.0.1:${GE_DEV_PORT_FUNCTIONS:-5001}:15001"
+      - "127.0.0.1:${GE_DEV_PORT_FIREBASE_UI:-4000}:14000"
+      # The UI loads from 4000 but its Firestore viewer opens a
+      # websocket straight to 9150, so that has to be reachable too.
+      - "127.0.0.1:${GE_DEV_PORT_FIREBASE_UI_WS:-9150}:19150"
     volumes:
       - ./firebase:/firebase:ro
       - ${GE_DEV_REPO_ROOT:-../..}/frontend:/frontend

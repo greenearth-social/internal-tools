@@ -33,6 +33,10 @@ node /firebase/derive-config.mjs "$FRONTEND_DIR" "$DERIVED_CONFIG"
 socat TCP-LISTEN:18080,fork,reuseaddr TCP:127.0.0.1:8080 &
 socat TCP-LISTEN:19099,fork,reuseaddr TCP:127.0.0.1:9099 &
 socat TCP-LISTEN:15001,fork,reuseaddr TCP:127.0.0.1:5001 &
+# The Emulator UI (4000) and the Firestore data viewer's websocket
+# (9150) are browser-facing too, so they need the same treatment.
+socat TCP-LISTEN:14000,fork,reuseaddr TCP:127.0.0.1:4000 &
+socat TCP-LISTEN:19150,fork,reuseaddr TCP:127.0.0.1:9150 &
 
 # The Functions emulator loads functions/lib (package main), so the
 # TypeScript has to be compiled before the emulator starts.
