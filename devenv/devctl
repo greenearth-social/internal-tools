@@ -155,7 +155,7 @@ c = m["counts"]
 print(f"devctl: fetched {c['posts']:,} posts / {c['likes']:,} likes "
       f"(window ends {m['window_end']}, source {m['source']})")
 PY
-  echo "Next: devctl seed"
+  echo "Next: devctl up && devctl seed"
 }
 
 # ---------------------------------------------------------------------------
@@ -210,6 +210,9 @@ cmd_seed() {
   check_docker
   ensure_runtime
   have_fixtures || { fixtures_hint; exit 1; }
+  local rw_key
+  rw_key="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$DEVENV_DIR/.runtime/es_key_rw.env")"
+  [[ -n "$rw_key" ]] || die "no ES key yet — run: devctl up"
   echo "devctl: wiping previously seeded data..."
   compose run --rm seed-wipe
   echo "devctl: rebasing fixture timestamps..."
