@@ -2,7 +2,8 @@
 
 A cohesive, agent-friendly local development environment for the Green Earth
 serving stack ([api#268](https://github.com/greenearth-social/api/issues/268)).
-One Docker Compose project runs Elasticsearch, the Firestore emulator, the api,
+One Docker Compose project runs Elasticsearch, the Firebase emulators, the api,
+the frontend,
 and (for now) an inference stub, seeded with representative Bluesky data — no
 GCP, Firebase, or production credentials required.
 
@@ -34,7 +35,7 @@ cd internal-tools/devenv
 
 ./devctl setup           # checks prerequisites, builds/pulls images
 ./devctl fetch-fixture   # downloads the published sample (~170MB)
-./devctl up              # ES + Firestore emulator + inference stub + api
+./devctl up              # ES + Firebase emulators + inference stub + api + frontend
 ./devctl seed            # rebase timestamps, ingest posts, load likes
 ./devctl feed popularity
 ```
@@ -149,16 +150,86 @@ mints two ES API keys mirroring prod's split: read-only for the api,
 read-write for ingest/seed (written to `.runtime/es_key_*.env`). The api
 authenticates to ES exactly as it does in prod.
 
+## The frontend and Firebase
+
+`devctl up` runs the frontend's Vite dev server and the Firebase emulator suite
+(Firestore, Auth, Functions). The emulators are started **from the frontend
+checkout**, so the rules and function code under test are the ones that repo
+deploys — the api repo's Firebase config is being retired
+([frontend#42](https://github.com/greenearth-social/frontend/issues/42)) and
+isn't used here.
+
+Two adaptations are made at startup, both in `firebase/`:
+
+- **A derived emulator config.** The frontend declares `firestore` as an array
+  of named databases for deployment. The Firestore emulator doesn't support
+  multiple databases and silently ignores that shape — it logs "Did not find a
+  Cloud Firestore rules file" and then *allows all reads and writes*. So
+  `firebase/derive-config.mjs` collapses it to the single database the
+  emulator supports, still pointing at the frontend's own `firestore.rules`.
+  The result is written to `frontend/firebase.devenv.json` (the CLI insists
+  referenced paths sit beside the config), regenerated on every start and
+  removed by `devctl down`/`nuke`.
+- **Port bridging.** The emulators bind loopback inside their container, which
+  Docker can't publish. socat re-exposes them, and the *host* ports are
+  exactly 8080/9099/5001 because the frontend's Firebase SDK hardcodes
+  `127.0.0.1` at those numbers and runs in your browser.
+
+Firestore rules are genuinely enforced here (an unauthenticated read gets a
+403), unlike the bare emulator this replaced, which allowed everything.
+Indices are **not** applied: they haven't moved out of the api repo yet, so a
+query needing a composite index can still pass locally and fail deployed.
+
+### Signing in
+
+`VITE_USE_MOCK_SERVICES=true` is the frontend's own default and what devenv
+uses: the full UI with hardcoded data, no backend needed. To drive the seeded
+api instead, set `GE_DEV_FRONTEND_MOCK=false` in `devenv.local.env`, then:
+
+```bash
+./devctl login          # prints a sign-in URL for the seeded persona
+```
+
+Real sign-in means completing Bluesky OAuth, which needs private keys this
+environment deliberately doesn't carry. The Auth emulator accepts *unsigned*
+custom tokens, so `devctl login` mints one for the seeded persona and hands it
+to the app's own `#/auth/finish` route — the same entry point the real OAuth
+callback uses. The token lasts an hour; re-run for a fresh one. It only works
+against an emulator.
+
+### What the frontend can and can't show
+
+The frontend is a feed-*transparency* UI. Its feed list reads `feed_snapshots`
+for the **`your-feed`** feed from the last 15 minutes, and that pipeline runs
+the `perspective` ranker, which hard-fails without `GE_PERSPECTIVE_API_KEY`
+(Google's Perspective API). So in real mode the app authenticates and reaches
+the api correctly, but the list is empty until either:
+
+- you set `GE_PERSPECTIVE_API_KEY` in `devenv.local.env`, or
+- the real inference service lands
+  ([api#269](https://github.com/greenearth-social/api/issues/269)) and the
+  feed's other ML rankers work.
+
+Separately, `_record_session` in the api abandons its user/activity upsert when
+it can't resolve the caller's handle on the live network — which pseudonymized
+personas never can (see Pseudonymization above). So no `users` document is
+created automatically, and `scripts/feed_debug.py --enable` has nothing to
+attach to until one exists.
+
 ## Service endpoints (defaults)
 
 | Service | Address | Notes |
 | --- | --- | --- |
 | api | `http://127.0.0.1:8300` | first start runs `pipenv install` into a cached volume — watch `devctl logs api` |
 | Elasticsearch | `http://127.0.0.1:9201` | user `elastic` / `ge-dev-elastic`, or the minted keys |
-| Firestore emulator | `127.0.0.1:8086` | project `demo-no-project` |
+| frontend | `http://127.0.0.1:3000` | Vite dev server; first start runs `npm install` |
+| Firestore emulator | `127.0.0.1:8080` | project `greenearth-471522` |
+| Firebase Auth emulator | `127.0.0.1:9099` | |
+| Functions emulator | `127.0.0.1:5001` | |
 
 Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
-`GE_DEV_PORT_ES`, `GE_DEV_PORT_FIRESTORE`, `GE_DEV_ES_HEAP`, `GE_DEV_NAME`
+`GE_DEV_PORT_ES`, `GE_DEV_PORT_FIRESTORE`, `GE_DEV_PORT_FRONTEND`,
+`GE_DEV_PORT_FIREBASE_AUTH`, `GE_DEV_PORT_FUNCTIONS`, `GE_DEV_ES_HEAP`, `GE_DEV_NAME`
 (compose project name), `GE_DEV_API_RELOAD=1` (uvicorn --reload watch mode).
 
 ## Current limitations (by milestone)

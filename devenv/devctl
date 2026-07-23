@@ -25,7 +25,10 @@ FIXTURE_REPO="${GE_DEV_FIXTURE_REPO:-greenearth-social/internal-tools}"
 FIXTURE_ASSET="ge-dev-fixture.tar"
 API_PORT="${GE_DEV_PORT_API:-8300}"
 ES_PORT="${GE_DEV_PORT_ES:-9201}"
-FIRESTORE_PORT="${GE_DEV_PORT_FIRESTORE:-8086}"
+FIRESTORE_PORT="${GE_DEV_PORT_FIRESTORE:-8080}"
+AUTH_PORT="${GE_DEV_PORT_FIREBASE_AUTH:-9099}"
+FUNCTIONS_PORT="${GE_DEV_PORT_FUNCTIONS:-5001}"
+FRONTEND_PORT="${GE_DEV_PORT_FRONTEND:-3000}"
 PROBE_SECRET="${GE_DEV_PROBE_SECRET:-ge-dev-probe}"
 
 compose() {
@@ -48,7 +51,7 @@ check_docker() {
 check_repos() {
   local missing=0
   local repo
-  for repo in api ingex; do
+  for repo in api ingex frontend; do
     if [[ ! -e "$GE_DEV_REPO_ROOT/$repo/.git" ]]; then
       echo "devctl: required repo missing: $GE_DEV_REPO_ROOT/$repo" >&2
       echo "        clone it: git clone git@github.com:greenearth-social/$repo.git \"$GE_DEV_REPO_ROOT/$repo\"" >&2
@@ -56,7 +59,7 @@ check_repos() {
     fi
   done
   [[ $missing -eq 0 ]] || die "missing required repos (or set GE_DEV_REPO_ROOT to the directory that contains them)"
-  for repo in inference-service engagement-prediction frontend; do
+  for repo in inference-service engagement-prediction; do
     if [[ ! -e "$GE_DEV_REPO_ROOT/$repo/.git" ]]; then
       echo "devctl: note: optional repo not checked out: $GE_DEV_REPO_ROOT/$repo" >&2
     fi
@@ -162,8 +165,8 @@ cmd_setup() {
   check_repos
   ensure_runtime
   echo "devctl: pulling and building images (first run takes a few minutes)..."
-  compose --profile tools build es-init api
-  compose --profile tools pull elasticsearch firestore inference-stub seed-rebase seed-megastream --ignore-buildable
+  compose --profile tools build es-init api firebase frontend
+  compose --profile tools pull elasticsearch inference-stub seed-rebase seed-megastream --ignore-buildable
   echo "devctl: setup complete."
   have_fixtures || fixtures_hint
   echo "Next: devctl up && devctl seed"
@@ -173,15 +176,18 @@ cmd_up() {
   check_docker
   check_repos
   ensure_runtime
-  compose up -d elasticsearch firestore inference-stub
+  compose up -d elasticsearch firebase inference-stub
   echo "devctl: initializing Elasticsearch (templates, indexes, API keys)..."
   compose run --rm es-init
-  compose up -d api
+  compose up -d api frontend
   cat <<EOF
 devctl: environment is up.
+  frontend      http://127.0.0.1:${FRONTEND_PORT}    (first start installs deps; watch: devctl logs frontend)
   api           http://127.0.0.1:${API_PORT}    (first start installs deps; watch: devctl logs api)
   elasticsearch http://127.0.0.1:${ES_PORT}    (user elastic / ${GE_DEV_ES_PASSWORD:-ge-dev-elastic})
-  firestore     127.0.0.1:${FIRESTORE_PORT}
+  firestore     127.0.0.1:${FIRESTORE_PORT}    (emulator, from the frontend checkout)
+  firebase auth 127.0.0.1:${AUTH_PORT}
+  functions     127.0.0.1:${FUNCTIONS_PORT}
 EOF
   # The posts alias doesn't exist until the first seed (the ingest binary
   # creates it, as in prod) — treat a missing alias like an empty index.
@@ -241,6 +247,29 @@ cmd_feed() {
   fi
 }
 
+cmd_login() {
+  # Signing in normally means completing Bluesky OAuth, which needs private
+  # keys a credential-free environment doesn't have. The Auth emulator accepts
+  # unsigned custom tokens, so we mint one for the seeded persona and hand it
+  # to the app's own #/auth/finish route — the same entry point the real OAuth
+  # callback redirects to. See firebase/mint_token.py.
+  local persona token
+  persona="${1:-$(sed -n 's/^GE_PROBE_USER_DID=//p' "$DEVENV_DIR/.runtime/probe.env")}"
+  [[ -n "$persona" ]] ||
+    die "no seeded persona found — run: devctl seed (or pass a did:plc:... explicitly)"
+
+  token="$(python3 "$DEVENV_DIR/firebase/mint_token.py" "$persona")" || exit 1
+
+  cat <<EOF
+devctl: open this to sign in as the seeded persona ($persona):
+
+  http://127.0.0.1:${FRONTEND_PORT}/#/auth/finish?token=${token}
+
+The token is unsigned and only works against the Auth emulator. It expires in
+an hour; re-run devctl login for a fresh one.
+EOF
+}
+
 cmd_status() {
   compose ps
   echo
@@ -256,6 +285,7 @@ cmd_status() {
 cmd_nuke() {
   compose down -v --remove-orphans
   rm -rf "$DEVENV_DIR/.runtime"
+  rm -f "$GE_DEV_REPO_ROOT/frontend/firebase.devenv.json"
   echo "devctl: all containers, data volumes, and runtime state removed."
 }
 
@@ -270,6 +300,7 @@ Usage: devctl <command> [args]
   up             start the stack (ES + Firestore emulator + inference stub + api)
   seed           load fixtures: rebase timestamps, ingest posts, load likes
   feed [rkey]    fetch a feed skeleton from the local api (default: random)
+  login [did]    print a sign-in URL for the frontend as the seeded persona
   status         container status + index doc counts
   logs [svc...]  follow logs (all services or the named ones)
   down           stop containers (data volumes survive)
@@ -291,9 +322,13 @@ fetch-fixture) cmd_fetch_fixture "$@" ;;
 up) cmd_up "$@" ;;
 seed) cmd_seed "$@" ;;
 feed) cmd_feed "$@" ;;
+login) cmd_login "$@" ;;
 status | ps) cmd_status "$@" ;;
 logs) compose logs -f --tail=100 "$@" ;;
-down) compose down ;;
+down)
+  compose down
+  rm -f "$GE_DEV_REPO_ROOT/frontend/firebase.devenv.json"
+  ;;
 nuke) cmd_nuke "$@" ;;
 "" | help | -h | --help) usage ;;
 *) die "unknown command: $cmd (try: devctl help)" ;;
