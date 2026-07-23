@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 
 from . import points
 from .models import ProjectItem, in_backlog
-from .velocity import current_week_start, weekly_completed_points
+from .velocity import current_date, current_week_start, week_start, weekly_completed_points
 
 DEFAULT_HISTORY_WEEKS = 8  # ~2 months
 
@@ -71,6 +71,36 @@ def project_burndown(
     ]
 
 
+def assign_tasks_to_dates(
+    backlog_in_priority_order: list[ProjectItem],
+    velocity: float,
+    now: datetime | None = None,
+) -> list[tuple[date, ProjectItem]]:
+    """Project the specific day each backlog item is reached.
+
+    Walks the backlog in priority order, assuming work burns down evenly at
+    ``velocity`` points per week from the start of the current week: an item is
+    reached ``7 * cumulative / velocity`` days in. An exact week boundary counts
+    as the last day of that week, which keeps every date inside the week
+    :func:`assign_tasks_to_weeks` would pick. Zero-point items (bugs, release
+    markers) don't consume capacity, so they land wherever the cursor sits.
+    Dates are never projected into the past.
+    """
+    start = current_week_start(now)
+    today = current_date(now)
+    assignments: list[tuple[date, ProjectItem]] = []
+    cumulative = 0
+    for item in backlog_in_priority_order:
+        cumulative += points.normalize(item)
+        if velocity <= 0:
+            day = start
+        else:
+            offset = max(math.ceil(7 * cumulative / velocity) - 1, 0)
+            day = start + timedelta(days=offset)
+        assignments.append((max(day, today), item))
+    return assignments
+
+
 def assign_tasks_to_weeks(
     backlog_in_priority_order: list[ProjectItem],
     velocity: float,
@@ -78,22 +108,13 @@ def assign_tasks_to_weeks(
 ) -> list[tuple[date, ProjectItem]]:
     """Project which week each backlog task is completed in.
 
-    Walks the backlog in priority order, treating each week as ``velocity``
-    points of capacity; a task is assigned to the week in which its cumulative
-    point total finishes. Zero-point bugs don't consume capacity, so they ride
-    along in whatever week the cursor currently sits.
+    Derived from :func:`assign_tasks_to_dates` so the week always contains the
+    item's projected day.
     """
-    start = current_week_start(now)
-    assignments: list[tuple[date, ProjectItem]] = []
-    cumulative = 0
-    for item in backlog_in_priority_order:
-        cumulative += points.normalize(item)
-        if velocity <= 0:
-            week_index = 1
-        else:
-            week_index = max(math.ceil(cumulative / velocity - 1e-9), 1)
-        assignments.append((start + timedelta(days=7 * (week_index - 1)), item))
-    return assignments
+    return [
+        (week_start(day), item)
+        for day, item in assign_tasks_to_dates(backlog_in_priority_order, velocity, now)
+    ]
 
 
 def upcoming_weeks(
@@ -125,14 +146,14 @@ def release_marker_dates(
     velocity: float,
     now: datetime | None = None,
 ) -> list[tuple[date, ProjectItem]]:
-    """Projected release date for each release marker in the backlog.
+    """Projected release date (specific day) for each release marker.
 
-    A marker itself is worth 0 points, so its assigned week is exactly the week
-    all higher-priority work above it is projected to finish. Returned in
-    backlog (priority) order.
+    A marker itself is worth 0 points, so its date is exactly the day all
+    higher-priority work above it is projected to finish. Returned in backlog
+    (priority) order.
     """
     return [
-        (wk, item)
-        for wk, item in assign_tasks_to_weeks(backlog_in_priority_order, velocity, now)
+        (day, item)
+        for day, item in assign_tasks_to_dates(backlog_in_priority_order, velocity, now)
         if points.is_release_marker(item)
     ]
