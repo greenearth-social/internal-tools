@@ -1,6 +1,8 @@
 import base64
 import datetime as dt
+import email.message
 import gzip
+import io
 import json
 import re
 import sqlite3
@@ -9,6 +11,7 @@ import zipfile
 import zlib
 
 import generate_sample as gs
+import pytest
 
 
 def _like(author="did:plc:liker00000000000000000", subject_author="did:plc:author0000000000000000"):
@@ -262,3 +265,93 @@ def test_regenerating_into_a_directory_clears_old_chunks(tmp_path, monkeypatch):
     gs.write_fixture_set(tmp_path, "prod-es", _posts(2), [], [], [], *args)
 
     assert len(list(tmp_path.glob("*.db.zip"))) == 1
+
+
+# --------------------------------------------------------------------------
+# ES transport retries
+#
+# A prod-es run is tens of minutes of requests over a kubectl port-forward,
+# which drops connections routinely. These guard that a blip costs a retry
+# rather than the whole run.
+# --------------------------------------------------------------------------
+
+
+def _es_client(monkeypatch):
+    monkeypatch.setenv("GE_ELASTICSEARCH_URL", "https://localhost:9200")
+    monkeypatch.setenv("GE_ELASTICSEARCH_API_KEY", "k")
+    return gs.EsClient()
+
+
+def test_search_retries_a_dropped_connection_and_succeeds(monkeypatch):
+    client = _es_client(monkeypatch)
+    monkeypatch.setattr(gs.time, "sleep", lambda _: None)
+    calls = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"hits": {"hits": []}}'
+
+    def fake_urlopen(*_a, **_k):
+        calls.append(1)
+        if len(calls) < 3:
+            raise ConnectionResetError("connection reset by peer")
+        return _Resp()
+
+    monkeypatch.setattr(gs.urllib.request, "urlopen", fake_urlopen)
+    assert client.search("posts", {}) == {"hits": {"hits": []}}
+    assert len(calls) == 3
+
+
+def test_search_gives_up_after_max_attempts(monkeypatch):
+    client = _es_client(monkeypatch)
+    monkeypatch.setattr(gs.time, "sleep", lambda _: None)
+
+    def always_reset(*_a, **_k):
+        raise ConnectionResetError("connection reset by peer")
+
+    monkeypatch.setattr(gs.urllib.request, "urlopen", always_reset)
+    with pytest.raises(SystemExit) as exc:
+        client.search("posts", {})
+    assert "after" in str(exc.value)
+
+
+def test_search_does_not_retry_a_client_error(monkeypatch):
+    # A 4xx is a real answer (bad key, bad query); retrying repeats the same
+    # mistake slowly instead of failing fast.
+    client = _es_client(monkeypatch)
+    monkeypatch.setattr(gs.time, "sleep", lambda _: None)
+    calls = []
+
+    def unauthorized(*_a, **_k):
+        calls.append(1)
+        raise gs.urllib.error.HTTPError(
+            "u", 401, "Unauthorized", email.message.Message(), io.BytesIO(b"nope")
+        )
+
+    monkeypatch.setattr(gs.urllib.request, "urlopen", unauthorized)
+    with pytest.raises(SystemExit):
+        client.search("posts", {})
+    assert len(calls) == 1
+
+
+def test_search_retries_a_gateway_error(monkeypatch):
+    client = _es_client(monkeypatch)
+    monkeypatch.setattr(gs.time, "sleep", lambda _: None)
+    calls = []
+
+    def bad_gateway(*_a, **_k):
+        calls.append(1)
+        raise gs.urllib.error.HTTPError(
+            "u", 503, "Unavailable", email.message.Message(), io.BytesIO(b"busy")
+        )
+
+    monkeypatch.setattr(gs.urllib.request, "urlopen", bad_gateway)
+    with pytest.raises(SystemExit):
+        client.search("posts", {})
+    assert len(calls) == gs.ES_MAX_ATTEMPTS

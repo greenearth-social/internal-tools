@@ -66,6 +66,7 @@ import argparse
 import base64
 import datetime as dt
 import gzip
+import http.client
 import json
 import os
 import random
@@ -74,6 +75,7 @@ import ssl
 import struct
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -85,6 +87,10 @@ EMBED_MODEL = "all-MiniLM-L12-v2"
 EMBED_FIELD = "embeddings.all_MiniLM_L12_v2"
 EMBED_DIMS = 384
 CHUNK_ROWS = 20_000
+# Transport retries for the port-forwarded prod ES (see EsClient.search).
+ES_MAX_ATTEMPTS = 6
+ES_BACKOFF_CAP = 30
+ES_RETRY_STATUS = frozenset({502, 503, 504, 429})
 TID_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz"
 
 
@@ -285,6 +291,16 @@ class EsClient:
             self.ctx = ssl._create_unverified_context()  # noqa: SLF001 - dev tooling, port-forwarded ES
 
     def search(self, index: str, body: dict) -> dict:
+        """One _search, retrying transport failures.
+
+        A full prod-es run is tens of minutes of requests over a kubectl
+        port-forward, which drops connections routinely ("connection reset by
+        peer"). Without retries a single blip 20 minutes in throws the whole
+        run away, so transport errors and the gateway-ish 5xx codes back off
+        and retry. A 4xx is a real answer from ES — bad key, bad query — and
+        retrying it would just repeat the same mistake slowly, so those still
+        exit immediately.
+        """
         req = urllib.request.Request(
             f"{self.url}/{index}/_search",
             method="POST",
@@ -294,11 +310,33 @@ class EsClient:
                 "Content-Type": "application/json",
             },
         )
-        try:
-            with urllib.request.urlopen(req, timeout=120, context=self.ctx) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            sys.exit(f"FATAL: ES search on {index} -> {e.code}: {e.read()[:2000]}")
+        last_error = ""
+        for attempt in range(ES_MAX_ATTEMPTS):
+            try:
+                with urllib.request.urlopen(req, timeout=120, context=self.ctx) as resp:
+                    return json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                if e.code not in ES_RETRY_STATUS:
+                    sys.exit(f"FATAL: ES search on {index} -> {e.code}: {e.read()[:2000]}")
+                last_error = f"HTTP {e.code}"
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                ConnectionError,
+                http.client.HTTPException,
+            ) as e:
+                last_error = f"{type(e).__name__}: {e}"
+            if attempt < ES_MAX_ATTEMPTS - 1:
+                delay = min(ES_BACKOFF_CAP, 2**attempt)
+                print(
+                    f"  ES {last_error} on {index}; retry "
+                    f"{attempt + 1}/{ES_MAX_ATTEMPTS - 1} in {delay}s",
+                    flush=True,
+                )
+                time.sleep(delay)
+        sys.exit(
+            f"FATAL: ES search on {index} failed after {ES_MAX_ATTEMPTS} attempts: {last_error}"
+        )
 
     def scan(self, index: str, query: dict, source: list[str], page_size: int = 1000):
         """search_after scan sorted by (created_at, at_uri)."""
