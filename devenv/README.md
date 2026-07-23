@@ -32,15 +32,11 @@ If your layout differs, set `GE_DEV_REPO_ROOT=<parent>` in
 ```bash
 cd internal-tools/devenv
 
-./devctl setup     # checks prerequisites, builds/pulls images
-
-# Get a fixture set (pick one):
-python3 fixtures/generate_sample.py --source megastream-files   # no creds needed
-python3 fixtures/generate_sample.py --source prod-es            # real data; see below
-
-./devctl up        # ES + Firestore emulator + inference stub + api
-./devctl seed      # rebase timestamps, ingest posts, load likes
-./devctl feed random
+./devctl setup           # checks prerequisites, builds/pulls images
+./devctl fetch-fixture   # downloads the published sample (~170MB)
+./devctl up              # ES + Firestore emulator + inference stub + api
+./devctl seed            # rebase timestamps, ingest posts, load likes
+./devctl feed popularity
 ```
 
 `devctl feed <rkey>` fetches `getFeedSkeleton` from the local api as the
@@ -53,11 +49,29 @@ design — when in doubt, `nuke` and re-`seed`.
 
 ## Fixtures
 
+Normally you don't generate a fixture — `devctl fetch-fixture` downloads the
+published one (a real ~130k-post prod sample) from this repo's GitHub
+Releases and unpacks it into `fixtures/data/`. It needs the `gh` CLI and
+access to this repo, since it's private.
+
+Fixtures ride as release assets rather than being committed: they're large
+compressed binaries that get regenerated periodically, and git can't delta
+them, so each generation would add ~170 MB to every clone forever. Releases
+can be deleted when they go stale; git history can't.
+
+A seeded environment keeps working indefinitely no matter how old the release
+is — seeding rebases every timestamp so the window always ends an hour before
+now (see below). Replace the published fixture when its *content* gets stale
+enough to matter.
+
+### Generating your own
+
 `fixtures/generate_sample.py` is the committed, parameterized generator — what
 makes a good sample is encoded in it (contiguous window, cohort-densified
 likes, hydrated danglers, dev personas; see its docstring). Output goes to
 `fixtures/data/` (gitignored): megastream-format `.db.zip` post chunks,
-`likes.jsonl.gz`, `like_counts.jsonl.gz`, and `manifest.json`.
+`likes.jsonl.gz`, `like_counts.jsonl.gz`, and `manifest.json`. Publish a fresh
+one for the team with `fixtures/publish_fixture.sh`.
 
 - `--source prod-es` samples a real cluster. A read-only key is enough. For
   prod, port-forward first

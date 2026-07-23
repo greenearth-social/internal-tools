@@ -21,6 +21,8 @@ if [[ -f "$DEVENV_DIR/devenv.local.env" ]]; then
 fi
 
 export GE_DEV_REPO_ROOT="${GE_DEV_REPO_ROOT:-$(cd "$DEVENV_DIR/../.." && pwd)}"
+FIXTURE_REPO="${GE_DEV_FIXTURE_REPO:-greenearth-social/internal-tools}"
+FIXTURE_ASSET="ge-dev-fixture.tar"
 API_PORT="${GE_DEV_PORT_API:-8300}"
 ES_PORT="${GE_DEV_PORT_ES:-9201}"
 FIRESTORE_PORT="${GE_DEV_PORT_FIRESTORE:-8086}"
@@ -85,17 +87,58 @@ have_fixtures() {
 fixtures_hint() {
   cat >&2 <<EOF
 
-No fixture set found in devenv/fixtures/data/. Generate one:
+No fixture set found in devenv/fixtures/data/. Get one:
 
-  # From real data (needs read-only prod ES access, port-forwarded):
+  # Download the published sample (what you usually want):
+  devctl fetch-fixture
+
+  # Or generate your own from real data (needs read-only prod ES,
+  # port-forwarded — see README):
   python3 $DEVENV_DIR/fixtures/generate_sample.py --source prod-es
 
-  # Without any credentials (uses ingex's checked-in sample files,
-  # synthesizes the like graph):
+  # Or without any credentials (uses ingex's checked-in sample files
+  # and synthesizes the like graph):
   python3 $DEVENV_DIR/fixtures/generate_sample.py --source megastream-files
 
 Then run: devctl seed
 EOF
+}
+
+cmd_fetch_fixture() {
+  command -v gh >/dev/null ||
+    die "the gh CLI is required to download fixtures (https://cli.github.com/)"
+
+  local tag
+  tag="$(gh release list --repo "$FIXTURE_REPO" --limit 50 --json tagName \
+    -q '[.[] | select(.tagName | startswith("fixture-"))] | first | .tagName' 2>/dev/null || true)"
+  if [[ -z "$tag" || "$tag" == "null" ]]; then
+    die "no fixture release found in $FIXTURE_REPO — generate a set locally (see devctl help) or publish one with fixtures/publish_fixture.sh"
+  fi
+
+  local workdir
+  workdir="$(mktemp -d)"
+  # shellcheck disable=SC2064  # expand workdir now, not at trap time
+  trap "rm -rf '$workdir'" RETURN
+
+  echo "devctl: downloading fixture release $tag (~170MB)..."
+  gh release download "$tag" --repo "$FIXTURE_REPO" \
+    --pattern "$FIXTURE_ASSET" --dir "$workdir" ||
+    die "download failed (private repo — is 'gh auth login' done and do you have access?)"
+
+  # Replace rather than merge: mixing chunks from different samples would give
+  # the seed an inconsistent post/like graph.
+  rm -rf "$DEVENV_DIR/fixtures/data"
+  mkdir -p "$DEVENV_DIR/fixtures/data"
+  tar -xf "$workdir/$FIXTURE_ASSET" -C "$DEVENV_DIR/fixtures/data"
+
+  python3 - "$DEVENV_DIR/fixtures/data/manifest.json" <<'PY'
+import json, sys, pathlib
+m = json.loads(pathlib.Path(sys.argv[1]).read_text())
+c = m["counts"]
+print(f"devctl: fetched {c['posts']:,} posts / {c['likes']:,} likes "
+      f"(window ends {m['window_end']}, source {m['source']})")
+PY
+  echo "Next: devctl seed"
 }
 
 # ---------------------------------------------------------------------------
@@ -202,6 +245,7 @@ devctl — Green Earth local dev environment
 Usage: devctl <command> [args]
 
   setup          check prerequisites (docker, sibling repos), build/pull images
+  fetch-fixture  download the published fixture set (needs gh; repo access)
   up             start the stack (ES + Firestore emulator + inference stub + api)
   seed           load fixtures: rebase timestamps, ingest posts, load likes
   feed [rkey]    fetch a feed skeleton from the local api (default: random)
@@ -210,7 +254,8 @@ Usage: devctl <command> [args]
   down           stop containers (data volumes survive)
   nuke           stop and delete everything (volumes, minted keys, seed state)
 
-Fixtures: see fixtures/generate_sample.py (committed generator, two modes).
+Fixtures: fetch-fixture downloads a published set; fixtures/generate_sample.py
+generates your own (two modes), fixtures/publish_fixture.sh publishes one.
 Config overrides go in devenv.local.env (ports, ES heap, repo root).
 EOF
 }
@@ -221,6 +266,7 @@ cmd="${1:-}"
 [[ -n "$cmd" ]] && shift || true
 case "$cmd" in
 setup) cmd_setup "$@" ;;
+fetch-fixture) cmd_fetch_fixture "$@" ;;
 up) cmd_up "$@" ;;
 seed) cmd_seed "$@" ;;
 feed) cmd_feed "$@" ;;
