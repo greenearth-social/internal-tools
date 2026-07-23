@@ -51,8 +51,8 @@ design — when in doubt, `nuke` and re-`seed`.
 
 Normally you don't generate a fixture — `devctl fetch-fixture` downloads the
 published one (a real ~130k-post prod sample) from this repo's GitHub
-Releases and unpacks it into `fixtures/data/`. It needs the `gh` CLI and
-access to this repo, since it's private.
+Releases and unpacks it into `fixtures/data/`. It's a plain HTTPS download
+from a public repo: no GitHub account, no auth, no extra tooling.
 
 Fixtures ride as release assets rather than being committed: they're large
 compressed binaries that get regenerated periodically, and git can't delta
@@ -63,6 +63,39 @@ A seeded environment keeps working indefinitely no matter how old the release
 is — seeding rebases every timestamp so the window always ends an hour before
 now (see below). Replace the published fixture when its *content* gets stale
 enough to matter.
+
+### Pseudonymized liker identities
+
+**Post content and post author DIDs in the fixture are real. Liker DIDs are
+not** — every liker is replaced by a synthetic `did:plc`, consistently across
+the like documents, the like `at_uri`s, and the manifest personas.
+
+Why: cohort densification deliberately captures each cohort member's *complete*
+like history, so a real-DID fixture would be a per-person interest profile —
+and this one is a public download that can't honor later deletions the way
+prod's tombstones do. Individually public likes become a different artifact
+when aggregated, frozen, and published.
+
+The like graph is preserved exactly (who liked what, how densely, in what
+order), which is everything the dev environment needs. Personas behave
+identically; the api just can't resolve their handles, exactly as with
+synthetic fixtures.
+
+**The mapping is irreversible on purpose** — SHA-256 under a random salt
+generated per run and never stored. A plain hash would be worthless here,
+since `did:plc` identifiers are public and enumerable from the firehose:
+anyone could hash the whole DID space and look ours up. Discarding the salt
+is what prevents that.
+
+**Consequence, worth knowing before you need it:** you cannot map a fixture
+DID back to a real user, ever — including for legitimate work like "whose
+likes are these?" or investigating a specific author's like behavior. If you
+need real identities, generate a private fixture with `--no-pseudonymize`,
+use it locally, and don't publish it. `publish_fixture.sh` refuses to upload
+one, and its `manifest.json` records `pseudonymized: false` so the file itself
+declares what it is. A durable answer for that use case — a held mapping
+table, or querying prod directly — isn't built, and would need designing
+along with its own handling of the deletion problem.
 
 ### Generating your own
 

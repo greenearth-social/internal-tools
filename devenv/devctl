@@ -105,14 +105,27 @@ EOF
 }
 
 cmd_fetch_fixture() {
-  command -v gh >/dev/null ||
-    die "the gh CLI is required to download fixtures (https://cli.github.com/)"
+  # Deliberately curl + the public releases API rather than the gh CLI: the
+  # repo is public, so a fresh clone can fetch a fixture with no GitHub
+  # account, no auth, and no extra tooling installed.
+  command -v curl >/dev/null || die "curl is required to download fixtures"
+  command -v python3 >/dev/null || die "python3 is required to download fixtures"
 
   local tag
-  tag="$(gh release list --repo "$FIXTURE_REPO" --limit 50 --json tagName \
-    -q '[.[] | select(.tagName | startswith("fixture-"))] | first | .tagName' 2>/dev/null || true)"
-  if [[ -z "$tag" || "$tag" == "null" ]]; then
-    die "no fixture release found in $FIXTURE_REPO — generate a set locally (see devctl help) or publish one with fixtures/publish_fixture.sh"
+  tag="$(curl -fsSL "https://api.github.com/repos/$FIXTURE_REPO/releases?per_page=50" 2>/dev/null |
+    python3 -c "
+import json, sys
+try:
+    releases = json.load(sys.stdin)
+except json.JSONDecodeError:
+    sys.exit(0)
+tags = [r['tag_name'] for r in releases
+        if isinstance(r, dict) and r.get('tag_name', '').startswith('fixture-')]
+print(tags[0] if tags else '')
+" 2>/dev/null || true)"
+  if [[ -z "$tag" ]]; then
+    die "no fixture release found in $FIXTURE_REPO (or GitHub is unreachable / rate-limiting).
+Generate a set locally instead — see: devctl help"
   fi
 
   local workdir
@@ -121,9 +134,10 @@ cmd_fetch_fixture() {
   trap "rm -rf '$workdir'" RETURN
 
   echo "devctl: downloading fixture release $tag (~170MB)..."
-  gh release download "$tag" --repo "$FIXTURE_REPO" \
-    --pattern "$FIXTURE_ASSET" --dir "$workdir" ||
-    die "download failed (private repo — is 'gh auth login' done and do you have access?)"
+  curl -fL --progress-bar \
+    "https://github.com/$FIXTURE_REPO/releases/download/$tag/$FIXTURE_ASSET" \
+    -o "$workdir/$FIXTURE_ASSET" ||
+    die "download failed — check network access to github.com"
 
   # Replace rather than merge: mixing chunks from different samples would give
   # the seed an inconsistent post/like graph.
@@ -245,7 +259,7 @@ devctl — Green Earth local dev environment
 Usage: devctl <command> [args]
 
   setup          check prerequisites (docker, sibling repos), build/pull images
-  fetch-fixture  download the published fixture set (needs gh; repo access)
+  fetch-fixture  download the published fixture set (no account or auth needed)
   up             start the stack (ES + Firestore emulator + inference stub + api)
   seed           load fixtures: rebase timestamps, ingest posts, load likes
   feed [rkey]    fetch a feed skeleton from the local api (default: random)
