@@ -12,6 +12,42 @@ DAY = dt.timedelta(days=1)
 
 
 # --------------------------------------------------------------------------
+# filename parsing
+#
+# Shared by rebase_db (to shift the name) and main (to place the ingest
+# cursor before the earliest file), so a mistake here either misnames output
+# or makes the whole fixture set get skipped at ingest.
+# --------------------------------------------------------------------------
+
+
+def test_parse_filename_splits_prefix_and_timestamp():
+    prefix, stamp = rebase.parse_filename("mega_jetstream_20260722_100000.db.zip")
+    assert prefix == "mega_jetstream_"
+    assert stamp == dt.datetime(2026, 7, 22, 10, 0, tzinfo=dt.UTC)
+
+
+def test_parse_filename_returns_an_aware_utc_timestamp():
+    # Compared against other aware datetimes in main(); a naive one would raise.
+    _, stamp = rebase.parse_filename("mega_jetstream_20260722_100000.db.zip")
+    assert stamp.tzinfo is not None
+    assert stamp.utcoffset() == dt.timedelta(0)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "mega_jetstream_2026072_100000.db.zip",  # short date
+        "mega_jetstream_20260722_1000.db.zip",  # short time
+        "mega_jetstream_20260722_100000.db",  # not a .db.zip
+        "likes.jsonl.gz",
+    ],
+)
+def test_parse_filename_rejects_names_the_spooler_cannot_read(name):
+    with pytest.raises(SystemExit):
+        rebase.parse_filename(name)
+
+
+# --------------------------------------------------------------------------
 # timestamp shifting
 # --------------------------------------------------------------------------
 

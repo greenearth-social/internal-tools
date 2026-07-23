@@ -17,6 +17,7 @@ import json
 import math
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
 API_KEY = os.environ.get("GE_INFERENCE_API_KEY", "")
 OUTPUT_DIM = 128
@@ -67,8 +68,9 @@ class Handler(BaseHTTPRequestHandler):
             {"outputs": outputs, "model_type": "post-tower", "model_uuid": MODEL_UUID},
         )
 
-    def log_message(self, fmt: str, *args) -> None:
-        print(f"inference-stub: {fmt % args}")
+    # Parameter is named `format` to match BaseHTTPRequestHandler's signature.
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        print(f"inference-stub: {format % args}")
 
 
 if __name__ == "__main__":

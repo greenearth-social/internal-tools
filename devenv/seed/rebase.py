@@ -50,6 +50,19 @@ PROBE_ENV = Path("/runtime/probe.env")
 FILENAME_RE = re.compile(r"^(?P<prefix>.*_)(?P<date>\d{8})_(?P<time>\d{6})\.db\.zip$")
 
 
+def parse_filename(name: str) -> tuple[str, dt.datetime]:
+    """Split a megastream filename into its prefix and encoded timestamp.
+
+    The spooler discovers and orders files by this timestamp, so a name it
+    can't parse would be silently skipped at ingest time — fail here instead.
+    """
+    match = FILENAME_RE.match(name)
+    if not match:
+        sys.exit(f"FATAL: fixture filename {name} doesn't match *_YYYYMMDD_HHMMSS.db.zip")
+    stamp = dt.datetime.strptime(match["date"] + match["time"], "%Y%m%d%H%M%S")
+    return match["prefix"], stamp.replace(tzinfo=dt.UTC)
+
+
 def parse_iso(ts: str) -> dt.datetime:
     parsed = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
@@ -79,14 +92,9 @@ def shift_raw_post(raw: str, delta: dt.timedelta, delta_us: int) -> str:
 
 
 def rebase_db(src_zip: Path, delta: dt.timedelta, delta_us: int) -> Path:
-    match = FILENAME_RE.match(src_zip.name)
-    if not match:
-        sys.exit(f"FATAL: fixture filename {src_zip.name} doesn't match *_YYYYMMDD_HHMMSS.db.zip")
-    file_ts = dt.datetime.strptime(match["date"] + match["time"], "%Y%m%d%H%M%S").replace(
-        tzinfo=dt.UTC
-    )
+    prefix, file_ts = parse_filename(src_zip.name)
     shifted_ts = file_ts + delta
-    out_name = f"{match['prefix']}{shifted_ts:%Y%m%d_%H%M%S}.db.zip"
+    out_name = f"{prefix}{shifted_ts:%Y%m%d_%H%M%S}.db.zip"
 
     work_db = OUT_DIR / (out_name + ".tmp.db")
     if zipfile.is_zipfile(src_zip):
@@ -178,13 +186,7 @@ def main() -> None:
     # skips pre-existing files (spool semantics). Pre-write a state file whose
     # cursor sits just before the earliest rebased file so the whole fixture
     # set gets processed.
-    earliest = min(
-        dt.datetime.strptime(
-            FILENAME_RE.match(name)["date"] + FILENAME_RE.match(name)["time"],
-            "%Y%m%d%H%M%S",
-        ).replace(tzinfo=dt.UTC)
-        for name in out_names
-    )
+    earliest = min(parse_filename(name)[1] for name in out_names)
     cursor_us = int(earliest.timestamp() * 1_000_000) - 1_000_000
     (OUT_DIR / ".megastream_state.json").write_text(
         json.dumps({"last_time_us": cursor_us, "updated_at": now.isoformat()})

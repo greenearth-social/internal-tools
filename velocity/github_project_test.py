@@ -26,6 +26,7 @@ def test_parse_item_extracts_fields():
         },
     )
     item = github_project._parse_item(node)
+    assert item is not None
     assert item.status == "Backlog"
     assert item.raw_type == "Bug"
     assert item.raw_points == 5.0
@@ -39,6 +40,7 @@ def test_parse_item_reads_number_field_fallback_and_closed_at():
         content={"title": "t", "url": None, "closedAt": "2026-06-16T10:00:00Z"},
     )
     item = github_project._parse_item(node)
+    assert item is not None
     assert item.raw_points == 3.0
     assert item.closed_at == datetime(2026, 6, 16, 10, 0, tzinfo=UTC)
 
@@ -49,6 +51,7 @@ def test_parse_item_null_issue_type_is_none():
         content={"title": "t", "url": None, "closedAt": None, "issueType": None},
     )
     item = github_project._parse_item(node)
+    assert item is not None
     assert item.raw_type is None
     assert item.raw_points == 2.0
 
@@ -58,10 +61,14 @@ def test_parse_item_reads_state_reason():
         field_values=[],
         content={"title": "t", "url": None, "closedAt": None, "stateReason": "DUPLICATE"},
     )
-    assert github_project._parse_item(node).state_reason == "DUPLICATE"
+    item = github_project._parse_item(node)
+    assert item is not None
+    assert item.state_reason == "DUPLICATE"
     # absent stateReason (e.g. PR/draft) -> None
     node2 = _node(field_values=[], content={"title": "t", "url": None})
-    assert github_project._parse_item(node2).state_reason is None
+    item2 = github_project._parse_item(node2)
+    assert item2 is not None
+    assert item2.state_reason is None
 
 
 def test_parse_item_skips_items_without_content():
@@ -71,6 +78,7 @@ def test_parse_item_skips_items_without_content():
 def test_parse_item_handles_missing_fields():
     node = _node([], content={"title": "bare", "url": None})
     item = github_project._parse_item(node)
+    assert item is not None
     assert item.status is None
     assert item.raw_type is None
     assert item.raw_points is None

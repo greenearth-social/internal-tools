@@ -28,3 +28,10 @@ ignore = []
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+[tool.pyright]
+include = ["velocity", "devenv"]
+# Same exclusion as ruff: notebook cells re-import and shadow freely.
+exclude = ["notebooks", "**/__pycache__"]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"

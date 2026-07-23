@@ -13,6 +13,7 @@ ipykernel = "*"
 notebook = "*"
 nbformat = "*"
 ruff = "*"
+pyright = "*"
 # devenv/es-init parses ingex's index-template ConfigMaps; only its tests need
 # this locally, since the script itself runs inside a container that has it.
 pyyaml = "*"

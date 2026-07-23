@@ -726,7 +726,7 @@ def run_megastream_files(args: argparse.Namespace, out_dir: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     parser.add_argument("--source", choices=["prod-es", "megastream-files"], default="prod-es")
     parser.add_argument(
         "--out",
