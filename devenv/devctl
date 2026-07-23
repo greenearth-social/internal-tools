@@ -255,10 +255,12 @@ cmd_feed() {
   compose ps --status running api | grep -q api ||
     die "the api isn't running — start it with: devctl up"
   # Give the viewer a TTY when stdout is a terminal so rich colorizes; drop it
-  # (-T) when piped or redirected, where TTY allocation would fail.
+  # (-T) when piped or redirected, where TTY allocation would fail. The
+  # "${arr[@]+...}" guard keeps an empty array from tripping `set -u` on
+  # macOS's bash 3.2.
   local tty=()
   [[ -t 1 ]] || tty=(-T)
-  compose exec "${tty[@]}" -e PIPENV_VERBOSITY=-1 api \
+  compose exec ${tty[@]+"${tty[@]}"} -e PIPENV_VERBOSITY=-1 api \
     pipenv run python scripts/feed_view.py "$@"
 }
 
