@@ -107,12 +107,12 @@ TID_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz"
 def parse_iso(ts: str) -> dt.datetime:
     parsed = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        parsed = parsed.replace(tzinfo=dt.UTC)
     return parsed
 
 
 def iso_z(t: dt.datetime) -> str:
-    return t.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    return t.astimezone(dt.UTC).isoformat().replace("+00:00", "Z")
 
 
 def encode_embedding(vector: list[float]) -> str:
@@ -304,7 +304,7 @@ def write_fixture_set(
     manifest = {
         "schema_version": 1,
         "source": source,
-        "generated_at": iso_z(dt.datetime.now(dt.timezone.utc)),
+        "generated_at": iso_z(dt.datetime.now(dt.UTC)),
         "generator_commit": generator_commit(),
         "window_start": iso_z(window_start),
         "window_end": iso_z(window_end),
@@ -388,13 +388,11 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path) -> None:
     window_end = (
         parse_iso(args.window_end)
         if args.window_end
-        else dt.datetime.now(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
+        else dt.datetime.now(dt.UTC).replace(minute=0, second=0, microsecond=0)
         - dt.timedelta(hours=2)
     )
     window_start = window_end - dt.timedelta(hours=args.window_hours)
-    window_range = {
-        "range": {"created_at": {"gte": iso_z(window_start), "lt": iso_z(window_end)}}
-    }
+    window_range = {"range": {"created_at": {"gte": iso_z(window_start), "lt": iso_z(window_end)}}}
     print(f"Sampling window {iso_z(window_start)} .. {iso_z(window_end)}")
 
     # 1. Posts in window (with embeddings), up to --max-posts. A prod-scale
@@ -419,9 +417,7 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path) -> None:
         bucket_start = window_start + dt.timedelta(hours=i)
         bucket_end = min(bucket_start + dt.timedelta(hours=1), window_end)
         bucket_range = {
-            "range": {
-                "created_at": {"gte": iso_z(bucket_start), "lt": iso_z(bucket_end)}
-            }
+            "range": {"created_at": {"gte": iso_z(bucket_start), "lt": iso_z(bucket_end)}}
         }
         query = {"bool": {"filter": [bucket_range, {"exists": {"field": EMBED_FIELD}}]}}
         for sort in (
@@ -470,10 +466,9 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path) -> None:
     raw_likes: list[dict] = []
     for i in range(0, len(cohort), 64):
         chunk = cohort[i : i + 64]
-        query = {
-            "bool": {"filter": [window_range, {"terms": {"author_did": chunk}}]}
-        }
-        for hit in es.scan("likes", query, ["at_uri", "subject_uri", "author_did", "created_at", "indexed_at"]):
+        query = {"bool": {"filter": [window_range, {"terms": {"author_did": chunk}}]}}
+        like_fields = ["at_uri", "subject_uri", "author_did", "created_at", "indexed_at"]
+        for hit in es.scan("likes", query, like_fields):
             raw_likes.append(hit["_source"])
     print(f"  {len(raw_likes)} cohort likes fetched")
 
@@ -481,16 +476,12 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path) -> None:
     # the hydration set, keeping the subjects the cohort liked most — those
     # contribute the most history density per added post.
     missing_counts = Counter(
-        like["subject_uri"]
-        for like in raw_likes
-        if like["subject_uri"] not in posts_by_uri
+        like["subject_uri"] for like in raw_likes if like["subject_uri"] not in posts_by_uri
     )
     hydrate_cap = args.max_posts // 2
     missing = [uri for uri, _ in missing_counts.most_common(hydrate_cap)]
     if len(missing_counts) > hydrate_cap:
-        print(
-            f"  capping dangler hydration at {hydrate_cap} of {len(missing_counts)} subjects"
-        )
+        print(f"  capping dangler hydration at {hydrate_cap} of {len(missing_counts)} subjects")
     hydrated = 0
     for i in range(0, len(missing), 500):
         chunk = missing[i : i + 500]
@@ -521,9 +512,7 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path) -> None:
 
     # 6. Personas: densest likers among kept likes.
     by_liker = Counter(like["author_did"] for like in likes)
-    personas = [
-        {"did": did, "likes": count} for did, count in by_liker.most_common(args.personas)
-    ]
+    personas = [{"did": did, "likes": count} for did, count in by_liker.most_common(args.personas)]
 
     # 6. Convert to fixture rows.
     posts = []
@@ -682,7 +671,9 @@ def run_megastream_files(args: argparse.Namespace, out_dir: Path) -> None:
 
     def sample_without_replacement(k: int) -> list[dict]:
         # Efraimidis-Spirakis weighted reservoir keys: top-k by u^(1/w).
-        keyed = [(rng.random() ** (1.0 / w), post) for w, post in zip(weights, shuffled)]
+        keyed = [
+            (rng.random() ** (1.0 / w), post) for w, post in zip(weights, shuffled, strict=True)
+        ]
         keyed.sort(key=lambda pair: pair[0], reverse=True)
         return [post for _, post in keyed[:k]]
 
@@ -694,8 +685,7 @@ def run_megastream_files(args: argparse.Namespace, out_dir: Path) -> None:
         target_count = min(len(posts), rng.randint(args.min_likes, args.max_likes))
         for post in sample_without_replacement(target_count):
             liked_at = min(
-                post["created_at"]
-                + dt.timedelta(minutes=rng.expovariate(1 / 90.0)),
+                post["created_at"] + dt.timedelta(minutes=rng.expovariate(1 / 90.0)),
                 window_end - dt.timedelta(seconds=1),
             )
             likes.append(
@@ -715,9 +705,7 @@ def run_megastream_files(args: argparse.Namespace, out_dir: Path) -> None:
         {"at_uri": uri, "author_did": post_authors[uri], "like_count": count}
         for uri, count in per_post.items()
     ]
-    personas = [
-        {"did": did, "likes": count} for did, count in per_user.most_common(args.personas)
-    ]
+    personas = [{"did": did, "likes": count} for did, count in per_user.most_common(args.personas)]
 
     write_fixture_set(
         out_dir,
@@ -757,9 +745,7 @@ def main() -> None:
     # megastream-files options
     parser.add_argument(
         "--input",
-        default=str(
-            Path(__file__).resolve().parents[3] / "ingex/ingest/test_data/megastream"
-        ),
+        default=str(Path(__file__).resolve().parents[3] / "ingex/ingest/test_data/megastream"),
         help="directory of .db.zip files (default: ingex checked-in test data)",
     )
     parser.add_argument("--cohort", type=int, default=50)

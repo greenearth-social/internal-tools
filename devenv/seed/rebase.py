@@ -53,7 +53,7 @@ FILENAME_RE = re.compile(r"^(?P<prefix>.*_)(?P<date>\d{8})_(?P<time>\d{6})\.db\.
 def parse_iso(ts: str) -> dt.datetime:
     parsed = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        parsed = parsed.replace(tzinfo=dt.UTC)
     return parsed
 
 
@@ -82,9 +82,9 @@ def rebase_db(src_zip: Path, delta: dt.timedelta, delta_us: int) -> Path:
     match = FILENAME_RE.match(src_zip.name)
     if not match:
         sys.exit(f"FATAL: fixture filename {src_zip.name} doesn't match *_YYYYMMDD_HHMMSS.db.zip")
-    file_ts = dt.datetime.strptime(
-        match["date"] + match["time"], "%Y%m%d%H%M%S"
-    ).replace(tzinfo=dt.timezone.utc)
+    file_ts = dt.datetime.strptime(match["date"] + match["time"], "%Y%m%d%H%M%S").replace(
+        tzinfo=dt.UTC
+    )
     shifted_ts = file_ts + delta
     out_name = f"{match['prefix']}{shifted_ts:%Y%m%d_%H%M%S}.db.zip"
 
@@ -151,7 +151,7 @@ def main() -> None:
         )
     manifest = json.loads(manifest_path.read_text())
 
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     window_end = parse_iso(manifest["window_end"])
     delta_seconds = max(0, int((now - dt.timedelta(hours=1) - window_end).total_seconds()))
     delta = dt.timedelta(seconds=delta_seconds)
@@ -182,7 +182,7 @@ def main() -> None:
         dt.datetime.strptime(
             FILENAME_RE.match(name)["date"] + FILENAME_RE.match(name)["time"],
             "%Y%m%d%H%M%S",
-        ).replace(tzinfo=dt.timezone.utc)
+        ).replace(tzinfo=dt.UTC)
         for name in out_names
     )
     cursor_us = int(earliest.timestamp() * 1_000_000) - 1_000_000
@@ -192,9 +192,7 @@ def main() -> None:
 
     likes_src = FIXTURES_DIR / "likes.jsonl.gz"
     if likes_src.exists():
-        n = rebase_jsonl(
-            likes_src, OUT_DIR / "likes.jsonl.gz", delta, ("created_at", "indexed_at")
-        )
+        n = rebase_jsonl(likes_src, OUT_DIR / "likes.jsonl.gz", delta, ("created_at", "indexed_at"))
         print(f"  likes.jsonl.gz: {n} likes rebased")
     else:
         print("  WARNING: no likes.jsonl.gz fixture; like-driven feeds will be empty")
