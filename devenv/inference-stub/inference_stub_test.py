@@ -77,3 +77,63 @@ class TestRankerScoring:
         assert stub.cosine(user, stub.pseudo_embed(liked)) > stub.cosine(
             user, stub.pseudo_embed(unrelated)
         )
+
+
+class TestReadyPayload:
+    """The /ready shape is a contract with the api, not a free-form status.
+
+    The api scans `models` for the entry whose "type" is post-tower and reads
+    its "model_uuid" — that UUID is stamped on indexed posts and is what the
+    two_tower generator filters its kNN query by. Getting the key names wrong
+    here doesn't fail loudly at the stub; it surfaces as the two_tower
+    generator failing at feed time.
+    """
+
+    @staticmethod
+    def _handler(path):
+        """A Handler with its socket plumbing bypassed.
+
+        Returns the handler and the dict its _send writes into.
+        """
+        handler = stub.Handler.__new__(stub.Handler)
+        handler.path = path
+        sent: dict = {}
+        handler._send = lambda status, body: sent.update(status=status, body=body)
+        return handler, sent
+
+    def _ready(self):
+        import json
+
+        handler, sent = self._handler("/ready")
+        stub.Handler.do_GET(handler)
+        assert sent["status"] == 200
+        # Round-trip through JSON: the real client only ever sees serialized form.
+        return json.loads(json.dumps(sent["body"]))
+
+    def test_models_entries_are_keyed_on_type(self):
+        payload = self._ready()
+        for entry in payload["models"]:
+            assert isinstance(entry.get("type"), str), entry
+
+    def test_post_tower_entry_carries_a_non_empty_model_uuid(self):
+        payload = self._ready()
+        post_tower = [m for m in payload["models"] if m["type"] == "post-tower"]
+        assert len(post_tower) == 1
+        assert isinstance(post_tower[0]["model_uuid"], str)
+        assert post_tower[0]["model_uuid"]
+
+    def test_uuid_matches_the_one_stamped_on_predictions(self):
+        # Posts are indexed with the UUID from the predict response; the api
+        # filters kNN on the UUID from /ready. They have to agree.
+        payload = self._ready()
+        post_tower = next(m for m in payload["models"] if m["type"] == "post-tower")
+        handler, _ = self._handler("/models/post-tower/predict")
+        _, predict = stub.Handler._post_tower(handler, {"post_embeddings": [[0.1] * 384]})
+        assert post_tower["model_uuid"] == predict["model_uuid"]
+
+    def test_reports_ready(self):
+        assert self._ready()["ready"] is True
+
+    def test_advertises_every_endpoint_the_api_calls(self):
+        types = {m["type"] for m in self._ready()["models"]}
+        assert {"post-tower", "user-tower", "ranker"} <= types

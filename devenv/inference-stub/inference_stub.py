@@ -91,14 +91,31 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self._send(200, {"status": "ok", "stub": True})
         elif self.path == "/ready":
+            # Shape matters: the api scans `models` for the entry whose "type"
+            # is post-tower and reads its "model_uuid" — that UUID is stamped
+            # on indexed posts and is what the two_tower generator filters its
+            # kNN query by. Keying the entries on "name" instead made the api
+            # raise "ready response model entry 0 missing string type", which
+            # surfaced as the two_tower generator failing. Mirrors
+            # inference-service's /ready payload.
             self._send(
                 200,
                 {
+                    "ready": True,
+                    "registry_error": None,
+                    "embed_dim": OUTPUT_DIM,
+                    "author_idx_maps_error": None,
+                    "author_idx_maps": {},
                     "models": [
-                        {"name": "post-tower", "ready": True, "model_uuid": MODEL_UUID},
-                        {"name": "user-tower", "ready": True},
-                        {"name": "ranker", "ready": True},
-                    ]
+                        {
+                            "type": model_type,
+                            "model_uuid": MODEL_UUID if model_type == "post-tower" else None,
+                            "ready": True,
+                            "device": "cpu",
+                            "load_error": None,
+                        }
+                        for model_type in ("post-tower", "user-tower", "ranker")
+                    ],
                 },
             )
         else:
