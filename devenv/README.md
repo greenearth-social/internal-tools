@@ -273,12 +273,6 @@ the api correctly, but the list is empty until either:
   ([api#269](https://github.com/greenearth-social/api/issues/269)) and the
   feed's other ML rankers work.
 
-Separately, `_record_session` in the api abandons its user/activity upsert when
-it can't resolve the caller's handle on the live network — which pseudonymized
-personas never can (see Pseudonymization above). So no `users` document is
-created automatically, and `scripts/feed_debug.py --enable` has nothing to
-attach to until one exists.
-
 ## Service endpoints (defaults)
 
 | Service | Address | Notes |
