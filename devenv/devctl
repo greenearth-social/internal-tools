@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# devctl — Green Earth local development environment (issue api#268).
+#
+# Orchestrates the docker-compose stack in this directory. The key sequencing
+# it owns: es-init must complete (minting ES API keys into .runtime/) before
+# the api starts, and seeding runs rebase -> megastream ingest -> likes.
+#
+# Layout assumption: this repo (internal-tools) is checked out next to its
+# sibling repos (api, ingex, ...) under one parent directory, like the
+# greenearth-social monorepo checkout. Override with GE_DEV_REPO_ROOT.
+set -euo pipefail
+
+DEVENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Optional local overrides (ports, ES heap, ...). Gitignored.
+if [[ -f "$DEVENV_DIR/devenv.local.env" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$DEVENV_DIR/devenv.local.env"
+  set +a
+fi
+
+export GE_DEV_REPO_ROOT="${GE_DEV_REPO_ROOT:-$(cd "$DEVENV_DIR/../.." && pwd)}"
+API_PORT="${GE_DEV_PORT_API:-8300}"
+ES_PORT="${GE_DEV_PORT_ES:-9201}"
+FIRESTORE_PORT="${GE_DEV_PORT_FIRESTORE:-8086}"
+PROBE_SECRET="${GE_DEV_PROBE_SECRET:-ge-dev-probe}"
+
+compose() {
+  docker compose -f "$DEVENV_DIR/docker-compose.yml" --project-directory "$DEVENV_DIR" "$@"
+}
+
+die() {
+  echo "devctl: $*" >&2
+  exit 1
+}
+
+# ---------------------------------------------------------------------------
+
+check_docker() {
+  command -v docker >/dev/null || die "docker is required (https://docs.docker.com/get-docker/)"
+  docker info >/dev/null 2>&1 || die "docker daemon isn't running"
+  docker compose version >/dev/null 2>&1 || die "docker compose v2 is required"
+}
+
+check_repos() {
+  local missing=0
+  local repo
+  for repo in api ingex; do
+    if [[ ! -e "$GE_DEV_REPO_ROOT/$repo/.git" ]]; then
+      echo "devctl: required repo missing: $GE_DEV_REPO_ROOT/$repo" >&2
+      echo "        clone it: git clone git@github.com:greenearth-social/$repo.git \"$GE_DEV_REPO_ROOT/$repo\"" >&2
+      missing=1
+    fi
+  done
+  [[ $missing -eq 0 ]] || die "missing required repos (or set GE_DEV_REPO_ROOT to the directory that contains them)"
+  for repo in inference-service engagement-prediction frontend; do
+    if [[ ! -e "$GE_DEV_REPO_ROOT/$repo/.git" ]]; then
+      echo "devctl: note: optional repo not checked out: $GE_DEV_REPO_ROOT/$repo" >&2
+    fi
+  done
+}
+
+ensure_runtime() {
+  mkdir -p "$DEVENV_DIR/.runtime/seed"
+  # compose env_file entries must exist before any `compose` invocation.
+  touch "$DEVENV_DIR/.runtime/es_key_ro.env" \
+    "$DEVENV_DIR/.runtime/es_key_rw.env" \
+    "$DEVENV_DIR/.runtime/probe.env"
+}
+
+es_curl() {
+  local path="$1"
+  shift
+  local key
+  key="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$DEVENV_DIR/.runtime/es_key_ro.env")"
+  [[ -n "$key" ]] || die "no ES key yet — run: devctl up"
+  curl -s -H "Authorization: ApiKey $key" "http://127.0.0.1:${ES_PORT}${path}" "$@"
+}
+
+have_fixtures() {
+  [[ -f "$DEVENV_DIR/fixtures/data/manifest.json" ]]
+}
+
+fixtures_hint() {
+  cat >&2 <<EOF
+
+No fixture set found in devenv/fixtures/data/. Generate one:
+
+  # From real data (needs read-only prod ES access, port-forwarded):
+  python3 $DEVENV_DIR/fixtures/generate_sample.py --source prod-es
+
+  # Without any credentials (uses ingex's checked-in sample files,
+  # synthesizes the like graph):
+  python3 $DEVENV_DIR/fixtures/generate_sample.py --source megastream-files
+
+Then run: devctl seed
+EOF
+}
+
+# ---------------------------------------------------------------------------
+
+cmd_setup() {
+  check_docker
+  check_repos
+  ensure_runtime
+  echo "devctl: pulling and building images (first run takes a few minutes)..."
+  compose --profile tools build es-init api
+  compose --profile tools pull elasticsearch firestore inference-stub seed-rebase seed-megastream --ignore-buildable
+  echo "devctl: setup complete."
+  have_fixtures || fixtures_hint
+  echo "Next: devctl up && devctl seed"
+}
+
+cmd_up() {
+  check_docker
+  check_repos
+  ensure_runtime
+  compose up -d elasticsearch firestore inference-stub
+  echo "devctl: initializing Elasticsearch (templates, indexes, API keys)..."
+  compose run --rm es-init
+  compose up -d api
+  cat <<EOF
+devctl: environment is up.
+  api           http://127.0.0.1:${API_PORT}    (first start installs deps; watch: devctl logs api)
+  elasticsearch http://127.0.0.1:${ES_PORT}    (user elastic / ${GE_DEV_ES_PASSWORD:-ge-dev-elastic})
+  firestore     127.0.0.1:${FIRESTORE_PORT}
+EOF
+  # The posts alias doesn't exist until the first seed (the ingest binary
+  # creates it, as in prod) — treat a missing alias like an empty index.
+  local post_count
+  post_count="$(es_curl /posts/_count | sed -n 's/.*"count":\([0-9]*\).*/\1/p')"
+  if [[ -z "$post_count" || "$post_count" == "0" ]]; then
+    if have_fixtures; then
+      echo "Elasticsearch is empty — run: devctl seed"
+    else
+      fixtures_hint
+    fi
+  fi
+}
+
+cmd_seed() {
+  check_docker
+  ensure_runtime
+  have_fixtures || { fixtures_hint; exit 1; }
+  echo "devctl: wiping previously seeded data..."
+  compose run --rm seed-wipe
+  echo "devctl: rebasing fixture timestamps..."
+  compose run --rm seed-rebase
+  echo "devctl: ingesting posts via megastream_ingest (first run compiles the Go binary)..."
+  compose run --rm seed-megastream
+  echo "devctl: loading likes and like counts..."
+  compose run --rm seed-likes
+  # Pick up .runtime/probe.env (persona DID) if the api was already running.
+  if compose ps --status running api | grep -q api; then
+    compose up -d --force-recreate api
+  fi
+  local persona
+  persona="$(sed -n 's/^GE_PROBE_USER_DID=//p' "$DEVENV_DIR/.runtime/probe.env")"
+  cat <<EOF
+devctl: seed complete.
+Try a feed (persona: ${persona:-unset}):
+  devctl feed random
+EOF
+}
+
+cmd_feed() {
+  local rkey="${1:-random}"
+  local uri="at://did:web:test/app.bsky.feed.generator/${rkey}"
+  local out
+  out="$(curl -s -H "X-Probe-Secret: ${PROBE_SECRET}" \
+    "http://127.0.0.1:${API_PORT}/xrpc/app.bsky.feed.getFeedSkeleton?feed=${uri}&limit=20")"
+  if command -v python3 >/dev/null; then
+    echo "$out" | python3 -m json.tool
+  else
+    echo "$out"
+  fi
+}
+
+cmd_status() {
+  compose ps
+  echo
+  if [[ -s "$DEVENV_DIR/.runtime/es_key_ro.env" ]]; then
+    local alias
+    for alias in posts likes inferences; do
+      printf "%-12s %s docs\n" "$alias" \
+        "$(es_curl "/${alias}/_count" | sed -n 's/.*"count":\([0-9]*\).*/\1/p')"
+    done
+  fi
+}
+
+cmd_nuke() {
+  compose down -v --remove-orphans
+  rm -rf "$DEVENV_DIR/.runtime"
+  echo "devctl: all containers, data volumes, and runtime state removed."
+}
+
+usage() {
+  cat <<EOF
+devctl — Green Earth local dev environment
+
+Usage: devctl <command> [args]
+
+  setup          check prerequisites (docker, sibling repos), build/pull images
+  up             start the stack (ES + Firestore emulator + inference stub + api)
+  seed           load fixtures: rebase timestamps, ingest posts, load likes
+  feed [rkey]    fetch a feed skeleton from the local api (default: random)
+  status         container status + index doc counts
+  logs [svc...]  follow logs (all services or the named ones)
+  down           stop containers (data volumes survive)
+  nuke           stop and delete everything (volumes, minted keys, seed state)
+
+Fixtures: see fixtures/generate_sample.py (committed generator, two modes).
+Config overrides go in devenv.local.env (ports, ES heap, repo root).
+EOF
+}
+
+# ---------------------------------------------------------------------------
+
+cmd="${1:-}"
+[[ -n "$cmd" ]] && shift || true
+case "$cmd" in
+setup) cmd_setup "$@" ;;
+up) cmd_up "$@" ;;
+seed) cmd_seed "$@" ;;
+feed) cmd_feed "$@" ;;
+status | ps) cmd_status "$@" ;;
+logs) compose logs -f --tail=100 "$@" ;;
+down) compose down ;;
+nuke) cmd_nuke "$@" ;;
+"" | help | -h | --help) usage ;;
+*) die "unknown command: $cmd (try: devctl help)" ;;
+esac
