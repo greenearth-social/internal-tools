@@ -106,13 +106,15 @@ services:
         # Bridge both to the real services rather than patching the frontend
         # repo, which is being actively changed elsewhere.
         socat TCP-LISTEN:8000,fork,reuseaddr,bind=127.0.0.1 TCP:api:8000 &
-        socat TCP-LISTEN:5001,fork,reuseaddr,bind=127.0.0.1 TCP:firebase:15001 &
+        socat TCP-LISTEN:5001,fork,reuseaddr,bind=127.0.0.1 TCP:${GE_DEV_FUNCTIONS_TARGET:-dev-auth:8000} &
         # npm ci, not install: install rewrites package-lock.json in the
         # developer's bind-mounted checkout.
         npm ci --no-audit --no-fund
         exec npm run dev -- --host 0.0.0.0 --port 3000
     depends_on:
       firebase:
+        condition: service_healthy
+      dev-auth:
         condition: service_healthy
     environment:
       # Mock services are the frontend's own default: full UI, no backend.
@@ -133,6 +135,28 @@ services:
     volumes:
       - ${GE_DEV_REPO_ROOT:-../..}/frontend:/frontend
       - frontend_node_modules:/frontend/node_modules
+
+  # Stands in for the Bluesky OAuth login leg so the frontend's Sign In button
+  # works without OAuth secrets; everything else passes through to the real
+  # Functions emulator. See dev-auth/app.py.
+  dev-auth:
+    image: python:3.13-slim
+    command: ["python", "/dev-auth/app.py"]
+    environment:
+      - GE_DEV_FUNCTIONS_UPSTREAM=http://firebase:15001
+    volumes:
+      - ./dev-auth:/dev-auth:ro
+      - ./firebase:/firebase:ro
+      - ./.runtime:/runtime:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import socket; socket.create_connection(('localhost', 8000), 2)\"",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 24
 
   # Milestone-1 stand-in for inference-service: answers the post-tower predict
   # endpoint megastream_ingest requires, with deterministic pseudo-embeddings.

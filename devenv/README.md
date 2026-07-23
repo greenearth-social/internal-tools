@@ -182,20 +182,27 @@ query needing a composite index can still pass locally and fail deployed.
 
 ### Signing in
 
-`VITE_USE_MOCK_SERVICES=true` is the frontend's own default and what devenv
-uses: the full UI with hardcoded data, no backend needed. To drive the seeded
-api instead, set `GE_DEV_FRONTEND_MOCK=false` in `devenv.local.env`, then:
+Just click **Sign in with Bluesky**. It works with no credentials and logs you
+in as the seeded persona.
 
-```bash
-./devctl login          # prints a sign-in URL for the seeded persona
-```
+Real sign-in starts a Bluesky OAuth handshake in the `authBluesky` Cloud
+Function, which needs private keys this environment deliberately doesn't
+carry — so the button would otherwise fail, which is the first thing a new
+engineer is likely to try. The `dev-auth` service sits where the Functions
+emulator does, answers that one call with a redirect to the app's own
+`#/auth/finish?token=...` route (the same place the real OAuth callback sends
+the browser), and passes every other function through untouched.
 
-Real sign-in means completing Bluesky OAuth, which needs private keys this
-environment deliberately doesn't carry. The Auth emulator accepts *unsigned*
-custom tokens, so `devctl login` mints one for the seeded persona and hands it
-to the app's own `#/auth/finish` route — the same entry point the real OAuth
-callback uses. The token lasts an hour; re-run for a fresh one. It only works
-against an emulator.
+`devctl login` prints the same URL if you'd rather paste it, or want to sign
+in as a different persona: `devctl login did:plc:...`.
+
+Both mint an unsigned custom token, which only an emulator will accept — the
+Auth emulator ignores the signature, real Firebase would reject it outright.
+Tokens last an hour.
+
+To exercise the genuine OAuth flow (with real secrets in `devenv.local.env`),
+set `GE_DEV_FUNCTIONS_TARGET=firebase:15001` to take `dev-auth` out of the
+path.
 
 ### What the frontend can and can't show
 
