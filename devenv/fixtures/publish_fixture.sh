@@ -11,13 +11,20 @@
 #   python3 fixtures/generate_sample.py --source prod-es
 #   fixtures/publish_fixture.sh
 #
+# Takes an optional fixture directory, defaulting to fixtures/data/. Passing
+# one lets a freshly generated set be published straight out of its staging
+# directory (see regen_fixture.sh) without first overwriting the fixture the
+# local environment is currently seeded from:
+#
+#   fixtures/publish_fixture.sh fixtures/data.staging
+#
 # Each publish creates a new dated release; `devctl fetch-fixture` picks the
 # most recent one. Delete old releases when they stop being useful — unlike
 # git history, they can be reclaimed.
 set -euo pipefail
 
 FIXTURES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR="$FIXTURES_DIR/data"
+DATA_DIR="${1:-$FIXTURES_DIR/data}"
 REPO="${GE_DEV_FIXTURE_REPO:-greenearth-social/internal-tools}"
 ASSET_NAME="ge-dev-fixture.tar"
 
@@ -29,20 +36,6 @@ die() {
 command -v gh >/dev/null || die "the gh CLI is required (https://cli.github.com/)"
 [[ -f "$DATA_DIR/manifest.json" ]] ||
   die "no fixture set in $DATA_DIR — generate one first (see fixtures/generate_sample.py)"
-
-# Refuse to publish a fixture carrying real liker DIDs. Cohort densification
-# captures each cohort member's full like history, so a real-DID fixture is a
-# per-person interest profile; --no-pseudonymize sets this flag for local
-# investigation only. This check is the backstop, since "don't publish that
-# one" is exactly the kind of thing that gets lost between sessions.
-pseudonymized="$(python3 -c "
-import json, pathlib
-m = json.loads(pathlib.Path('$DATA_DIR/manifest.json').read_text())
-print(m.get('pseudonymized', False))
-")"
-[[ "$pseudonymized" == "True" ]] || die "refusing to publish: this fixture has real liker DIDs
-(manifest says pseudonymized=$pseudonymized — it was generated with --no-pseudonymize).
-Regenerate without that flag to publish. See the generate_sample.py docstring."
 
 # Tag from the fixture's own window end, so the release name states which slice
 # of Bluesky it holds rather than when someone happened to upload it.

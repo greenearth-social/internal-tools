@@ -81,38 +81,28 @@ is — seeding rebases every timestamp so the window always ends an hour before
 now (see below). Replace the published fixture when its *content* gets stale
 enough to matter.
 
-### Pseudonymized liker identities
+### Identities in the fixture are real
 
-**Post content and post author DIDs in the fixture are real. Liker DIDs are
-not** — every liker is replaced by a synthetic `did:plc`, consistently across
-the like documents, the like `at_uri`s, and the manifest personas.
+Posts, post authors, and liker DIDs are all kept exactly as they appear in the
+source data. Personas are therefore real accounts: their handles resolve,
+their follow graphs exist, and you can look any fixture DID up against the
+Bluesky API.
 
-Why: cohort densification deliberately captures each cohort member's *complete*
-like history, so a real-DID fixture would be a per-person interest profile —
-and this one is a public download that can't honor later deletions the way
-prod's tombstones do. Individually public likes become a different artifact
-when aggregated, frozen, and published.
+An earlier version pseudonymized liker DIDs. That was removed deliberately,
+because the protection wasn't real: Graze's turbostream/megastream archives
+already publish the complete Bluesky event history — every like, by every DID,
+going back over a year — alongside hydrated posts. A fixture built from a few
+hours of that window exposes nothing the archives don't already hand out in
+full.
 
-The like graph is preserved exactly (who liked what, how densely, in what
-order), which is everything the dev environment needs. Personas behave
-identically; the api just can't resolve their handles, exactly as with
-synthetic fixtures.
+Meanwhile the costs were concrete. Synthetic DIDs resolve to nobody, so
+`followed_users` and `network_likes` returned empty, ranking couldn't be
+exercised against the identities that produced the likes, and no fixture DID
+could be looked up for debugging.
 
-**The mapping is irreversible on purpose** — SHA-256 under a random salt
-generated per run and never stored. A plain hash would be worthless here,
-since `did:plc` identifiers are public and enumerable from the firehose:
-anyone could hash the whole DID space and look ours up. Discarding the salt
-is what prevents that.
-
-**Consequence, worth knowing before you need it:** you cannot map a fixture
-DID back to a real user, ever — including for legitimate work like "whose
-likes are these?" or investigating a specific author's like behavior. If you
-need real identities, generate a private fixture with `--no-pseudonymize`,
-use it locally, and don't publish it. `publish_fixture.sh` refuses to upload
-one, and its `manifest.json` records `pseudonymized: false` so the file itself
-declares what it is. A durable answer for that use case — a held mapping
-table, or querying prod directly — isn't built, and would need designing
-along with its own handling of the deletion problem.
+The trade being accepted: a published fixture is a real slice of public
+activity and can't honor later deletions the way prod's tombstones do — the
+same trade the upstream archives already make.
 
 ### Generating your own
 
@@ -334,14 +324,15 @@ Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 - Feeds ranked with the `perspective` model call the external Perspective API;
   without `GE_PERSPECTIVE_API_KEY` those rankers fail — stick to feeds that
   don't use it (e.g. `random`).
-- **Feeds needing a real network identity return nothing.** `followed_users`
-  and `network_likes` resolve the requesting user's follows from the live AT
-  Protocol network, and personas are pseudonymized (see above), so their
-  follow set comes back empty. This is a deliberate trade — those two
-  generators are what pseudonymizing personas costs us. `random`,
-  `popularity`, and `post_similarity` are unaffected and exercise the
-  retrieve → rank path fully. To work on follow-driven generators, generate a
-  local `--no-pseudonymize` fixture (and don't publish it) so personas are
-  real users with real follows.
+- **Follow-driven generators need a fixture generated after real IDs landed.**
+  `followed_users` and `network_likes` resolve the requesting user's follows
+  from the live AT Protocol network. Fixtures generated before identities went
+  real carry synthetic persona DIDs that resolve to nobody, so those
+  generators come back empty — check with
+  `curl -o /dev/null -w '%{http_code}' https://plc.directory/<persona-did>`
+  (404 means synthetic). Regenerate from prod ES to fix it. Even then, yield
+  depends on whether the accounts a persona follows have posts inside the
+  sampled window; `random`, `popularity`, and `post_similarity` don't have
+  that dependency and exercise the retrieve → rank path fully.
 - Multi-instance (`--name`), `devctl exec`, and local/live backend switching
   are milestone 3 ([api#283](https://github.com/greenearth-social/api/issues/283)).

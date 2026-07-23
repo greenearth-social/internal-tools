@@ -29,44 +29,35 @@ Two source modes:
     - only posts with MiniLM embeddings (post_similarity / two_tower need
       them), keeping the popularity head and the long tail alike.
 
-    Liker identities are pseudonymized — see "Pseudonymization" below.
-
 --source megastream-files
     Builds the fixture from existing megastream .db.zip files (default: the
     checked-in samples in ingex/ingest/test_data/megastream) and synthesizes
     a like graph over them with Zipf-flavored popularity. No credentials or
     network needed — the path external contributors (and CI-less smoke tests)
-    use. Deterministic under --seed. Liker DIDs here are invented, so
-    pseudonymization doesn't apply.
+    use. Deterministic under --seed. Liker DIDs here are invented.
 
-Pseudonymization (prod-es mode)
--------------------------------
-Post content and post *author* DIDs are kept real — they're public, and the
-fixture is only useful if the content is genuine. Liker identities are not:
-cohort densification deliberately captures each cohort member's complete like
-history, so a real-DID fixture would be a per-person interest profile, and
-this one ships as a public download that can't honor later deletions the way
-prod's tombstones do.
+Identities are real
+-------------------
+Posts, post authors, and liker DIDs are all kept as they are in the source
+data. An earlier version of this script pseudonymized liker DIDs; that was
+removed deliberately, and the reasoning is worth keeping:
 
-So every liker DID is replaced by a synthetic did:plc, consistently across
-the like documents, the like at_uris (which embed the liker's DID), and the
-manifest personas. The like graph — who liked what, how densely, in what
-order — is preserved exactly, which is all the dev environment needs.
+The protection wasn't real. Graze's turbostream/megastream archives already
+publish the complete Bluesky event history — every like, by every DID, going
+back over a year — alongside hydrated posts. A fixture built from a few hours
+of that window exposes nothing the archives don't already hand out in full,
+so masking a subset bought no privacy while imposing real costs.
 
-The mapping is deliberately irreversible: it's a SHA-256 of the DID under a
-random 32-byte salt generated per run and never written anywhere. A plain
-hash would be no protection at all, because did:plc identifiers are public
-and enumerable from the firehose — anyone could hash the whole DID space and
-look ours up. Discarding the salt is what makes that attack impossible.
+Those costs were concrete. Fake liker DIDs resolve to nobody, so the
+`followed_users` and `network_likes` generators returned empty (a persona with
+a synthetic DID has no follow graph), ranking couldn't be exercised against
+the identities that produced the likes, and no fixture DID could be looked up
+against the Bluesky API for debugging. Real DIDs make all of that work.
 
-The cost of that choice: you cannot map a fixture DID back to a real user,
-ever, including for legitimate debugging ("whose likes are these?"). If you
-need real identities — say, to investigate a specific author's like behavior
-— generate a private fixture with --no-pseudonymize and DO NOT publish it.
-`publish_fixture.sh` refuses to upload one, and `manifest.json` records
-`pseudonymized: false` so the file itself says what it is. A durable fix for
-that use case (a held mapping table, or querying prod directly) is not built;
-it would need designing, with its own handling of the deletion problem.
+What this does mean: a published fixture is a real slice of public activity
+and can't honor later deletions the way prod's tombstones do. That is the
+accepted trade — the same one the upstream archives already make.
+
 
 Stdlib only, so it runs on any python3 ≥ 3.11 or a stock python container.
 """
@@ -75,16 +66,16 @@ import argparse
 import base64
 import datetime as dt
 import gzip
-import hashlib
+import http.client
 import json
 import os
 import random
-import secrets
 import sqlite3
 import ssl
 import struct
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -96,6 +87,10 @@ EMBED_MODEL = "all-MiniLM-L12-v2"
 EMBED_FIELD = "embeddings.all_MiniLM_L12_v2"
 EMBED_DIMS = 384
 CHUNK_ROWS = 20_000
+# Transport retries for the port-forwarded prod ES (see EsClient.search).
+ES_MAX_ATTEMPTS = 6
+ES_BACKOFF_CAP = 30
+ES_RETRY_STATUS = frozenset({502, 503, 504, 429})
 TID_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz"
 
 
@@ -119,52 +114,6 @@ def encode_embedding(vector: list[float]) -> str:
     """float32 LE -> zlib -> RFC1924 base85; matches ingex's embeddings codec."""
     packed = struct.pack(f"<{len(vector)}f", *vector)
     return base64.b85encode(zlib.compress(packed)).decode()
-
-
-def make_pseudonymizer(enabled: bool):
-    """Return a stable did -> did mapping function for liker identities.
-
-    Irreversibility is the point, so the salt is random per run and is never
-    returned, logged, or persisted: did:plc identifiers are public and
-    enumerable, so an unsalted hash could be reversed by hashing the whole DID
-    space. Consequence to be aware of before relying on it: nobody, including
-    us, can undo this mapping later. See the module docstring.
-
-    When *enabled* is False the identity function is returned, for private
-    fixtures that must keep real DIDs (never publishable).
-    """
-    if not enabled:
-        return lambda did: did
-
-    salt = secrets.token_bytes(32)
-    cache: dict[str, str] = {}
-
-    def pseudonymize(did: str) -> str:
-        if did not in cache:
-            digest = hashlib.sha256(salt + did.encode()).digest()
-            # did:plc identifiers are 24 chars of lowercase base32 ([a-z2-7]).
-            suffix = base64.b32encode(digest).decode().lower().replace("=", "")[:24]
-            cache[did] = f"did:plc:{suffix}"
-        return cache[did]
-
-    return pseudonymize
-
-
-def pseudonymize_like(like: dict, pseudonymize) -> dict:
-    """Apply *pseudonymize* to a like's author identity.
-
-    The at_uri embeds the liker's DID (at://<did>/app.bsky.feed.like/<rkey>),
-    so it has to be rewritten too or the real identity leaks straight back out
-    through the document id. subject_uri points at the liked post and keeps
-    its real author, which is public and what makes the content genuine.
-    """
-    fake_did = pseudonymize(like["author_did"])
-    rkey = like["at_uri"].rsplit("/", 1)[-1]
-    return {
-        **like,
-        "author_did": fake_did,
-        "at_uri": f"at://{fake_did}/app.bsky.feed.like/{rkey}",
-    }
 
 
 def generator_commit() -> str:
@@ -291,7 +240,6 @@ def write_fixture_set(
     window_start: dt.datetime,
     window_end: dt.datetime,
     cohort_size: int,
-    pseudonymized: bool,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("*.db.zip"):
@@ -310,9 +258,6 @@ def write_fixture_set(
         "window_end": iso_z(window_end),
         "embedding_model": EMBED_MODEL,
         "embedding_dims": EMBED_DIMS,
-        # False means the fixture carries real liker DIDs and must stay local;
-        # publish_fixture.sh refuses to upload it. See the module docstring.
-        "pseudonymized": pseudonymized,
         "counts": {
             "posts": len(posts),
             "likes": len(likes),
@@ -324,8 +269,6 @@ def write_fixture_set(
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"Fixture set written to {out_dir}")
     print(f"  posts={len(posts)} likes={len(likes)} cohort={cohort_size}")
-    if not pseudonymized:
-        print("  liker DIDs: REAL — local use only, not publishable")
     for persona in personas:
         print(f"  persona {persona['did']} ({persona['likes']} likes)")
 
@@ -348,6 +291,16 @@ class EsClient:
             self.ctx = ssl._create_unverified_context()  # noqa: SLF001 - dev tooling, port-forwarded ES
 
     def search(self, index: str, body: dict) -> dict:
+        """One _search, retrying transport failures.
+
+        A full prod-es run is tens of minutes of requests over a kubectl
+        port-forward, which drops connections routinely ("connection reset by
+        peer"). Without retries a single blip 20 minutes in throws the whole
+        run away, so transport errors and the gateway-ish 5xx codes back off
+        and retry. A 4xx is a real answer from ES — bad key, bad query — and
+        retrying it would just repeat the same mistake slowly, so those still
+        exit immediately.
+        """
         req = urllib.request.Request(
             f"{self.url}/{index}/_search",
             method="POST",
@@ -357,11 +310,33 @@ class EsClient:
                 "Content-Type": "application/json",
             },
         )
-        try:
-            with urllib.request.urlopen(req, timeout=120, context=self.ctx) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            sys.exit(f"FATAL: ES search on {index} -> {e.code}: {e.read()[:2000]}")
+        last_error = ""
+        for attempt in range(ES_MAX_ATTEMPTS):
+            try:
+                with urllib.request.urlopen(req, timeout=120, context=self.ctx) as resp:
+                    return json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                if e.code not in ES_RETRY_STATUS:
+                    sys.exit(f"FATAL: ES search on {index} -> {e.code}: {e.read()[:2000]}")
+                last_error = f"HTTP {e.code}"
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                ConnectionError,
+                http.client.HTTPException,
+            ) as e:
+                last_error = f"{type(e).__name__}: {e}"
+            if attempt < ES_MAX_ATTEMPTS - 1:
+                delay = min(ES_BACKOFF_CAP, 2**attempt)
+                print(
+                    f"  ES {last_error} on {index}; retry "
+                    f"{attempt + 1}/{ES_MAX_ATTEMPTS - 1} in {delay}s",
+                    flush=True,
+                )
+                time.sleep(delay)
+        sys.exit(
+            f"FATAL: ES search on {index} failed after {ES_MAX_ATTEMPTS} attempts: {last_error}"
+        )
 
     def scan(self, index: str, query: dict, source: list[str], page_size: int = 1000):
         """search_after scan sorted by (created_at, at_uri)."""
@@ -503,14 +478,9 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path) -> None:
         f"dropped {len(raw_likes) - len(kept)} dangling likes"
     )
 
-    # 5. Pseudonymize liker identities (see module docstring). Post authors
-    # stay real; only the people whose like histories we densified are masked.
-    pseudonymize = make_pseudonymizer(not args.no_pseudonymize)
-    if args.no_pseudonymize:
-        print("  WARNING: real liker DIDs retained (--no-pseudonymize) — do not publish")
-    likes = [pseudonymize_like(like, pseudonymize) for like in kept]
+    likes = kept
 
-    # 6. Personas: densest likers among kept likes.
+    # 5. Personas: densest likers among kept likes.
     by_liker = Counter(like["author_did"] for like in likes)
     personas = [{"did": did, "likes": count} for did, count in by_liker.most_common(args.personas)]
 
@@ -556,7 +526,6 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path) -> None:
         window_start,
         window_end,
         len(cohort),
-        pseudonymized=not args.no_pseudonymize,
     )
 
 
@@ -717,8 +686,6 @@ def run_megastream_files(args: argparse.Namespace, out_dir: Path) -> None:
         window_start,
         window_end,
         len(cohort),
-        # Liker DIDs in this mode are invented, so there's nothing to mask.
-        pseudonymized=True,
     )
 
 
@@ -754,13 +721,6 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     # common
     parser.add_argument("--personas", type=int, default=5)
-    parser.add_argument(
-        "--no-pseudonymize",
-        action="store_true",
-        help="keep real liker DIDs (prod-es only). For local investigation that "
-        "needs real identities; the result is NOT publishable and publish_fixture.sh "
-        "will refuse it. See the module docstring.",
-    )
     args = parser.parse_args()
 
     out_dir = Path(args.out).expanduser()

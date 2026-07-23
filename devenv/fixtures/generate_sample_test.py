@@ -1,5 +1,8 @@
 import base64
 import datetime as dt
+import email.message
+import gzip
+import io
 import json
 import re
 import sqlite3
@@ -8,50 +11,7 @@ import zipfile
 import zlib
 
 import generate_sample as gs
-
-# --------------------------------------------------------------------------
-# pseudonymization
-#
-# These guard a privacy property, not just a behavior: published fixtures must
-# not carry real liker identities, and the mapping must not be reversible.
-# --------------------------------------------------------------------------
-
-
-def test_pseudonym_is_stable_within_a_run():
-    pseudonymize = gs.make_pseudonymizer(True)
-    did = "did:plc:gzgq3r5wddxsorpmu4tauxo7"
-    assert pseudonymize(did) == pseudonymize(did)
-
-
-def test_distinct_dids_get_distinct_pseudonyms():
-    pseudonymize = gs.make_pseudonymizer(True)
-    fakes = {pseudonymize(f"did:plc:realuser{i:04d}") for i in range(500)}
-    assert len(fakes) == 500
-
-
-def test_pseudonym_looks_like_a_real_plc_did():
-    # Downstream (ES routing, at_uri parsing, the api's DID handling) treats
-    # these as ordinary DIDs, so shape matters.
-    pseudonymize = gs.make_pseudonymizer(True)
-    fake = pseudonymize("did:plc:gzgq3r5wddxsorpmu4tauxo7")
-    assert fake.startswith("did:plc:")
-    suffix = fake.removeprefix("did:plc:")
-    assert len(suffix) == 24
-    assert set(suffix) <= set("abcdefghijklmnopqrstuvwxyz234567")
-
-
-def test_salt_differs_per_run_so_mapping_is_not_reversible():
-    # The whole protection rests on the salt being per-run and discarded: a
-    # plain hash of a public, enumerable identifier would be trivially
-    # reversed by hashing the DID space. Two pseudonymizers must therefore
-    # disagree about the same input.
-    did = "did:plc:gzgq3r5wddxsorpmu4tauxo7"
-    assert gs.make_pseudonymizer(True)(did) != gs.make_pseudonymizer(True)(did)
-
-
-def test_disabled_pseudonymizer_is_identity():
-    did = "did:plc:gzgq3r5wddxsorpmu4tauxo7"
-    assert gs.make_pseudonymizer(False)(did) == did
+import pytest
 
 
 def _like(author="did:plc:liker00000000000000000", subject_author="did:plc:author0000000000000000"):
@@ -62,46 +22,6 @@ def _like(author="did:plc:liker00000000000000000", subject_author="did:plc:autho
         "created_at": "2026-07-22T10:00:00Z",
         "indexed_at": "2026-07-22T10:00:01Z",
     }
-
-
-def test_like_at_uri_is_rewritten_to_match_the_pseudonym():
-    # at_uri embeds the liker's DID and becomes the ES document id, so masking
-    # author_did alone would leak the real identity straight back out.
-    pseudonymize = gs.make_pseudonymizer(True)
-    out = gs.pseudonymize_like(_like(), pseudonymize)
-    assert out["at_uri"].startswith(f"at://{out['author_did']}/")
-    assert "did:plc:liker00000000000000000" not in out["at_uri"]
-
-
-def test_like_rkey_survives_rewriting():
-    pseudonymize = gs.make_pseudonymizer(True)
-    out = gs.pseudonymize_like(_like(), pseudonymize)
-    assert out["at_uri"].endswith("/app.bsky.feed.like/3abcdefghijkl")
-
-
-def test_subject_uri_keeps_the_real_post_author():
-    # Post authors stay real on purpose — that's public content, and it's what
-    # makes the fixture worth having.
-    pseudonymize = gs.make_pseudonymizer(True)
-    like = _like()
-    out = gs.pseudonymize_like(like, pseudonymize)
-    assert out["subject_uri"] == like["subject_uri"]
-
-
-def test_like_timestamps_are_untouched():
-    pseudonymize = gs.make_pseudonymizer(True)
-    like = _like()
-    out = gs.pseudonymize_like(like, pseudonymize)
-    assert out["created_at"] == like["created_at"]
-    assert out["indexed_at"] == like["indexed_at"]
-
-
-def test_same_liker_maps_consistently_across_their_likes():
-    # Per-user history density is the point of the cohort; it would be
-    # destroyed if one person's likes landed under several pseudonyms.
-    pseudonymize = gs.make_pseudonymizer(True)
-    likes = [gs.pseudonymize_like(_like(), pseudonymize) for _ in range(10)]
-    assert len({like["author_did"] for like in likes}) == 1
 
 
 # --------------------------------------------------------------------------
@@ -290,25 +210,25 @@ def test_identical_timestamps_do_not_collide_into_one_filename(tmp_path, monkeyp
 # --------------------------------------------------------------------------
 
 
-def test_manifest_records_pseudonymization_state(tmp_path):
-    # publish_fixture.sh refuses to upload when this is false, so it has to be
-    # written accurately.
-    for flag in (True, False):
-        out_dir = tmp_path / str(flag)
-        gs.write_fixture_set(
-            out_dir,
-            "prod-es",
-            _posts(1),
-            [],
-            [],
-            [],
-            dt.datetime(2026, 7, 22, tzinfo=dt.UTC),
-            dt.datetime(2026, 7, 23, tzinfo=dt.UTC),
-            0,
-            pseudonymized=flag,
-        )
-        manifest = json.loads((out_dir / "manifest.json").read_text())
-        assert manifest["pseudonymized"] is flag
+def test_liker_identities_are_written_through_unchanged(tmp_path):
+    # Fixtures deliberately carry real liker DIDs (see the generate_sample
+    # docstring): the follow-driven generators and Bluesky API lookups only
+    # work if these resolve to actual accounts.
+    like = _like(author="did:plc:gzgq3r5wddxsorpmu4tauxo7")
+    gs.write_fixture_set(
+        tmp_path,
+        "prod-es",
+        _posts(1),
+        [like],
+        [],
+        [],
+        dt.datetime(2026, 7, 22, tzinfo=dt.UTC),
+        dt.datetime(2026, 7, 23, tzinfo=dt.UTC),
+        0,
+    )
+    written = json.loads(gzip.decompress((tmp_path / "likes.jsonl.gz").read_bytes()).decode())
+    assert written["author_did"] == "did:plc:gzgq3r5wddxsorpmu4tauxo7"
+    assert written["at_uri"] == like["at_uri"]
 
 
 def test_manifest_counts_match_the_written_data(tmp_path):
@@ -323,7 +243,6 @@ def test_manifest_counts_match_the_written_data(tmp_path):
         dt.datetime(2026, 7, 22, tzinfo=dt.UTC),
         dt.datetime(2026, 7, 23, tzinfo=dt.UTC),
         7,
-        pseudonymized=True,
     )
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     assert manifest["counts"]["posts"] == 3
@@ -342,7 +261,97 @@ def test_regenerating_into_a_directory_clears_old_chunks(tmp_path, monkeypatch):
         dt.datetime(2026, 7, 23, tzinfo=dt.UTC),
         0,
     )
-    gs.write_fixture_set(tmp_path, "prod-es", _posts(6), [], [], [], *args, pseudonymized=True)
-    gs.write_fixture_set(tmp_path, "prod-es", _posts(2), [], [], [], *args, pseudonymized=True)
+    gs.write_fixture_set(tmp_path, "prod-es", _posts(6), [], [], [], *args)
+    gs.write_fixture_set(tmp_path, "prod-es", _posts(2), [], [], [], *args)
 
     assert len(list(tmp_path.glob("*.db.zip"))) == 1
+
+
+# --------------------------------------------------------------------------
+# ES transport retries
+#
+# A prod-es run is tens of minutes of requests over a kubectl port-forward,
+# which drops connections routinely. These guard that a blip costs a retry
+# rather than the whole run.
+# --------------------------------------------------------------------------
+
+
+def _es_client(monkeypatch):
+    monkeypatch.setenv("GE_ELASTICSEARCH_URL", "https://localhost:9200")
+    monkeypatch.setenv("GE_ELASTICSEARCH_API_KEY", "k")
+    return gs.EsClient()
+
+
+def test_search_retries_a_dropped_connection_and_succeeds(monkeypatch):
+    client = _es_client(monkeypatch)
+    monkeypatch.setattr(gs.time, "sleep", lambda _: None)
+    calls = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"hits": {"hits": []}}'
+
+    def fake_urlopen(*_a, **_k):
+        calls.append(1)
+        if len(calls) < 3:
+            raise ConnectionResetError("connection reset by peer")
+        return _Resp()
+
+    monkeypatch.setattr(gs.urllib.request, "urlopen", fake_urlopen)
+    assert client.search("posts", {}) == {"hits": {"hits": []}}
+    assert len(calls) == 3
+
+
+def test_search_gives_up_after_max_attempts(monkeypatch):
+    client = _es_client(monkeypatch)
+    monkeypatch.setattr(gs.time, "sleep", lambda _: None)
+
+    def always_reset(*_a, **_k):
+        raise ConnectionResetError("connection reset by peer")
+
+    monkeypatch.setattr(gs.urllib.request, "urlopen", always_reset)
+    with pytest.raises(SystemExit) as exc:
+        client.search("posts", {})
+    assert "after" in str(exc.value)
+
+
+def test_search_does_not_retry_a_client_error(monkeypatch):
+    # A 4xx is a real answer (bad key, bad query); retrying repeats the same
+    # mistake slowly instead of failing fast.
+    client = _es_client(monkeypatch)
+    monkeypatch.setattr(gs.time, "sleep", lambda _: None)
+    calls = []
+
+    def unauthorized(*_a, **_k):
+        calls.append(1)
+        raise gs.urllib.error.HTTPError(
+            "u", 401, "Unauthorized", email.message.Message(), io.BytesIO(b"nope")
+        )
+
+    monkeypatch.setattr(gs.urllib.request, "urlopen", unauthorized)
+    with pytest.raises(SystemExit):
+        client.search("posts", {})
+    assert len(calls) == 1
+
+
+def test_search_retries_a_gateway_error(monkeypatch):
+    client = _es_client(monkeypatch)
+    monkeypatch.setattr(gs.time, "sleep", lambda _: None)
+    calls = []
+
+    def bad_gateway(*_a, **_k):
+        calls.append(1)
+        raise gs.urllib.error.HTTPError(
+            "u", 503, "Unavailable", email.message.Message(), io.BytesIO(b"busy")
+        )
+
+    monkeypatch.setattr(gs.urllib.request, "urlopen", bad_gateway)
+    with pytest.raises(SystemExit):
+        client.search("posts", {})
+    assert len(calls) == gs.ES_MAX_ATTEMPTS
