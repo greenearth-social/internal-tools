@@ -8,7 +8,7 @@ Velocity is the average number of points completed per week over the last few
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from . import points
 from .models import STATUS_DONE, ProjectItem, has_status, is_completed_work
@@ -17,7 +17,7 @@ DEFAULT_VELOCITY_WEEKS = 3
 
 
 def _now(now: datetime | None) -> datetime:
-    return now if now is not None else datetime.now(timezone.utc)
+    return now if now is not None else datetime.now(UTC)
 
 
 def week_start(d: datetime | date) -> date:

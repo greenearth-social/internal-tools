@@ -1,0 +1,208 @@
+# Green Earth local development environment (issue api#268).
+#
+# Orchestrated by ./devctl — don't run `docker compose` directly unless you
+# know what you're doing; devctl sequences es-init (which mints the ES API
+# keys the other services read from .runtime/) before starting the api.
+#
+# Source repos are bind-mounted from sibling checkouts of this repo's parent
+# directory (override with GE_DEV_REPO_ROOT). Code lives on the host; only
+# execution happens in containers.
+
+name: ${GE_DEV_NAME:-ge-dev}
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.0.0
+    environment:
+      - discovery.type=single-node
+      - ELASTIC_PASSWORD=${GE_DEV_ES_PASSWORD:-ge-dev-elastic}
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.transport.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms${GE_DEV_ES_HEAP:-1g} -Xmx${GE_DEV_ES_HEAP:-1g}
+      - cluster.routing.allocation.disk.watermark.low=95%
+      - cluster.routing.allocation.disk.watermark.high=97%
+      - cluster.routing.allocation.disk.watermark.flood_stage=98%
+    ports:
+      - "127.0.0.1:${GE_DEV_PORT_ES:-9201}:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s -u elastic:$${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(yellow|green)\"'",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  # One-shot: applies the prod index templates / ILM policies straight from the
+  # ingex checkout, creates initial indexes+aliases, and mints the read-only and
+  # read-write ES API keys into .runtime/. Run via `docker compose run --rm es-init`
+  # (devctl does this).
+  es-init:
+    build: ./es-init
+    profiles: ["tools"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
+      - ELASTIC_PASSWORD=${GE_DEV_ES_PASSWORD:-ge-dev-elastic}
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/ingex/index/deploy/k8s/base/templates:/templates:ro
+      - ./.runtime:/runtime
+
+  firestore:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: >
+      gcloud emulators firestore start
+      --host-port=0.0.0.0:8080
+      --project=demo-no-project
+    ports:
+      - "127.0.0.1:${GE_DEV_PORT_FIRESTORE:-8086}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:8080 | grep -q Ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  # Milestone-1 stand-in for inference-service: answers the post-tower predict
+  # endpoint megastream_ingest requires, with deterministic pseudo-embeddings.
+  # Replaced by the real inference-service + published models in milestone 2
+  # (api#269).
+  inference-stub:
+    image: python:3.13-slim
+    command: ["python", "/stub/app.py"]
+    environment:
+      - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
+    volumes:
+      - ./inference-stub:/stub:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\"",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  api:
+    build: ./images/pydev
+    working_dir: /app
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        pipenv install --dev
+        exec pipenv run uvicorn src.app.main:app --host 0.0.0.0 --port 8000 ${GE_DEV_API_RELOAD:+--reload}
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      firestore:
+        condition: service_healthy
+    environment:
+      - ENVIRONMENT=local
+      - PIPENV_VENV_IN_PROJECT=1
+      # The api checkout may carry a developer's .env (host-machine addresses,
+      # real keys); pipenv would auto-load it and override this container
+      # environment. The compose environment is authoritative here.
+      - PIPENV_DONT_LOAD_ENV=1
+      - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
+      - GE_FIRESTORE_EMULATOR_HOST=firestore:8080
+      - GE_FIRESTORE_PROJECT=demo-no-project
+      - GE_FEED_CONTEXT_SECRET=${GE_DEV_FEED_CONTEXT_SECRET:-ge-dev-feed-context-secret}
+      - GE_PROBE_SECRET=${GE_DEV_PROBE_SECRET:-ge-dev-probe}
+      - GE_INFERENCE_BASE_URL=http://inference-stub:8000
+      - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
+      - GE_METRICS_EXPORT_INTERVAL_SEC=86400
+      - GE_TIMING_LOGS=${GE_DEV_TIMING_LOGS:-1}
+    env_file:
+      # Written by es-init / seed; devctl guarantees they exist before `up`.
+      - ./.runtime/es_key_ro.env
+      - ./.runtime/probe.env
+    ports:
+      - "127.0.0.1:${GE_DEV_PORT_API:-8300}:8000"
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/api:/app
+      - api_venv:/app/.venv
+
+  # --- seed pipeline (one-shot, `docker compose run --rm <svc>`; devctl seed) ---
+
+  # Rebases fixture timestamps to look recent, into .runtime/seed/.
+  seed-rebase:
+    image: python:3.13-slim
+    profiles: ["tools"]
+    command: ["python", "/seedscripts/rebase.py"]
+    volumes:
+      - ./seed:/seedscripts:ro
+      - ./fixtures/data:/fixtures:ro
+      - ./.runtime:/runtime
+
+  # Runs the real megastream_ingest binary (byte-identical to prod) against the
+  # rebased fixtures. Uses the read-write ES key minted by es-init.
+  seed-megastream:
+    image: golang:1.25
+    profiles: ["tools"]
+    working_dir: /src
+    command:
+      ["go", "run", "./cmd/megastream_ingest", "--source", "local", "--mode", "once"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      inference-stub:
+        condition: service_healthy
+    environment:
+      - GE_LOCAL_SQLITE_DB_PATH=/runtime/seed
+      - GE_MEGASTREAM_STATE_FILE=/runtime/seed/.megastream_state.json
+      - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
+      - GE_INFERENCE_BASE_URL=http://inference-stub:8000
+      - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
+      - GE_INDEX_PERIOD=week
+    env_file:
+      - ./.runtime/es_key_rw.env
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/ingex/ingest:/src
+      - gomod:/go/pkg/mod
+      - gocache:/root/.cache/go-build
+      - ./.runtime:/runtime
+
+  # Wipes previously seeded data indexes so each seed is a fresh load.
+  seed-wipe:
+    image: python:3.13-slim
+    profiles: ["tools"]
+    command: ["python", "/seedscripts/wipe.py"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
+    env_file:
+      - ./.runtime/es_key_rw.env
+    volumes:
+      - ./seed:/seedscripts:ro
+
+  # Bulk-loads the (rebased) likes fixture and applies per-post like counts.
+  seed-likes:
+    image: python:3.13-slim
+    profiles: ["tools"]
+    command: ["python", "/seedscripts/load_likes.py"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
+    env_file:
+      - ./.runtime/es_key_rw.env
+    volumes:
+      - ./seed:/seedscripts:ro
+      - ./.runtime:/runtime
+
+volumes:
+  esdata:
+  api_venv:
+  gomod:
+  gocache:

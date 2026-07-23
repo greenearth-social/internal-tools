@@ -1,7 +1,7 @@
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
-from .conftest import NOW, make_item
 from . import burndown
+from .conftest import NOW, make_item
 
 
 def _backlog(points_, **kw):
@@ -11,7 +11,7 @@ def _backlog(points_, **kw):
 def test_completed_history_spans_to_last_completed_week():
     # NOW = 2026-06-24 (Wed) -> current week 06-22, last completed week 06-15.
     items = [
-        make_item(status="Done", closed_at=datetime(2026, 6, 16, tzinfo=timezone.utc), raw_points=4),
+        make_item(status="Done", closed_at=datetime(2026, 6, 16, tzinfo=UTC), raw_points=4),
     ]
     hist = burndown.completed_history(items, min_weeks=3, now=NOW)
     # ends at 06-15 (current partial week 06-22 excluded), zero-filled back min_weeks
@@ -24,8 +24,8 @@ def test_completed_history_spans_to_last_completed_week():
 
 def test_completed_history_extends_back_for_older_data():
     items = [
-        make_item(status="Done", closed_at=datetime(2026, 4, 20, tzinfo=timezone.utc), raw_points=2),
-        make_item(status="Done", closed_at=datetime(2026, 6, 16, tzinfo=timezone.utc), raw_points=4),
+        make_item(status="Done", closed_at=datetime(2026, 4, 20, tzinfo=UTC), raw_points=2),
+        make_item(status="Done", closed_at=datetime(2026, 6, 16, tzinfo=UTC), raw_points=4),
     ]
     hist = burndown.completed_history(items, min_weeks=3, now=NOW)
     weeks = [wk for wk, _ in hist]
