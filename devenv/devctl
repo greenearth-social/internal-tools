@@ -30,7 +30,6 @@ AUTH_PORT="${GE_DEV_PORT_FIREBASE_AUTH:-9099}"
 FUNCTIONS_PORT="${GE_DEV_PORT_FUNCTIONS:-5001}"
 FIREBASE_UI_PORT="${GE_DEV_PORT_FIREBASE_UI:-4000}"
 FRONTEND_PORT="${GE_DEV_PORT_FRONTEND:-3000}"
-DEV_SESSION_SECRET="${GE_DEV_SESSION_SECRET:-ge-dev-session}"
 
 compose() {
   docker compose -f "$DEVENV_DIR/docker-compose.yml" --project-directory "$DEVENV_DIR" "$@"
@@ -240,22 +239,27 @@ cmd_seed() {
 }
 
 cmd_feed() {
-  local rkey="${1:-random}"
-  local uri="at://did:web:test/app.bsky.feed.generator/${rkey}"
-  local persona out
-  persona="$(sed -n 's/^GE_PROBE_USER_DID=//p' "$DEVENV_DIR/.runtime/probe.env")"
-  # Request as a development session rather than a monitoring probe, so the api
-  # runs the full signed-in-user path and records a feed snapshot — which is
-  # what the frontend's transparency UI reads.
-  out="$(curl -s \
-    -H "X-Dev-Session: ${DEV_SESSION_SECRET}" \
-    -H "X-Dev-Session-DID: ${persona}" \
-    "http://127.0.0.1:${API_PORT}/xrpc/app.bsky.feed.getFeedSkeleton?feed=${uri}&limit=20")"
-  if command -v python3 >/dev/null; then
-    echo "$out" | python3 -m json.tool
-  else
-    echo "$out"
-  fi
+  # Terminal feed viewer (issue #285): request getFeedSkeleton as the seeded
+  # persona, hydrate each post from this environment's Elasticsearch, and print
+  # the feed. Runs inside the api container, which already has every input the
+  # viewer needs — the dev-session secret (so the api runs the full signed-in
+  # path and records a snapshot for the transparency UI), the persona DID, the
+  # ES read key, and the Firestore config for the per-post pipeline detail.
+  #
+  #   devctl feed popularity
+  #   devctl feed your-feed --user did:plc:... --limit 50 --pages 2
+  #   devctl feed popularity --json      # raw getFeedSkeleton, the old output
+  #
+  # All arguments pass through to scripts/feed_view.py (feed defaults to
+  # popularity). See feed_view.py --help for the full flag set.
+  compose ps --status running api | grep -q api ||
+    die "the api isn't running — start it with: devctl up"
+  # Give the viewer a TTY when stdout is a terminal so rich colorizes; drop it
+  # (-T) when piped or redirected, where TTY allocation would fail.
+  local tty=()
+  [[ -t 1 ]] || tty=(-T)
+  compose exec "${tty[@]}" -e PIPENV_VERBOSITY=-1 api \
+    pipenv run python scripts/feed_view.py "$@"
 }
 
 cmd_login() {
@@ -310,7 +314,8 @@ Usage: devctl <command> [args]
   fetch-fixture  download the published fixture set (no account or auth needed)
   up             start the stack (ES + Firestore emulator + inference stub + api)
   seed           load fixtures: rebase timestamps, ingest posts, load likes
-  feed [rkey]    fetch a feed skeleton from the local api (default: random)
+  feed [feed]    view a hydrated feed in the terminal (default: popularity;
+                 --user <did>, --limit, --pages, --json for raw skeleton)
   login [did]    print a sign-in URL for the frontend as the seeded persona
   status         container status + index doc counts
   logs [svc...]  follow logs (all services or the named ones)

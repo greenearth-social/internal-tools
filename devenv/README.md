@@ -40,9 +40,25 @@ cd internal-tools/devenv
 ./devctl feed popularity
 ```
 
-`devctl feed <rkey>` fetches `getFeedSkeleton` from the local api as the
-seeded dev persona (JWT auth is bypassed with the `X-Probe-Secret` header; the
-persona DID comes from the fixture manifest via `.runtime/probe.env`).
+`devctl feed <feed>` shows a feed in the terminal: it requests
+`getFeedSkeleton` from the local api as the seeded dev persona, hydrates each
+post from this environment's Elasticsearch (no AppView call, so it works
+entirely against fixture data), and prints author, timestamp, like count, text,
+and per-post pipeline detail (which generator retrieved it, its rank and ranker
+score). Defaults to the `popularity` feed and the seeded persona.
+
+```bash
+./devctl feed popularity                 # the seeded persona's popularity feed
+./devctl feed your-feed --user did:plc:… # a different feed as a chosen persona
+./devctl feed random --limit 50 --pages 2  # page through more of the feed
+./devctl feed popularity --json          # the raw getFeedSkeleton response
+```
+
+The persona defaults to the fixture manifest's DID (via `.runtime/probe.env`)
+and the request is a development session (see below), so the api runs the full
+signed-in path and records a snapshot. The viewer is a read-only client — it
+never posts, likes, or writes anything. `--no-pipeline` skips the snapshot
+lookup and shows the feed as a plain client would.
 
 Other commands: `devctl status`, `devctl logs [service]`, `devctl down`
 (stop, keep data), `devctl nuke` (delete everything). Data is disposable by
@@ -329,5 +345,3 @@ Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
   real users with real follows.
 - Multi-instance (`--name`), `devctl exec`, and local/live backend switching
   are milestone 3 ([api#283](https://github.com/greenearth-social/api/issues/283)).
-- A proper terminal feed viewer is [api#285](https://github.com/greenearth-social/api/issues/285);
-  `devctl feed` is the minimal stand-in.
