@@ -183,9 +183,8 @@ query needing a composite index can still pass locally and fail deployed.
 ### Signing in
 
 Just click **Sign in with Bluesky**. It works with no credentials and logs you
-in as the seeded persona. (The feed list will be empty once you're in — see
-"What the frontend can and can't show" below; that's expected, not a broken
-sign-in.)
+in as the seeded persona. (The feed list starts empty — see "Seeing real data
+in the transparency UI" below.)
 
 Real sign-in starts a Bluesky OAuth handshake in the `authBluesky` Cloud
 Function, which needs private keys this environment deliberately doesn't
@@ -262,29 +261,35 @@ devctl logs firebase
 for those an error means "check the emulator logs" rather than pointing at a
 specific variable.
 
-### What the frontend can and can't show
+### Seeing real data in the transparency UI
 
-The app authenticates, reaches the api, and renders — but **its feed list will
-be empty**, and `devctl feed` will not fill it. Two independent reasons, both
-worth knowing before you go looking for a bug:
+The frontend is a feed-*transparency* UI: it reports on feeds the api has
+already served to you. To put something in it, generate a feed:
 
-- **`devctl feed` requests are probe requests.** They authenticate with
-  `X-Probe-Secret`, and the api writes feed snapshots only `if not is_probe` —
-  probe traffic is Cloud Scheduler health-checking and is deliberately kept out
-  of user data. So it populates `feed_cache` but never `feed_snapshots`, which
-  is what this UI reads. Generating snapshots needs a genuine AT Protocol
-  JWT-authenticated request, which nothing local can mint.
-- **The UI only reads the `your-feed` feed** (last 15 minutes), and that
-  pipeline runs the `perspective` ranker, which hard-fails without
-  `GE_PERSPECTIVE_API_KEY`, plus ML rankers that need the real inference
-  service ([api#269](https://github.com/greenearth-social/api/issues/269)).
+```bash
+devctl feed popularity     # then reload the frontend
+```
 
-Setting `GE_PERSPECTIVE_API_KEY` in `devenv.local.env` clears the second, not
-the first.
+Two things make that work, both of which are otherwise dead ends locally:
 
-To inspect what the pipeline actually produced, use the api directly —
-`devctl feed <name>`, or `scripts/feed_debug.py` in the api repo, which reads
-the `feed_debug` records that *are* written for probe requests.
+- **`devctl feed` requests are development sessions.** `getFeedSkeleton`
+  normally authenticates an AT Protocol JWT signed by your Bluesky identity,
+  which nothing local can mint. `GE_DEV_SESSION_SECRET` lets the api accept an
+  explicit stand-in (`X-Dev-Session` + `X-Dev-Session-DID`) and treat it as a
+  genuine signed-in user, so the full session path runs and a feed snapshot is
+  recorded. It is deliberately separate from the Cloud Scheduler probe bypass,
+  which is monitoring traffic and is excluded from user data — a probe request
+  writes `feed_cache` but never `feed_snapshots`, which is what this UI reads.
+  The api refuses to start with `GE_DEV_SESSION_SECRET` set in a deployed
+  environment.
+- **The UI reports on one feed, and here it's `popularity`.** Its default,
+  `your-feed`, needs the Perspective API and the trained ranking models, so it
+  can't run locally. `GE_FEED_TRANSPARENCY_FEED` overrides which feed it reads;
+  devenv points it at `popularity`. Generate a feed for whatever this is set
+  to — the UI ignores the rest.
+
+Snapshots are only kept for 15 minutes, so an untouched tab goes empty again;
+run `devctl feed` and reload.
 
 ## Service endpoints (defaults)
 

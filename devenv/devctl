@@ -30,7 +30,7 @@ AUTH_PORT="${GE_DEV_PORT_FIREBASE_AUTH:-9099}"
 FUNCTIONS_PORT="${GE_DEV_PORT_FUNCTIONS:-5001}"
 FIREBASE_UI_PORT="${GE_DEV_PORT_FIREBASE_UI:-4000}"
 FRONTEND_PORT="${GE_DEV_PORT_FRONTEND:-3000}"
-PROBE_SECRET="${GE_DEV_PROBE_SECRET:-ge-dev-probe}"
+DEV_SESSION_SECRET="${GE_DEV_SESSION_SECRET:-ge-dev-session}"
 
 compose() {
   docker compose -f "$DEVENV_DIR/docker-compose.yml" --project-directory "$DEVENV_DIR" "$@"
@@ -242,8 +242,14 @@ cmd_seed() {
 cmd_feed() {
   local rkey="${1:-random}"
   local uri="at://did:web:test/app.bsky.feed.generator/${rkey}"
-  local out
-  out="$(curl -s -H "X-Probe-Secret: ${PROBE_SECRET}" \
+  local persona out
+  persona="$(sed -n 's/^GE_PROBE_USER_DID=//p' "$DEVENV_DIR/.runtime/probe.env")"
+  # Request as a development session rather than a monitoring probe, so the api
+  # runs the full signed-in-user path and records a feed snapshot — which is
+  # what the frontend's transparency UI reads.
+  out="$(curl -s \
+    -H "X-Dev-Session: ${DEV_SESSION_SECRET}" \
+    -H "X-Dev-Session-DID: ${persona}" \
     "http://127.0.0.1:${API_PORT}/xrpc/app.bsky.feed.getFeedSkeleton?feed=${uri}&limit=20")"
   if command -v python3 >/dev/null; then
     echo "$out" | python3 -m json.tool
