@@ -339,15 +339,21 @@ Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
   post, and a cached feed can outlive a re-seed — so `devctl feed` may show
   "(not in Elasticsearch)" for an item. That's the viewer reporting a real
   dangling reference, not a failure.
-- **Follow-driven generators need a fixture generated after real IDs landed.**
+- **Follow-driven generators work, but yield depends on the sample.**
   `followed_users` and `network_likes` resolve the requesting user's follows
-  from the live AT Protocol network. Fixtures generated before identities went
-  real carry synthetic persona DIDs that resolve to nobody, so those
-  generators come back empty — check with
-  `curl -o /dev/null -w '%{http_code}' https://plc.directory/<persona-did>`
-  (404 means synthetic). Regenerate from prod ES to fix it. Even then, yield
-  depends on whether the accounts a persona follows have posts inside the
-  sampled window; `random`, `popularity`, and `post_similarity` don't have
-  that dependency and exercise the retrieve → rank path fully.
+  from the live AT Protocol network, so they need a persona whose DID is real
+  — every fixture generated since identities went real qualifies. Check a
+  persona with
+  `curl -o /dev/null -w '%{http_code}' https://plc.directory/<persona-did>`;
+  404 means it came from an old pseudonymized fixture, so refetch or
+  regenerate.
+
+  Even with real DIDs, these only return what the fixture happens to contain.
+  `followed_users` finds posts by accounts the persona follows, and usually
+  produces some. `network_likes` needs those accounts to have *liked*
+  something inside the sampled window, which is much rarer — an empty
+  `network-likes` feed is normally the sample, not a fault. The api says which
+  in its logs ("No liked posts found for followed users of ..."). `random`,
+  `popularity`, and `post_similarity` have no such dependency.
 - Multi-instance (`--name`), `devctl exec`, and local/live backend switching
   are milestone 3 ([api#283](https://github.com/greenearth-social/api/issues/283)).
