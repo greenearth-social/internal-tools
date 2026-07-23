@@ -31,6 +31,10 @@ indent-style = "space"
 
 [tool.pyright]
 include = ["velocity", "devenv"]
+# dev-auth adds this to sys.path at runtime (the directory is mounted into its
+# container), so tell the checker where those modules come from instead of
+# silencing the import.
+extraPaths = ["devenv/firebase"]
 # Same exclusion as ruff: notebook cells re-import and shadow freely.
 exclude = ["notebooks", "**/__pycache__"]
 pythonVersion = "3.13"

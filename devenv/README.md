@@ -2,7 +2,8 @@
 
 A cohesive, agent-friendly local development environment for the Green Earth
 serving stack ([api#268](https://github.com/greenearth-social/api/issues/268)).
-One Docker Compose project runs Elasticsearch, the Firestore emulator, the api,
+One Docker Compose project runs Elasticsearch, the Firebase emulators, the api,
+the frontend,
 and (for now) an inference stub, seeded with representative Bluesky data — no
 GCP, Firebase, or production credentials required.
 
@@ -34,7 +35,7 @@ cd internal-tools/devenv
 
 ./devctl setup           # checks prerequisites, builds/pulls images
 ./devctl fetch-fixture   # downloads the published sample (~170MB)
-./devctl up              # ES + Firestore emulator + inference stub + api
+./devctl up              # ES + Firebase emulators + inference stub + api + frontend
 ./devctl seed            # rebase timestamps, ingest posts, load likes
 ./devctl feed popularity
 ```
@@ -149,16 +150,162 @@ mints two ES API keys mirroring prod's split: read-only for the api,
 read-write for ingest/seed (written to `.runtime/es_key_*.env`). The api
 authenticates to ES exactly as it does in prod.
 
+## The frontend and Firebase
+
+`devctl up` runs the frontend's Vite dev server and the Firebase emulator suite
+(Firestore, Auth, Functions). The emulators are started **from the frontend
+checkout**, so the rules and function code under test are the ones that repo
+deploys — the api repo's Firebase config is being retired
+([frontend#42](https://github.com/greenearth-social/frontend/issues/42)) and
+isn't used here.
+
+Two adaptations are made at startup, both in `firebase/`:
+
+- **A derived emulator config.** The frontend declares `firestore` as an array
+  of named databases for deployment. The Firestore emulator doesn't support
+  multiple databases and silently ignores that shape — it logs "Did not find a
+  Cloud Firestore rules file" and then *allows all reads and writes*. So
+  `firebase/derive-config.mjs` collapses it to the single database the
+  emulator supports, still pointing at the frontend's own `firestore.rules`.
+  The result is written to `frontend/firebase.devenv.json` (the CLI insists
+  referenced paths sit beside the config), regenerated on every start and
+  removed by `devctl down`/`nuke`.
+- **Port bridging.** The emulators bind loopback inside their container, which
+  Docker can't publish. socat re-exposes them, and the *host* ports are
+  exactly 8080/9099/5001 because the frontend's Firebase SDK hardcodes
+  `127.0.0.1` at those numbers and runs in your browser.
+
+Firestore rules are genuinely enforced here (an unauthenticated read gets a
+403), unlike the bare emulator this replaced, which allowed everything.
+Indices are **not** applied: they haven't moved out of the api repo yet, so a
+query needing a composite index can still pass locally and fail deployed.
+
+### Signing in
+
+Just click **Sign in with Bluesky**. It works with no credentials and logs you
+in as the seeded persona. (The feed list starts empty — see "Seeing real data
+in the transparency UI" below.)
+
+Real sign-in starts a Bluesky OAuth handshake in the `authBluesky` Cloud
+Function, which needs private keys this environment deliberately doesn't
+carry — so the button would otherwise fail, which is the first thing a new
+engineer is likely to try. The `dev-auth` service sits where the Functions
+emulator does, answers that one call with a redirect to the app's own
+`#/auth/finish?token=...` route (the same place the real OAuth callback sends
+the browser), and passes every other function through untouched.
+
+`devctl login` prints the same URL if you'd rather paste it, or want to sign
+in as a different persona: `devctl login did:plc:...`.
+
+Both mint an unsigned custom token, which only an emulator will accept — the
+Auth emulator ignores the signature, real Firebase would reject it outright.
+Tokens last an hour.
+
+### Working on real Bluesky auth
+
+The shim above is for *using* the app. To work on the OAuth flow itself, take
+`dev-auth` out of the path so `/auth/bluesky` reaches the real function again:
+
+```bash
+# devenv.local.env
+GE_DEV_FUNCTIONS_TARGET=firebase:15001
+```
+
+The functions read six variables, all passed straight through from
+`devenv.local.env` to the emulator:
+
+| Variable | Purpose |
+| --- | --- |
+| `APP_ORIGIN` | Derives `client_id` (`$APP_ORIGIN/.well-known/oauth-client-metadata`) and `redirect_uri` (`$APP_ORIGIN/oauth/callback`) |
+| `BLUESKY_OAUTH_CLIENT_KID` | Key id in the client assertion |
+| `BLUESKY_OAUTH_CLIENT_PRIVATE_KEY` | Signs the client assertion (prod key) |
+| `BLUESKY_OAUTH_CLIENT_PRIVATE_KEY_STAGE` | Same, for the `*Stage` function variants |
+| `BLUESKY_OAUTH_PUBLIC_JWKS` | Served by `oauthJwks` for Bluesky to verify the assertion |
+| `OAUTH_STATE_ENCRYPTION_KEY` | Encrypts the OAuth state parameter |
+
+**`APP_ORIGIN` has to be publicly reachable.** Bluesky's authorization server
+fetches your client metadata from it and redirects the browser back to it, so
+the default `http://localhost:3000` cannot work — the handshake fails at the
+authorization server, not in our code. Point it at a tunnel, and tell Vite to
+accept that hostname:
+
+```bash
+# devenv.local.env
+GE_DEV_APP_ORIGIN=https://your-subdomain.ngrok.dev
+GE_DEV_FRONTEND_ALLOWED_HOSTS=localhost,your-subdomain.ngrok.dev
+GE_DEV_FUNCTIONS_TARGET=firebase:15001
+```
+
+Then `devctl up` and browse the tunnel URL rather than localhost. Any origin
+change is also a fresh Firebase auth origin, so you'll be signed out — expected,
+not a bug.
+
+Sanity checks:
+
+```bash
+# Confirms APP_ORIGIN: the client_id and redirect_uris it returns are exactly
+# what Bluesky will be asked to fetch and redirect to. If these say
+# "localhost", the handshake cannot work.
+curl -s localhost:5001/greenearth-471522/us-central1/oauthClientMetadata
+
+# Confirms BLUESKY_OAUTH_PUBLIC_JWKS — unset, it answers {"error":"Failed to
+# load JWKS"}.
+curl -s localhost:5001/greenearth-471522/us-central1/oauthJwks
+
+# Per-request function logs, including thrown errors.
+devctl logs firebase
+```
+
+`authBluesky` names the variable it's missing (`APP_ORIGIN not configured`,
+`BLUESKY_OAUTH_CLIENT_KID not configured`); the others report generically, so
+for those an error means "check the emulator logs" rather than pointing at a
+specific variable.
+
+### Seeing real data in the transparency UI
+
+The frontend is a feed-*transparency* UI: it reports on feeds the api has
+already served to you. To put something in it, generate a feed:
+
+```bash
+devctl feed popularity     # then reload the frontend
+```
+
+Two things make that work, both of which are otherwise dead ends locally:
+
+- **`devctl feed` requests are development sessions.** `getFeedSkeleton`
+  normally authenticates an AT Protocol JWT signed by your Bluesky identity,
+  which nothing local can mint. `GE_DEV_SESSION_SECRET` lets the api accept an
+  explicit stand-in (`X-Dev-Session` + `X-Dev-Session-DID`) and treat it as a
+  genuine signed-in user, so the full session path runs and a feed snapshot is
+  recorded. It is deliberately separate from the Cloud Scheduler probe bypass,
+  which is monitoring traffic and is excluded from user data — a probe request
+  writes `feed_cache` but never `feed_snapshots`, which is what this UI reads.
+  The api refuses to start with `GE_DEV_SESSION_SECRET` set in a deployed
+  environment.
+- **The UI reports on every feed you've loaded**, so generate whichever one
+  you're working on. `your-feed` won't run here — it needs the Perspective API
+  and the trained ranking models — but `popularity`, `random` and
+  `post-similarity` all work.
+
+Snapshots are only kept for 15 minutes, so an untouched tab goes empty again;
+run `devctl feed` and reload.
+
 ## Service endpoints (defaults)
 
 | Service | Address | Notes |
 | --- | --- | --- |
 | api | `http://127.0.0.1:8300` | first start runs `pipenv install` into a cached volume — watch `devctl logs api` |
 | Elasticsearch | `http://127.0.0.1:9201` | user `elastic` / `ge-dev-elastic`, or the minted keys |
-| Firestore emulator | `127.0.0.1:8086` | project `demo-no-project` |
+| frontend | `http://127.0.0.1:3000` | Vite dev server; first start runs `npm install` |
+| Firestore emulator | `127.0.0.1:8080` | project `greenearth-471522` |
+| Firebase Auth emulator | `127.0.0.1:9099` | |
+| Functions emulator | `127.0.0.1:5001` | |
+| Firebase Emulator UI | `http://127.0.0.1:4000` | browse Firestore data, auth users, function logs |
 
 Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
-`GE_DEV_PORT_ES`, `GE_DEV_PORT_FIRESTORE`, `GE_DEV_ES_HEAP`, `GE_DEV_NAME`
+`GE_DEV_PORT_ES`, `GE_DEV_PORT_FIRESTORE`, `GE_DEV_PORT_FRONTEND`,
+`GE_DEV_PORT_FIREBASE_AUTH`, `GE_DEV_PORT_FUNCTIONS`, `GE_DEV_PORT_FIREBASE_UI`,
+`GE_DEV_ES_HEAP`, `GE_DEV_NAME`
 (compose project name), `GE_DEV_API_RELOAD=1` (uvicorn --reload watch mode).
 
 ## Current limitations (by milestone)

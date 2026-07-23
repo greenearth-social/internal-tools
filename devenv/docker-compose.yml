@@ -54,16 +54,120 @@ services:
       - ${GE_DEV_REPO_ROOT:-../..}/ingex/index/deploy/k8s/base/templates:/templates:ro
       - ./.runtime:/runtime
 
-  firestore:
-    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
-    command: >
-      gcloud emulators firestore start
-      --host-port=0.0.0.0:8080
-      --project=demo-no-project
+  # Firebase emulators (Firestore + Auth + Functions), started from the
+  # frontend checkout so rules and function code come from the repo we deploy
+  # them from rather than a copy maintained here (frontend#42, api#301).
+  #
+  # Port bridging: the emulators bind loopback inside the container, which
+  # Docker can't publish (published ports arrive on eth0). socat re-exposes
+  # each one on 0.0.0.0 at port+10000, and those are what get published and
+  # what other services connect to. The published *host* ports have to be
+  # exactly 8080/9099/5001 because the frontend's Firebase SDK hardcodes
+  # 127.0.0.1 at those numbers and runs in the developer's browser.
+  firebase:
+    build: ./images/nodedev
+    working_dir: /frontend
+    command: ["bash", "/firebase/start.sh"]
+    environment:
+      - GE_DEV_FIREBASE_PROJECT=${GE_DEV_FIREBASE_PROJECT:-greenearth-471522}
+      # --- consumed by functions/src at runtime ---
+      # APP_ORIGIN derives the OAuth client_id and redirect_uri. Bluesky's
+      # authorization server has to fetch the client metadata from it, so
+      # working on real auth means pointing this (and the frontend's allowed
+      # hosts) at a public tunnel. See README, "Working on real Bluesky auth".
+      - APP_ORIGIN=${GE_DEV_APP_ORIGIN:-http://localhost:${GE_DEV_PORT_FRONTEND:-3000}}
+      # Empty by default: the environment runs credential-free, and dev-auth
+      # stands in for this flow. Set them in devenv.local.env to use the real
+      # one.
+      - BLUESKY_OAUTH_CLIENT_KID=${BLUESKY_OAUTH_CLIENT_KID:-}
+      - BLUESKY_OAUTH_CLIENT_PRIVATE_KEY=${BLUESKY_OAUTH_CLIENT_PRIVATE_KEY:-}
+      - BLUESKY_OAUTH_CLIENT_PRIVATE_KEY_STAGE=${BLUESKY_OAUTH_CLIENT_PRIVATE_KEY_STAGE:-}
+      - BLUESKY_OAUTH_PUBLIC_JWKS=${BLUESKY_OAUTH_PUBLIC_JWKS:-}
+      - OAUTH_STATE_ENCRYPTION_KEY=${OAUTH_STATE_ENCRYPTION_KEY:-}
     ports:
-      - "127.0.0.1:${GE_DEV_PORT_FIRESTORE:-8086}:8080"
+      - "127.0.0.1:${GE_DEV_PORT_FIRESTORE:-8080}:18080"
+      - "127.0.0.1:${GE_DEV_PORT_FIREBASE_AUTH:-9099}:19099"
+      - "127.0.0.1:${GE_DEV_PORT_FUNCTIONS:-5001}:15001"
+      - "127.0.0.1:${GE_DEV_PORT_FIREBASE_UI:-4000}:14000"
+      # The UI loads from 4000 but its Firestore viewer opens a
+      # websocket straight to 9150, so that has to be reachable too.
+      - "127.0.0.1:${GE_DEV_PORT_FIREBASE_UI_WS:-9150}:19150"
+    volumes:
+      - ./firebase:/firebase:ro
+      - ${GE_DEV_REPO_ROOT:-../..}/frontend:/frontend
+      - functions_node_modules:/frontend/functions/node_modules
     healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:8080 | grep -q Ok"]
+      # Probe through socat, so this only passes once the bridge other services
+      # depend on is actually serving.
+      test: ["CMD-SHELL", "curl -sf http://localhost:18080/ >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  frontend:
+    build: ./images/nodedev
+    working_dir: /frontend
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        # vite.config.ts proxies to localhost:8000 (api) and 127.0.0.1:5001
+        # (functions), which inside this container would mean this container.
+        # Bridge both to the real services rather than patching the frontend
+        # repo, which is being actively changed elsewhere.
+        socat TCP-LISTEN:8000,fork,reuseaddr,bind=127.0.0.1 TCP:api:8000 &
+        socat TCP-LISTEN:5001,fork,reuseaddr,bind=127.0.0.1 TCP:${GE_DEV_FUNCTIONS_TARGET:-dev-auth:8000} &
+        # npm ci, not install: install rewrites package-lock.json in the
+        # developer's bind-mounted checkout.
+        npm ci --no-audit --no-fund
+        exec npm run dev -- --host 0.0.0.0 --port 3000
+    depends_on:
+      firebase:
+        condition: service_healthy
+      dev-auth:
+        condition: service_healthy
+    environment:
+      # Real services by default. Mock mode is the frontend repo's own
+      # default, but here it renders convincing hardcoded feed cards that have
+      # nothing to do with the seeded data — which reads as the environment
+      # working when it isn't. Set GE_DEV_FRONTEND_MOCK=true for UI work that
+      # doesn't need a backend.
+      - VITE_USE_MOCK_SERVICES=${GE_DEV_FRONTEND_MOCK:-false}
+      - VITE_USE_FIREBASE_EMULATORS=true
+      - VITE_FIREBASE_PROJECT_ID=${GE_DEV_FIREBASE_PROJECT:-greenearth-471522}
+      # The Firebase JS SDK validates that these are non-empty before it will
+      # initialize, even when every call is going to an emulator that ignores
+      # them. Placeholders keep real project credentials out of the dev env.
+      - VITE_FIREBASE_API_KEY=${GE_DEV_FIREBASE_API_KEY:-ge-dev-fake-api-key}
+      - VITE_FIREBASE_AUTH_DOMAIN=${GE_DEV_FIREBASE_PROJECT:-greenearth-471522}.firebaseapp.com
+      - VITE_FIREBASE_APP_ID=${GE_DEV_FIREBASE_APP_ID:-1:0:web:gedev}
+      - VITE_FIREBASE_MESSAGING_SENDER_ID=${GE_DEV_FIREBASE_SENDER_ID:-0}
+      - VITE_ALLOWED_HOSTS=${GE_DEV_FRONTEND_ALLOWED_HOSTS:-localhost}
+    ports:
+      - "127.0.0.1:${GE_DEV_PORT_FRONTEND:-3000}:3000"
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/frontend:/frontend
+      - frontend_node_modules:/frontend/node_modules
+
+  # Stands in for the Bluesky OAuth login leg so the frontend's Sign In button
+  # works without OAuth secrets; everything else passes through to the real
+  # Functions emulator. See dev-auth/app.py.
+  dev-auth:
+    image: python:3.13-slim
+    command: ["python", "/dev-auth/app.py"]
+    environment:
+      - GE_DEV_FUNCTIONS_UPSTREAM=http://firebase:15001
+    volumes:
+      - ./dev-auth:/dev-auth:ro
+      - ./firebase:/firebase:ro
+      - ./.runtime:/runtime:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import socket; socket.create_connection(('localhost', 8000), 2)\"",
+        ]
       interval: 5s
       timeout: 5s
       retries: 24
@@ -102,7 +206,7 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
-      firestore:
+      firebase:
         condition: service_healthy
     environment:
       - ENVIRONMENT=local
@@ -112,13 +216,31 @@ services:
       # environment. The compose environment is authoritative here.
       - PIPENV_DONT_LOAD_ENV=1
       - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
-      - GE_FIRESTORE_EMULATOR_HOST=firestore:8080
-      - GE_FIRESTORE_PROJECT=demo-no-project
+      # Ports are the socat-bridged ones (see the firebase service). The
+      # project id must match what the emulator runs as, or the api and the
+      # frontend read and write different namespaces and the environment
+      # looks broken in a confusing way.
+      - GE_FIRESTORE_EMULATOR_HOST=firebase:18080
+      - GE_FIRESTORE_PROJECT=${GE_DEV_FIREBASE_PROJECT:-greenearth-471522}
+      # Lets the Admin SDK verify tokens minted by the Auth emulator instead
+      # of reaching for real Google credentials.
+      - FIREBASE_AUTH_EMULATOR_HOST=firebase:19099
       - GE_FEED_CONTEXT_SECRET=${GE_DEV_FEED_CONTEXT_SECRET:-ge-dev-feed-context-secret}
       - GE_PROBE_SECRET=${GE_DEV_PROBE_SECRET:-ge-dev-probe}
+      # Lets devctl issue requests that the api treats as a genuine signed-in
+      # user, which is what writes feed snapshots. A local caller can't mint
+      # the AT Protocol JWT the real path needs. The api refuses to start with
+      # this set in a deployed environment.
+      - GE_DEV_SESSION_SECRET=${GE_DEV_SESSION_SECRET:-ge-dev-session}
       - GE_INFERENCE_BASE_URL=http://inference-stub:8000
       - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
       - GE_METRICS_EXPORT_INTERVAL_SEC=86400
+      # Optional passthrough. The "your-feed" pipeline runs the `perspective`
+      # ranker, which calls Google's Perspective API and hard-fails without a
+      # key — and that's the only feed the frontend's transparency UI reads.
+      # Set this in devenv.local.env if you have one; everything else works
+      # without it.
+      - GE_PERSPECTIVE_API_KEY=${GE_PERSPECTIVE_API_KEY:-}
       - GE_TIMING_LOGS=${GE_DEV_TIMING_LOGS:-1}
     env_file:
       # Written by es-init / seed; devctl guarantees they exist before `up`.
@@ -206,3 +328,7 @@ volumes:
   api_venv:
   gomod:
   gocache:
+  # Kept out of the bind-mounted checkout so container installs (Linux
+  # binaries, node 24) never collide with what the developer has on the host.
+  frontend_node_modules:
+  functions_node_modules:
