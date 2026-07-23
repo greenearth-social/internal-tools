@@ -128,9 +128,12 @@ services:
       dev-auth:
         condition: service_healthy
     environment:
-      # Mock services are the frontend's own default: full UI, no backend.
-      # Set GE_DEV_FRONTEND_MOCK=false to drive the seeded api instead.
-      - VITE_USE_MOCK_SERVICES=${GE_DEV_FRONTEND_MOCK:-true}
+      # Real services by default. Mock mode is the frontend repo's own
+      # default, but here it renders convincing hardcoded feed cards that have
+      # nothing to do with the seeded data — which reads as the environment
+      # working when it isn't. Set GE_DEV_FRONTEND_MOCK=true for UI work that
+      # doesn't need a backend.
+      - VITE_USE_MOCK_SERVICES=${GE_DEV_FRONTEND_MOCK:-false}
       - VITE_USE_FIREBASE_EMULATORS=true
       - VITE_FIREBASE_PROJECT_ID=${GE_DEV_FIREBASE_PROJECT:-greenearth-471522}
       # The Firebase JS SDK validates that these are non-empty before it will

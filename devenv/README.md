@@ -183,7 +183,9 @@ query needing a composite index can still pass locally and fail deployed.
 ### Signing in
 
 Just click **Sign in with Bluesky**. It works with no credentials and logs you
-in as the seeded persona.
+in as the seeded persona. (The feed list will be empty once you're in — see
+"What the frontend can and can't show" below; that's expected, not a broken
+sign-in.)
 
 Real sign-in starts a Bluesky OAuth handshake in the `authBluesky` Cloud
 Function, which needs private keys this environment deliberately doesn't
@@ -262,16 +264,27 @@ specific variable.
 
 ### What the frontend can and can't show
 
-The frontend is a feed-*transparency* UI. Its feed list reads `feed_snapshots`
-for the **`your-feed`** feed from the last 15 minutes, and that pipeline runs
-the `perspective` ranker, which hard-fails without `GE_PERSPECTIVE_API_KEY`
-(Google's Perspective API). So in real mode the app authenticates and reaches
-the api correctly, but the list is empty until either:
+The app authenticates, reaches the api, and renders — but **its feed list will
+be empty**, and `devctl feed` will not fill it. Two independent reasons, both
+worth knowing before you go looking for a bug:
 
-- you set `GE_PERSPECTIVE_API_KEY` in `devenv.local.env`, or
-- the real inference service lands
-  ([api#269](https://github.com/greenearth-social/api/issues/269)) and the
-  feed's other ML rankers work.
+- **`devctl feed` requests are probe requests.** They authenticate with
+  `X-Probe-Secret`, and the api writes feed snapshots only `if not is_probe` —
+  probe traffic is Cloud Scheduler health-checking and is deliberately kept out
+  of user data. So it populates `feed_cache` but never `feed_snapshots`, which
+  is what this UI reads. Generating snapshots needs a genuine AT Protocol
+  JWT-authenticated request, which nothing local can mint.
+- **The UI only reads the `your-feed` feed** (last 15 minutes), and that
+  pipeline runs the `perspective` ranker, which hard-fails without
+  `GE_PERSPECTIVE_API_KEY`, plus ML rankers that need the real inference
+  service ([api#269](https://github.com/greenearth-social/api/issues/269)).
+
+Setting `GE_PERSPECTIVE_API_KEY` in `devenv.local.env` clears the second, not
+the first.
+
+To inspect what the pipeline actually produced, use the api directly —
+`devctl feed <name>`, or `scripts/feed_debug.py` in the api repo, which reads
+the `feed_debug` records that *are* written for probe requests.
 
 ## Service endpoints (defaults)
 
