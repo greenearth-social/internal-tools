@@ -208,17 +208,24 @@ cmd_seed() {
   compose run --rm seed-megastream
   echo "devctl: loading likes and like counts..."
   compose run --rm seed-likes
-  # Pick up .runtime/probe.env (persona DID) if the api was already running.
+  local persona api_running=0
+  persona="$(sed -n 's/^GE_PROBE_USER_DID=//p' "$DEVENV_DIR/.runtime/probe.env")"
+  # Restart the api so it picks up the new persona from .runtime/probe.env —
+  # but only if it was already running, so `seed` never starts a service the
+  # developer deliberately stopped.
   if compose ps --status running api | grep -q api; then
     compose up -d --force-recreate api
+    api_running=1
   fi
-  local persona
-  persona="$(sed -n 's/^GE_PROBE_USER_DID=//p' "$DEVENV_DIR/.runtime/probe.env")"
-  cat <<EOF
-devctl: seed complete.
-Try a feed (persona: ${persona:-unset}):
-  devctl feed random
-EOF
+
+  echo "devctl: seed complete (persona: ${persona:-unset})."
+  if [[ $api_running -eq 1 ]]; then
+    echo "Try a feed:"
+    echo "  devctl feed popularity"
+  else
+    # Don't suggest a feed request with nothing to serve it.
+    echo "The api isn't running — start it with: devctl up"
+  fi
 }
 
 cmd_feed() {

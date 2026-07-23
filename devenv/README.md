@@ -171,8 +171,15 @@ Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 - Feeds ranked with the `perspective` model call the external Perspective API;
   without `GE_PERSPECTIVE_API_KEY` those rankers fail — stick to feeds that
   don't use it (e.g. `random`).
-- `followed_users` candidates resolve follows via the live AT Protocol network;
-  synthetic personas (`megastream-files` fixtures) have no real follows.
+- **Feeds needing a real network identity return nothing.** `followed_users`
+  and `network_likes` resolve the requesting user's follows from the live AT
+  Protocol network, and personas are pseudonymized (see above), so their
+  follow set comes back empty. This is a deliberate trade — those two
+  generators are what pseudonymizing personas costs us. `random`,
+  `popularity`, and `post_similarity` are unaffected and exercise the
+  retrieve → rank path fully. To work on follow-driven generators, generate a
+  local `--no-pseudonymize` fixture (and don't publish it) so personas are
+  real users with real follows.
 - Multi-instance (`--name`), `devctl exec`, and local/live backend switching
   are milestone 3 ([api#283](https://github.com/greenearth-social/api/issues/283)).
 - A proper terminal feed viewer is [api#285](https://github.com/greenearth-social/api/issues/285);
