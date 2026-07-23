@@ -137,3 +137,22 @@ class TestReadyPayload:
     def test_advertises_every_endpoint_the_api_calls(self):
         types = {m["type"] for m in self._ready()["models"]}
         assert {"post-tower", "user-tower", "ranker"} <= types
+
+
+class TestRequestLogging:
+    """Docker polls /health forever; those probes must not bury real traffic."""
+
+    @staticmethod
+    def _log(path: str, capsys) -> str:
+        handler = stub.Handler.__new__(stub.Handler)
+        handler.path = path
+        stub.Handler.log_message(handler, '"%s" %s -', "GET " + path, "200")
+        return capsys.readouterr().out
+
+    def test_health_probes_are_not_logged(self, capsys):
+        assert self._log("/health", capsys) == ""
+
+    def test_real_requests_are_still_logged(self, capsys):
+        out = self._log("/some/endpoint", capsys)
+        assert "inference-stub" in out
+        assert "/some/endpoint" in out

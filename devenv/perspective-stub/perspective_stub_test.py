@@ -31,3 +31,22 @@ class TestAttributeScore:
     def test_unicode_text_is_handled(self):
         # Real fixture content is full of non-ASCII; hashing must not raise.
         assert 0.0 <= stub.attribute_score("ぺぐふわ 😌💕", "TOXICITY") <= 1.0
+
+
+class TestRequestLogging:
+    """Docker polls /health forever; those probes must not bury real traffic."""
+
+    @staticmethod
+    def _log(path: str, capsys) -> str:
+        handler = stub.Handler.__new__(stub.Handler)
+        handler.path = path
+        stub.Handler.log_message(handler, '"%s" %s -', "GET " + path, "200")
+        return capsys.readouterr().out
+
+    def test_health_probes_are_not_logged(self, capsys):
+        assert self._log("/health", capsys) == ""
+
+    def test_real_requests_are_still_logged(self, capsys):
+        out = self._log("/some/endpoint", capsys)
+        assert "perspective-stub" in out
+        assert "/some/endpoint" in out

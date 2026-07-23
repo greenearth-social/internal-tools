@@ -162,6 +162,10 @@ class Handler(BaseHTTPRequestHandler):
 
     # Parameter is named `format` to match BaseHTTPRequestHandler's signature.
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        # Docker's healthcheck polls /health forever; logging every probe
+        # buries the requests someone is actually trying to read.
+        if self.path.startswith("/health"):
+            return
         print(f"inference-stub: {format % args}")
 
 

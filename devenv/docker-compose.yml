@@ -33,7 +33,9 @@ services:
           "CMD-SHELL",
           "curl -s -u elastic:$${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(yellow|green)\"'",
         ]
-      interval: 5s
+      interval: 60s
+      start_period: 60s
+      start_interval: 1s
       timeout: 5s
       retries: 60
 
@@ -100,7 +102,9 @@ services:
       # Probe through socat, so this only passes once the bridge other services
       # depend on is actually serving.
       test: ["CMD-SHELL", "curl -sf http://localhost:18080/ >/dev/null"]
-      interval: 5s
+      interval: 60s
+      start_period: 60s
+      start_interval: 1s
       timeout: 5s
       retries: 60
 
@@ -169,7 +173,9 @@ services:
           "CMD-SHELL",
           "python -c \"import socket; socket.create_connection(('localhost', 8000), 2)\"",
         ]
-      interval: 5s
+      interval: 60s
+      start_period: 60s
+      start_interval: 1s
       timeout: 5s
       retries: 24
 
@@ -191,7 +197,9 @@ services:
           "CMD-SHELL",
           "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\"",
         ]
-      interval: 5s
+      interval: 60s
+      start_period: 60s
+      start_interval: 1s
       timeout: 5s
       retries: 24
 
@@ -211,7 +219,9 @@ services:
           "CMD-SHELL",
           "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\"",
         ]
-      interval: 5s
+      interval: 60s
+      start_period: 60s
+      start_interval: 1s
       timeout: 5s
       retries: 24
 
