@@ -14,12 +14,13 @@
 #   - verification that the result is usable before anyone publishes it,
 #     including the check that persona DIDs resolve to real accounts.
 #
-# It deliberately stops short of publishing. `publish_fixture.sh` uploads a
-# public GitHub release, which is the one irreversible step here — run it
-# yourself once you've read the verification output.
+# Publishing is opt-in. `publish_fixture.sh` uploads a public GitHub release,
+# which is the one irreversible step here, so it only runs with --publish and
+# only after verification passes.
 #
 # Usage:
-#   ./regen_fixture.sh [--hours N] [--out DIR] [-- <generate_sample.py args>]
+#   ./regen_fixture.sh [--hours N] [--out DIR] [--publish]
+#                      [-- <generate_sample.py args>]
 #
 # Requires: kubectl context on the prod cluster, GE_ELASTICSEARCH_API_KEY
 # (a read-only key is enough), python3.
@@ -32,6 +33,7 @@ NAMESPACE="${GE_PROD_NAMESPACE:-greenearth-prod}"
 ES_SERVICE="${GE_PROD_ES_SERVICE:-svc/greenearth-es-internal-lb}"
 LOCAL_PORT="${GE_REGEN_ES_PORT:-9200}"
 HOURS="48"
+PUBLISH=0
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +45,10 @@ while [[ $# -gt 0 ]]; do
   --out)
     OUT_DIR="$2"
     shift 2
+    ;;
+  --publish)
+    PUBLISH=1
+    shift
     ;;
   --)
     shift
@@ -99,10 +105,17 @@ stop_port_forward() {
   if [[ -f "$PF_PID_FILE" ]]; then
     local pid
     pid="$(cat "$PF_PID_FILE")"
-    kill "$pid" 2>/dev/null || true
+    # Children first: killing the supervisor first reparents the kubectl it
+    # spawned to init, and `pkill -P` then matches nothing — which leaks a
+    # live tunnel to prod after the run finishes.
     pkill -P "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
     rm -f "$PF_PID_FILE"
   fi
+  # Safety net for a kubectl that outlived its supervisor anyway. Matched on
+  # this run's exact service and port so it can't touch someone else's
+  # port-forward.
+  pkill -f "port-forward $ES_SERVICE ${LOCAL_PORT}:9200" 2>/dev/null || true
 }
 trap stop_port_forward EXIT
 
@@ -159,16 +172,23 @@ log "generation complete"
 log "verifying the generated fixture..."
 python3 "$FIXTURES_DIR/verify_fixture.py" "$OUT_DIR" || die "verification failed"
 
-cat <<EOF
+log "fixture staged and verified: $OUT_DIR"
 
-[$(date -u +%H:%M:%S)] Fixture staged and verified: $OUT_DIR
-
-Next steps (both are yours to run — neither happens automatically):
-
-  # Use it locally:
-  rm -rf "$FIXTURES_DIR/data" && mv "$OUT_DIR" "$FIXTURES_DIR/data"
-  cd "$FIXTURES_DIR/.." && ./devctl seed
+if [[ "$PUBLISH" == "1" ]]; then
+  log "publishing (--publish)"
+  "$FIXTURES_DIR/publish_fixture.sh" "$OUT_DIR"
+  log "published"
+else
+  echo "
+Not published (pass --publish to upload a release).
 
   # Publish it for the team (creates a public GitHub release):
-  "$FIXTURES_DIR/publish_fixture.sh"
+  \"$FIXTURES_DIR/publish_fixture.sh\" \"$OUT_DIR\""
+fi
+
+cat <<EOF
+
+To use it locally:
+  rm -rf "$FIXTURES_DIR/data" && mv "$OUT_DIR" "$FIXTURES_DIR/data"
+  cd "$FIXTURES_DIR/.." && ./devctl seed
 EOF

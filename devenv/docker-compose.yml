@@ -33,7 +33,9 @@ services:
           "CMD-SHELL",
           "curl -s -u elastic:$${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(yellow|green)\"'",
         ]
-      interval: 5s
+      interval: 60s
+      start_period: 60s
+      start_interval: 1s
       timeout: 5s
       retries: 60
 
@@ -100,7 +102,9 @@ services:
       # Probe through socat, so this only passes once the bridge other services
       # depend on is actually serving.
       test: ["CMD-SHELL", "curl -sf http://localhost:18080/ >/dev/null"]
-      interval: 5s
+      interval: 60s
+      start_period: 60s
+      start_interval: 1s
       timeout: 5s
       retries: 60
 
@@ -157,6 +161,7 @@ services:
     image: python:3.13-slim
     command: ["python", "/dev-auth/app.py"]
     environment:
+      - PYTHONUNBUFFERED=1
       - GE_DEV_FUNCTIONS_UPSTREAM=http://firebase:15001
     volumes:
       - ./dev-auth:/dev-auth:ro
@@ -168,7 +173,9 @@ services:
           "CMD-SHELL",
           "python -c \"import socket; socket.create_connection(('localhost', 8000), 2)\"",
         ]
-      interval: 5s
+      interval: 60s
+      start_period: 60s
+      start_interval: 1s
       timeout: 5s
       retries: 24
 
@@ -178,8 +185,9 @@ services:
   # (api#269).
   inference-stub:
     image: python:3.13-slim
-    command: ["python", "/stub/app.py"]
+    command: ["python", "/stub/inference_stub.py"]
     environment:
+      - PYTHONUNBUFFERED=1
       - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
     volumes:
       - ./inference-stub:/stub:ro
@@ -189,7 +197,31 @@ services:
           "CMD-SHELL",
           "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\"",
         ]
-      interval: 5s
+      interval: 60s
+      start_period: 60s
+      start_interval: 1s
+      timeout: 5s
+      retries: 24
+
+  # Stands in for Google's Perspective API so the `perspective` ranker — and
+  # therefore "your-feed" — runs without an external key. See
+  # perspective-stub/app.py: scores are deterministic, not real analysis.
+  perspective-stub:
+    image: python:3.13-slim
+    command: ["python", "/stub/perspective_stub.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./perspective-stub:/stub:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\"",
+        ]
+      interval: 60s
+      start_period: 60s
+      start_interval: 1s
       timeout: 5s
       retries: 24
 
@@ -208,8 +240,11 @@ services:
         condition: service_healthy
       firebase:
         condition: service_healthy
+      perspective-stub:
+        condition: service_healthy
     environment:
       - ENVIRONMENT=local
+      - PYTHONUNBUFFERED=1
       - PIPENV_VENV_IN_PROJECT=1
       # The api checkout may carry a developer's .env (host-machine addresses,
       # real keys); pipenv would auto-load it and override this container
@@ -235,12 +270,15 @@ services:
       - GE_INFERENCE_BASE_URL=http://inference-stub:8000
       - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
       - GE_METRICS_EXPORT_INTERVAL_SEC=86400
-      # Optional passthrough. The "your-feed" pipeline runs the `perspective`
-      # ranker, which calls Google's Perspective API and hard-fails without a
-      # key — and that's the only feed the frontend's transparency UI reads.
-      # Set this in devenv.local.env if you have one; everything else works
-      # without it.
-      - GE_PERSPECTIVE_API_KEY=${GE_PERSPECTIVE_API_KEY:-}
+      # The "your-feed" pipeline runs the `perspective` ranker, which calls
+      # Google's Perspective API and hard-fails without a key. Default to the
+      # local stub so the feed works out of the box; the key is then just a
+      # non-empty placeholder the client requires. To score against the real
+      # API instead, set both of these in devenv.local.env:
+      #   GE_DEV_PERSPECTIVE_HOST=https://commentanalyzer.googleapis.com
+      #   GE_PERSPECTIVE_API_KEY=<your real key>
+      - GE_PERSPECTIVE_HOST=${GE_DEV_PERSPECTIVE_HOST:-http://perspective-stub:8000}
+      - GE_PERSPECTIVE_API_KEY=${GE_PERSPECTIVE_API_KEY:-ge-dev-perspective}
       - GE_TIMING_LOGS=${GE_DEV_TIMING_LOGS:-1}
     env_file:
       # Written by es-init / seed; devctl guarantees they exist before `up`.
@@ -259,6 +297,8 @@ services:
     image: python:3.13-slim
     profiles: ["tools"]
     command: ["python", "/seedscripts/rebase.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
     volumes:
       - ./seed:/seedscripts:ro
       - ./fixtures/data:/fixtures:ro
@@ -301,6 +341,7 @@ services:
       elasticsearch:
         condition: service_healthy
     environment:
+      - PYTHONUNBUFFERED=1
       - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
     env_file:
       - ./.runtime/es_key_rw.env
@@ -316,6 +357,7 @@ services:
       elasticsearch:
         condition: service_healthy
     environment:
+      - PYTHONUNBUFFERED=1
       - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
     env_file:
       - ./.runtime/es_key_rw.env

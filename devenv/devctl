@@ -166,7 +166,7 @@ cmd_setup() {
   ensure_runtime
   echo "devctl: pulling and building images (first run takes a few minutes)..."
   compose --profile tools build es-init api firebase frontend
-  compose --profile tools pull elasticsearch inference-stub dev-auth seed-rebase seed-megastream --ignore-buildable
+  compose --profile tools pull elasticsearch inference-stub perspective-stub dev-auth seed-rebase seed-megastream --ignore-buildable
   echo "devctl: setup complete."
   have_fixtures || fixtures_hint
   echo "Next: devctl up && devctl seed"
@@ -179,14 +179,14 @@ cmd_up() {
   # --remove-orphans clears containers for services this file no longer
   # defines — e.g. the standalone `firestore` emulator that the Firebase
   # suite replaced, which would otherwise linger holding its old port.
-  compose up -d --remove-orphans elasticsearch firebase dev-auth inference-stub
+  compose up -d --remove-orphans elasticsearch firebase dev-auth inference-stub perspective-stub
   echo "devctl: initializing Elasticsearch (templates, indexes, API keys)..."
   compose run --rm es-init
   compose up -d api frontend
   cat <<EOF
 devctl: environment is up.
-  frontend      http://127.0.0.1:${FRONTEND_PORT}    (first start installs deps; watch: devctl logs frontend)
-  api           http://127.0.0.1:${API_PORT}    (first start installs deps; watch: devctl logs api)
+  frontend      http://127.0.0.1:${FRONTEND_PORT}    (first start installs deps; watch: devctl logs -t frontend)
+  api           http://127.0.0.1:${API_PORT}    (first start installs deps; watch: devctl logs -t api)
   elasticsearch http://127.0.0.1:${ES_PORT}    (user elastic / ${GE_DEV_ES_PASSWORD:-ge-dev-elastic})
   firestore     127.0.0.1:${FIRESTORE_PORT}    (emulator, from the frontend checkout)
   firebase auth 127.0.0.1:${AUTH_PORT}
@@ -231,7 +231,7 @@ cmd_seed() {
   echo "devctl: seed complete (persona: ${persona:-unset})."
   if [[ $api_running -eq 1 ]]; then
     echo "Try a feed:"
-    echo "  devctl feed popularity"
+    echo "  devctl feed"
   else
     # Don't suggest a feed request with nothing to serve it.
     echo "The api isn't running — start it with: devctl up"
@@ -246,12 +246,12 @@ cmd_feed() {
   # path and records a snapshot for the transparency UI), the persona DID, the
   # ES read key, and the Firestore config for the per-post pipeline detail.
   #
-  #   devctl feed popularity
+  #   devctl feed
   #   devctl feed your-feed --user did:plc:... --limit 50 --pages 2
-  #   devctl feed popularity --json      # raw getFeedSkeleton, the old output
+  #   devctl feed --json                 # raw getFeedSkeleton, the old output
   #
   # All arguments pass through to scripts/feed_view.py (feed defaults to
-  # popularity). See feed_view.py --help for the full flag set.
+  # your-feed). See feed_view.py --help for the full flag set.
   compose ps --status running api | grep -q api ||
     die "the api isn't running — start it with: devctl up"
   # Give the viewer a TTY when stdout is a terminal so rich colorizes; drop it
@@ -287,6 +287,39 @@ an hour; re-run devctl login for a fresh one.
 EOF
 }
 
+cmd_logs() {
+  # Two modes on purpose. The default prints and exits, so `devctl logs api`
+  # is a question you can ask and get an answer to. Following is opt-in with
+  # -t, because a follow on an idle environment prints the backlog and then
+  # sits there silently, which reads exactly like a hang.
+  local follow=0
+  local passthrough=()
+  local have_tail=0
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+    -t | -f | --follow)
+      follow=1
+      ;;
+    --tail | --tail=*)
+      have_tail=1
+      passthrough+=("$arg")
+      ;;
+    *)
+      passthrough+=("$arg")
+      ;;
+    esac
+  done
+  # Only supply a default line count when the caller didn't pick one, so
+  # `devctl logs --tail=500 api` works.
+  [[ $have_tail -eq 1 ]] || passthrough=(--tail=100 ${passthrough[@]+"${passthrough[@]}"})
+  if [[ $follow -eq 1 ]]; then
+    compose logs -f ${passthrough[@]+"${passthrough[@]}"}
+  else
+    compose logs ${passthrough[@]+"${passthrough[@]}"}
+  fi
+}
+
 cmd_status() {
   compose ps
   echo
@@ -316,11 +349,11 @@ Usage: devctl <command> [args]
   fetch-fixture  download the published fixture set (no account or auth needed)
   up             start the stack (ES + Firestore emulator + inference stub + api)
   seed           load fixtures: rebase timestamps, ingest posts, load likes
-  feed [feed]    view a hydrated feed in the terminal (default: popularity;
+  feed [feed]    view a hydrated feed in the terminal (default: your-feed;
                  --user <did>, --limit, --pages, --json for raw skeleton)
   login [did]    print a sign-in URL for the frontend as the seeded persona
   status         container status + index doc counts
-  logs [svc...]  follow logs (all services or the named ones)
+  logs [svc...]  print recent logs and exit (-t follows instead)
   down           stop containers (data volumes survive)
   nuke           stop and delete everything (volumes, minted keys, seed state)
 
@@ -342,7 +375,7 @@ seed) cmd_seed "$@" ;;
 feed) cmd_feed "$@" ;;
 login) cmd_login "$@" ;;
 status | ps) cmd_status "$@" ;;
-logs) compose logs -f --tail=100 "$@" ;;
+logs) cmd_logs "$@" ;;
 down)
   compose down
   rm -f "$GE_DEV_REPO_ROOT/frontend/firebase.devenv.json"

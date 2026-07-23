@@ -37,7 +37,7 @@ cd internal-tools/devenv
 ./devctl fetch-fixture   # downloads the published sample (~170MB)
 ./devctl up              # ES + Firebase emulators + inference stub + api + frontend
 ./devctl seed            # rebase timestamps, ingest posts, load likes
-./devctl feed popularity
+./devctl feed
 ```
 
 `devctl feed <feed>` shows a feed in the terminal: it requests
@@ -45,13 +45,13 @@ cd internal-tools/devenv
 post from this environment's Elasticsearch (no AppView call, so it works
 entirely against fixture data), and prints author, timestamp, like count, text,
 and per-post pipeline detail (which generator retrieved it, its rank and ranker
-score). Defaults to the `popularity` feed and the seeded persona.
+score). Defaults to `your-feed` and the seeded persona.
 
 ```bash
-./devctl feed popularity                 # the seeded persona's popularity feed
+./devctl feed                            # the seeded persona's your-feed
 ./devctl feed your-feed --user did:plc:… # a different feed as a chosen persona
 ./devctl feed random --limit 50 --pages 2  # page through more of the feed
-./devctl feed popularity --json          # the raw getFeedSkeleton response
+./devctl feed --json                     # the raw getFeedSkeleton response
 ```
 
 The persona defaults to the fixture manifest's DID (via `.runtime/probe.env`)
@@ -60,7 +60,8 @@ signed-in path and records a snapshot. The viewer is a read-only client — it
 never posts, likes, or writes anything. `--no-pipeline` skips the snapshot
 lookup and shows the feed as a plain client would.
 
-Other commands: `devctl status`, `devctl logs [service]`, `devctl down`
+Other commands: `devctl status`, `devctl logs [service]` (add `-t` to
+follow), `devctl down`
 (stop, keep data), `devctl nuke` (delete everything). Data is disposable by
 design — when in doubt, `nuke` and re-`seed`.
 
@@ -259,7 +260,7 @@ curl -s localhost:5001/greenearth-471522/us-central1/oauthClientMetadata
 curl -s localhost:5001/greenearth-471522/us-central1/oauthJwks
 
 # Per-request function logs, including thrown errors.
-devctl logs firebase
+devctl logs -t firebase
 ```
 
 `authBluesky` names the variable it's missing (`APP_ORIGIN not configured`,
@@ -273,7 +274,7 @@ The frontend is a feed-*transparency* UI: it reports on feeds the api has
 already served to you. To put something in it, generate a feed:
 
 ```bash
-devctl feed popularity     # then reload the frontend
+devctl feed                # then reload the frontend
 ```
 
 Two things make that work, both of which are otherwise dead ends locally:
@@ -289,9 +290,9 @@ Two things make that work, both of which are otherwise dead ends locally:
   The api refuses to start with `GE_DEV_SESSION_SECRET` set in a deployed
   environment.
 - **The UI reports on every feed you've loaded**, so generate whichever one
-  you're working on. `your-feed` won't run here — it needs the Perspective API
-  and the trained ranking models — but `popularity`, `random` and
-  `post-similarity` all work.
+  you're working on. Every feed runs here, `your-feed` included — the
+  Perspective API and the ML rankers are both served by local stubs (see
+  below).
 
 Snapshots are only kept for 15 minutes, so an untouched tab goes empty again;
 run `devctl feed` and reload.
@@ -300,13 +301,15 @@ run `devctl feed` and reload.
 
 | Service | Address | Notes |
 | --- | --- | --- |
-| api | `http://127.0.0.1:8300` | first start runs `pipenv install` into a cached volume — watch `devctl logs api` |
+| api | `http://127.0.0.1:8300` | first start runs `pipenv install` into a cached volume — watch `devctl logs -t api` |
 | Elasticsearch | `http://127.0.0.1:9201` | user `elastic` / `ge-dev-elastic`, or the minted keys |
 | frontend | `http://127.0.0.1:3000` | Vite dev server; first start runs `npm install` |
 | Firestore emulator | `127.0.0.1:8080` | project `greenearth-471522` |
 | Firebase Auth emulator | `127.0.0.1:9099` | |
 | Functions emulator | `127.0.0.1:5001` | |
 | Firebase Emulator UI | `http://127.0.0.1:4000` | browse Firestore data, auth users, function logs |
+| inference-stub | internal only | post-tower / user-tower / ranker endpoints |
+| perspective-stub | internal only | stands in for Google's Perspective API |
 
 Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 `GE_DEV_PORT_ES`, `GE_DEV_PORT_FIRESTORE`, `GE_DEV_PORT_FRONTEND`,
@@ -316,23 +319,41 @@ Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 
 ## Current limitations (by milestone)
 
-- **Inference is a stub** ([api#269](https://github.com/greenearth-social/api/issues/269)):
-  `/models/post-tower/predict` returns deterministic pseudo-embeddings so
-  ingest works; ML rankers (`heavy_ranker`, `two_tower` feeds) won't produce
-  meaningful order until the real inference-service + published models land.
-  Use `random` / popularity-driven feeds meanwhile.
-- Feeds ranked with the `perspective` model call the external Perspective API;
-  without `GE_PERSPECTIVE_API_KEY` those rankers fail — stick to feeds that
-  don't use it (e.g. `random`).
-- **Follow-driven generators need a fixture generated after real IDs landed.**
+- **Ranking is stubbed, not trained** ([api#269](https://github.com/greenearth-social/api/issues/269)):
+  every feed *runs*, but the ordering isn't a real model's. `inference-stub`
+  answers the post-tower, user-tower, and ranker endpoints by projecting
+  MiniLM embeddings and scoring candidates by cosine similarity to the user's
+  like history — "similar to what you liked", not predicted engagement. Real
+  order arrives with the inference-service + published models.
+- **Perspective is stubbed too.** The `perspective` ranker (used by
+  `your-feed`) calls Google's Perspective API and hard-fails without a key, so
+  `perspective-stub` answers it locally with deterministic hash-derived
+  scores — stable per post, but not content analysis. To score against the
+  real API, set both in `devenv.local.env`:
+
+  ```bash
+  GE_DEV_PERSPECTIVE_HOST=https://commentanalyzer.googleapis.com
+  GE_PERSPECTIVE_API_KEY=<your key>
+  ```
+- Feeds can reference posts outside the fixture — `your-feed` pins a specific
+  post, and a cached feed can outlive a re-seed — so `devctl feed` may show
+  "(not in Elasticsearch)" for an item. That's the viewer reporting a real
+  dangling reference, not a failure.
+- **Follow-driven generators work, but yield depends on the sample.**
   `followed_users` and `network_likes` resolve the requesting user's follows
-  from the live AT Protocol network. Fixtures generated before identities went
-  real carry synthetic persona DIDs that resolve to nobody, so those
-  generators come back empty — check with
-  `curl -o /dev/null -w '%{http_code}' https://plc.directory/<persona-did>`
-  (404 means synthetic). Regenerate from prod ES to fix it. Even then, yield
-  depends on whether the accounts a persona follows have posts inside the
-  sampled window; `random`, `popularity`, and `post_similarity` don't have
-  that dependency and exercise the retrieve → rank path fully.
+  from the live AT Protocol network, so they need a persona whose DID is real
+  — every fixture generated since identities went real qualifies. Check a
+  persona with
+  `curl -o /dev/null -w '%{http_code}' https://plc.directory/<persona-did>`;
+  404 means it came from an old pseudonymized fixture, so refetch or
+  regenerate.
+
+  Even with real DIDs, these only return what the fixture happens to contain.
+  `followed_users` finds posts by accounts the persona follows, and usually
+  produces some. `network_likes` needs those accounts to have *liked*
+  something inside the sampled window, which is much rarer — an empty
+  `network-likes` feed is normally the sample, not a fault. The api says which
+  in its logs ("No liked posts found for followed users of ..."). `random`,
+  `popularity`, and `post_similarity` have no such dependency.
 - Multi-instance (`--name`), `devctl exec`, and local/live backend switching
   are milestone 3 ([api#283](https://github.com/greenearth-social/api/issues/283)).
