@@ -88,12 +88,6 @@ ensure_runtime() {
 # trained models. `GE_DEV_INFERENCE=external` instead points the api at a
 # service this environment doesn't run. Which one is in effect gets recorded in
 # .runtime/ so later commands — seed, feed, status — agree with what `up` did.
-#
-# There used to be a third option, a stub that reimplemented these endpoints
-# with deterministic pseudo-scores. It was removed: keeping a second
-# implementation of someone else's API in sync is a standing cost, and it
-# silently drifted at least once (a wrong /ready shape broke the two_tower
-# generator in a way that looked like a model problem).
 
 INFERENCE_STATE="$DEVENV_DIR/.runtime/inference.env"
 # Captured before the state file is sourced, so `external` can tell a URL the
@@ -328,14 +322,6 @@ cmd_up() {
   for arg in "$@"; do
     case "$arg" in
     --with-jetstream) jetstream=1 ;;
-    # Both were real flags while the stub existed; say what happened rather
-    # than just "unknown argument".
-    --real-models) echo "devctl: --real-models is the default now; ignoring it" >&2 ;;
-    --stub-models)
-      die "the inference stub was removed — the real service is the only local
-        option now. To point at a service running elsewhere, set
-        GE_DEV_INFERENCE=external and GE_DEV_INFERENCE_URL in devenv.local.env."
-      ;;
     *) die "unknown argument to up: $arg (try: devctl help)" ;;
     esac
   done
