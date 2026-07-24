@@ -3,9 +3,13 @@
 A cohesive, agent-friendly local development environment for the Green Earth
 serving stack ([api#268](https://github.com/greenearth-social/api/issues/268)).
 One Docker Compose project runs Elasticsearch, the Firebase emulators, the api,
-the frontend,
-and (for now) an inference stub, seeded with representative Bluesky data — no
-GCP, Firebase, or production credentials required.
+the frontend, and an inference service, seeded with representative Bluesky data
+— no GCP, Firebase, or production credentials required.
+
+Inference comes in two flavours. The default is a deterministic stub that needs
+no download and makes every feed *run*; `devctl up --real-models` swaps in the
+real inference-service over the actual trained towers, so feeds come back in
+the order the model would really put them ([Models](#models)).
 
 Code stays on your host filesystem: the sibling `api` and `ingex` checkouts are
 bind-mounted into containers, so you edit with your normal editor and commit
@@ -21,7 +25,7 @@ with your normal git, while everything executes inside containers.
   api/               required
   ingex/             required (index templates + megastream_ingest)
   internal-tools/    this repo
-  inference-service/ optional (milestone 2)
+  inference-service/ required for --real-models
   frontend/          optional
 ```
 
@@ -38,6 +42,15 @@ cd internal-tools/devenv
 ./devctl up              # ES + Firebase emulators + inference stub + api + frontend
 ./devctl seed            # rebase timestamps, ingest posts, load likes
 ./devctl feed
+```
+
+To run the real trained models instead of the stub, add one download and one
+flag — see [Models](#models):
+
+```bash
+./devctl fetch-models    # downloads the pinned model release (~33MB)
+./devctl up --real-models
+./devctl seed            # re-seed: post embeddings come from the real tower
 ```
 
 `devctl feed <feed>` shows a feed in the terminal: it requests
@@ -89,21 +102,8 @@ source data. Personas are therefore real accounts: their handles resolve,
 their follow graphs exist, and you can look any fixture DID up against the
 Bluesky API.
 
-An earlier version pseudonymized liker DIDs. That was removed deliberately,
-because the protection wasn't real: Graze's turbostream/megastream archives
-already publish the complete Bluesky event history — every like, by every DID,
-going back over a year — alongside hydrated posts. A fixture built from a few
-hours of that window exposes nothing the archives don't already hand out in
-full.
-
-Meanwhile the costs were concrete. Synthetic DIDs resolve to nobody, so
-`followed_users` and `network_likes` returned empty, ranking couldn't be
-exercised against the identities that produced the likes, and no fixture DID
-could be looked up for debugging.
-
-The trade being accepted: a published fixture is a real slice of public
-activity and can't honor later deletions the way prod's tombstones do — the
-same trade the upstream archives already make.
+An earlier version pseudonymized liker DIDs, but that isn't necessary since
+complete ATProto archives exist elsewhere already.
 
 ### Generating your own
 
@@ -129,6 +129,120 @@ one for the team with `fixtures/publish_fixture.sh`.
   files only contain a handful of posts; point `--input` at a real megastream
   archive for a meatier fixture.
 
+## Models
+
+Two interchangeable implementations of the same endpoints. Exactly one runs;
+`devctl` records which in `.runtime/`, so `seed`, `feed`, and `status` all talk
+to the one `up` started.
+
+| | `inference-stub` (default) | `inference` (`--real-models`) |
+| --- | --- | --- |
+| Download | none | ~33MB model release |
+| Startup | instant | ~5 min first time (installs torch), seconds after |
+| Needs | nothing | the `inference-service` checkout |
+| Ordering | "similar to what you liked" | what the trained model predicts |
+
+The stub exists so the environment works out of the box and offline: it answers
+post-tower, user-tower, and ranker by projecting MiniLM embeddings and scoring
+candidates by cosine similarity to your like history. Every feed *runs*, but the
+ranking isn't a model's — it's a plausible-looking stand-in. Use it for
+plumbing work; use real models when the order itself matters.
+
+```bash
+./devctl fetch-models         # pinned release, no account or credentials
+./devctl up --real-models
+./devctl seed                 # required: see below
+```
+
+Switching to real models **requires a re-seed**. `megastream_ingest` computes
+each post's `ge_post_embedding` by calling whichever inference service is
+running, and the api's `two_tower` generator runs kNN over that field filtered
+by the model UUID that produced it. Posts embedded by the stub simply won't
+match a real-model query — the feed comes back thin rather than wrong, which is
+the safe failure but an easy one to misread. `devctl up --stub-models` switches
+back, and also needs a re-seed.
+
+### Where the models come from
+
+`devctl fetch-models` downloads a GitHub release — the same public channel the
+fixtures use, for the same reason: a fresh clone should need no Google account.
+The bundle lands in `models/data/` (gitignored) and holds both TorchScript
+towers, the ranker, the author-index maps, and serving manifests rewritten to
+local paths. inference-service then loads plain files: no GCS, no ClearML, no
+network.
+
+Unlike the fixture, the model release is **pinned** — `MODELS_TAG` in `devctl`,
+overridable with `GE_DEV_MODELS_TAG`. Towers and seeded embeddings have to
+agree, so everyone gets the same models until someone deliberately moves the
+pin.
+
+`devctl` also checks the model bundle's `manifest.json` against the fixture's
+before `up` and `seed`, and refuses to run if the content encoder or its
+dimensions differ. Mismatched embeddings still multiply cleanly and produce
+confident nonsense, so this is worth failing loudly over.
+
+Maintainers publish a new set with `models/publish_models.sh`, which mirrors
+the newest artifacts out of the prod model bucket (needs `gcloud` with read
+access), rewrites the manifests, and cuts a release. Use `--dry-run` to stage
+and inspect the bundle without uploading. Then bump `MODELS_TAG`.
+
+## Live ingestion (optional)
+
+`devctl up --with-jetstream` additionally streams real-time likes from the
+public Bluesky Jetstream firehose into the local `likes` index, using the same
+`jetstream_ingest` binary as prod. It's off by default because it's the one
+part of this environment that needs the internet and never finishes.
+
+The posts those likes point at are mostly *not* in the local index — the
+firehose is all of Bluesky, the fixture is a sample — so this is for working on
+ingestion itself rather than for making feeds richer.
+
+## Running against real services
+
+Every external dependency has a local stand-in, and each can be swapped for the
+real thing independently. Put the overrides in `devenv.local.env` (gitignored)
+and re-run `devctl up`. Nothing here is needed for normal work — reach for it
+when you're debugging something the local stand-in can't reproduce.
+
+**Elasticsearch.** Point the api at a deployed cluster. Port-forward it first
+(`kubectl port-forward svc/greenearth-es-internal-lb 9200:9200 -n greenearth-prod`);
+`host.docker.internal` is how the container reaches a tunnel on your host. A
+read-only key is the right one to use — the api only reads.
+
+```bash
+GE_DEV_ES_URL=https://host.docker.internal:9200
+GE_DEV_ES_API_KEY=<read-only key>
+```
+
+The local Elasticsearch keeps running and `devctl status` keeps reporting it,
+so the counts you see there are no longer what the api is querying.
+
+**Inference.** `GE_DEV_INFERENCE=external` starts neither local implementation
+and points the api at whatever you name:
+
+```bash
+GE_DEV_INFERENCE=external
+GE_DEV_INFERENCE_URL=https://inference-stage.greenearth.social
+GE_DEV_INFERENCE_API_KEY=<key>
+```
+
+Mind the embeddings: a deployed service serves whatever models it was deployed
+with, and your seeded posts were embedded by whatever was running at seed time.
+If the two disagree the `two_tower` generator returns little or nothing, since
+it filters kNN by the model UUID that produced the field. Seeding *while*
+pointed at the external service keeps them consistent — but note that seeding
+sends every post in the fixture through it.
+
+**Perspective.** The `perspective` ranker calls Google's Perspective API:
+
+```bash
+GE_DEV_PERSPECTIVE_HOST=https://commentanalyzer.googleapis.com
+GE_PERSPECTIVE_API_KEY=<your key>
+```
+
+**Bluesky OAuth.** Covered separately under "Working on real Bluesky auth" — it
+needs a public tunnel, not just a variable.
+
 ## Seeding and time rebasing
 
 `devctl seed` runs three one-shot containers:
@@ -140,7 +254,8 @@ one for the team with `fixtures/publish_fixture.sh`.
    like-after-post ordering) is preserved exactly.
 2. **seed-megastream** — runs the real `megastream_ingest` binary from your
    `ingex` checkout (`go run`, byte-identical code path to prod) against the
-   rebased fixtures. Post-tower embeddings come from the inference stub.
+   rebased fixtures. Post-tower embeddings come from whichever inference
+   service is running, which is why switching between them needs a re-seed.
 3. **seed-likes** — bulk-loads likes (prod document identity: `_id=at_uri`,
    routing=`author_did`) and applies per-post `like_count`, which the
    popularity generator ranks on.
@@ -308,23 +423,27 @@ run `devctl feed` and reload.
 | Firebase Auth emulator | `127.0.0.1:9099` | |
 | Functions emulator | `127.0.0.1:5001` | |
 | Firebase Emulator UI | `http://127.0.0.1:4000` | browse Firestore data, auth users, function logs |
-| inference-stub | internal only | post-tower / user-tower / ranker endpoints |
+| inference-stub | internal only | default; post-tower / user-tower / ranker, deterministic |
+| inference | internal only | `--real-models`; real inference-service over the trained towers |
 | perspective-stub | internal only | stands in for Google's Perspective API |
+| jetstream-ingest | internal only | `--with-jetstream`; live likes from the public firehose |
 
 Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 `GE_DEV_PORT_ES`, `GE_DEV_PORT_FIRESTORE`, `GE_DEV_PORT_FRONTEND`,
 `GE_DEV_PORT_FIREBASE_AUTH`, `GE_DEV_PORT_FUNCTIONS`, `GE_DEV_PORT_FIREBASE_UI`,
 `GE_DEV_ES_HEAP`, `GE_DEV_NAME`
-(compose project name), `GE_DEV_API_RELOAD=1` (uvicorn --reload watch mode).
+(compose project name), `GE_DEV_API_RELOAD=1` (uvicorn --reload watch mode),
+`GE_DEV_INFERENCE=real` (make `--real-models` the default),
+`GE_DEV_MODELS_TAG` (use a model release other than the pinned one).
 
 ## Current limitations (by milestone)
 
-- **Ranking is stubbed, not trained** ([api#269](https://github.com/greenearth-social/api/issues/269)):
-  every feed *runs*, but the ordering isn't a real model's. `inference-stub`
-  answers the post-tower, user-tower, and ranker endpoints by projecting
+- **Ranking is stubbed by default, but no longer has to be.** Out of the box
+  `inference-stub` answers post-tower, user-tower, and ranker by projecting
   MiniLM embeddings and scoring candidates by cosine similarity to the user's
-  like history — "similar to what you liked", not predicted engagement. Real
-  order arrives with the inference-service + published models.
+  like history — "similar to what you liked", not predicted engagement. Every
+  feed runs; the ordering just isn't a model's. `devctl up --real-models` gives
+  you the trained ones ([Models](#models)).
 - **Perspective is stubbed too.** The `perspective` ranker (used by
   `your-feed`) calls Google's Perspective API and hard-fails without a key, so
   `perspective-stub` answers it locally with deterministic hash-derived

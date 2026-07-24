@@ -23,6 +23,13 @@ fi
 export GE_DEV_REPO_ROOT="${GE_DEV_REPO_ROOT:-$(cd "$DEVENV_DIR/../.." && pwd)}"
 FIXTURE_REPO="${GE_DEV_FIXTURE_REPO:-greenearth-social/internal-tools}"
 FIXTURE_ASSET="ge-dev-fixture.tar"
+MODELS_ASSET="ge-dev-models.tar"
+# Pinned, unlike the fixture, which tracks the newest release. Model artifacts
+# and seeded post embeddings have to agree — the towers only make sense over
+# embeddings produced by the matching post tower — so everyone runs the same
+# models until someone deliberately moves this. Bump it after
+# models/publish_models.sh.
+MODELS_TAG="${GE_DEV_MODELS_TAG:-models-20260723-2131}"
 API_PORT="${GE_DEV_PORT_API:-8300}"
 ES_PORT="${GE_DEV_PORT_ES:-9201}"
 FIRESTORE_PORT="${GE_DEV_PORT_FIRESTORE:-8080}"
@@ -59,6 +66,8 @@ check_repos() {
     fi
   done
   [[ $missing -eq 0 ]] || die "missing required repos (or set GE_DEV_REPO_ROOT to the directory that contains them)"
+  # Not required for the default stack — inference-service only matters under
+  # --real-models, which checks for it separately and says so.
   for repo in inference-service engagement-prediction; do
     if [[ ! -e "$GE_DEV_REPO_ROOT/$repo/.git" ]]; then
       echo "devctl: note: optional repo not checked out: $GE_DEV_REPO_ROOT/$repo" >&2
@@ -67,11 +76,104 @@ check_repos() {
 }
 
 ensure_runtime() {
-  mkdir -p "$DEVENV_DIR/.runtime/seed"
+  mkdir -p "$DEVENV_DIR/.runtime/seed" "$DEVENV_DIR/models/data"
   # compose env_file entries must exist before any `compose` invocation.
   touch "$DEVENV_DIR/.runtime/es_key_ro.env" \
     "$DEVENV_DIR/.runtime/es_key_rw.env" \
-    "$DEVENV_DIR/.runtime/probe.env"
+    "$DEVENV_DIR/.runtime/probe.env" \
+    "$DEVENV_DIR/models/data/models.env"
+}
+
+# --- inference backend ------------------------------------------------------
+# Two interchangeable implementations of the same endpoints: `inference-stub`
+# (default, no download, deterministic pseudo-scores) and `inference` (the real
+# service over the published trained models). Exactly one runs. The choice is
+# recorded in .runtime/ so later commands — seed, feed, status — talk to the
+# same one `up` started, instead of each re-deriving it.
+
+INFERENCE_STATE="$DEVENV_DIR/.runtime/inference.env"
+# Captured before the state file is sourced, so `external` can tell a URL the
+# developer configured from one devctl derived on a previous run. Without this
+# split, `.runtime/` left over from a stub run satisfies the external-mode
+# check and the api silently keeps talking to the stub.
+GE_DEV_INFERENCE_URL_CONFIGURED="${GE_DEV_INFERENCE_URL:-}"
+if [[ -f "$INFERENCE_STATE" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$INFERENCE_STATE"
+  set +a
+fi
+
+# Empty for `external`, where the api talks to an inference service this
+# environment doesn't run (a deployed one, or one you're running by hand).
+inference_service() {
+  case "${GE_DEV_INFERENCE:-stub}" in
+  real) echo inference ;;
+  external) echo "" ;;
+  stub) echo inference-stub ;;
+  *) die "GE_DEV_INFERENCE must be stub, real, or external (got: $GE_DEV_INFERENCE)" ;;
+  esac
+}
+
+record_inference_choice() {
+  local svc
+  svc="$(inference_service)"
+  # Only derived facts go in the state file — never the mode, and never a URL
+  # the developer configured. Recording those would let a stale .runtime/ file
+  # silently outrank a freshly edited devenv.local.env.
+  if [[ -n "$svc" ]]; then
+    cat >"$INFERENCE_STATE" <<EOF
+GE_DEV_INFERENCE_SERVICE=$svc
+GE_DEV_INFERENCE_URL=http://${svc}:8000
+EOF
+    export GE_DEV_INFERENCE_URL="http://${svc}:8000"
+  else
+    [[ -n "$GE_DEV_INFERENCE_URL_CONFIGURED" ]] ||
+      die "GE_DEV_INFERENCE=external needs GE_DEV_INFERENCE_URL (and usually
+        GE_DEV_INFERENCE_API_KEY) set in devenv.local.env"
+    export GE_DEV_INFERENCE_URL="$GE_DEV_INFERENCE_URL_CONFIGURED"
+    echo "GE_DEV_INFERENCE_SERVICE=" >"$INFERENCE_STATE"
+  fi
+}
+
+# The api reads its ES endpoint from the compose `environment` block rather
+# than an env_file, so that devenv.local.env can point it at a deployed cluster
+# (an `environment` entry always wins over env_file, so the file can't be the
+# fallback). That makes supplying the local key devctl's job. Call this after
+# es-init has minted one and before starting or recreating the api.
+export_api_es_env() {
+  if [[ -z "${GE_DEV_ES_API_KEY:-}" ]]; then
+    GE_DEV_ES_API_KEY="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' \
+      "$DEVENV_DIR/.runtime/es_key_ro.env")"
+    [[ -n "$GE_DEV_ES_API_KEY" ]] ||
+      die "no Elasticsearch key in .runtime/es_key_ro.env — run: devctl up"
+  fi
+  export GE_DEV_ES_API_KEY
+}
+
+have_models() {
+  [[ -f "$DEVENV_DIR/models/data/manifest.json" ]]
+}
+
+models_hint() {
+  cat >&2 <<EOF
+
+No model artifacts found in devenv/models/data/. Get them:
+
+  devctl fetch-models
+
+That downloads the pinned release ($MODELS_TAG, ~33MB) — no account or
+credentials needed. Or drop --real-models to use the stub instead.
+EOF
+}
+
+# Nothing to compare until both halves are present; models/check_compat.py
+# explains why this matters.
+check_model_fixture_compat() {
+  have_models && have_fixtures || return 0
+  python3 "$DEVENV_DIR/models/check_compat.py" \
+    "$DEVENV_DIR/models/data/manifest.json" \
+    "$DEVENV_DIR/fixtures/data/manifest.json" || exit 1
 }
 
 es_curl() {
@@ -158,6 +260,41 @@ PY
   echo "Next: devctl up && devctl seed"
 }
 
+cmd_fetch_models() {
+  # Same public-release channel as the fixture, and for the same reason: a
+  # fresh clone gets working trained models with no Google account, no GCS
+  # credentials and no ClearML. Pinned to a tag rather than "newest" — see
+  # MODELS_TAG.
+  command -v curl >/dev/null || die "curl is required to download models"
+
+  local workdir
+  workdir="$(mktemp -d)"
+  # shellcheck disable=SC2064  # expand workdir now, not at trap time
+  trap "rm -rf '$workdir'" RETURN
+
+  echo "devctl: downloading model release $MODELS_TAG (~33MB)..."
+  curl -fL --progress-bar \
+    "https://github.com/$FIXTURE_REPO/releases/download/$MODELS_TAG/$MODELS_ASSET" \
+    -o "$workdir/$MODELS_ASSET" ||
+    die "download failed — check network access to github.com, or that $MODELS_TAG exists in $FIXTURE_REPO"
+
+  # Replace rather than merge: the serving manifests name specific weight
+  # files, and a half-updated directory would load one release's towers
+  # against another's author index map.
+  rm -rf "$DEVENV_DIR/models/data"
+  mkdir -p "$DEVENV_DIR/models/data"
+  tar -xf "$workdir/$MODELS_ASSET" -C "$DEVENV_DIR/models/data"
+
+  python3 - "$DEVENV_DIR/models/data/manifest.json" <<'PY'
+import json, sys, pathlib
+m = json.loads(pathlib.Path(sys.argv[1]).read_text())
+print(f"devctl: fetched models {m['tag']} — {m['content_embedding_model']} "
+      f"({m['content_embedding_dims']}d) in, {m['output_embedding_dim']}d out")
+PY
+  check_model_fixture_compat
+  echo "Next: devctl up --real-models && devctl seed"
+}
+
 # ---------------------------------------------------------------------------
 
 cmd_setup() {
@@ -165,23 +302,61 @@ cmd_setup() {
   check_repos
   ensure_runtime
   echo "devctl: pulling and building images (first run takes a few minutes)..."
-  compose --profile tools build es-init api firebase frontend
+  # `inference` builds from the same pydev image as the api (different python
+  # tag), so it's cheap to build even for people who stay on the stub.
+  compose --profile tools build es-init api inference firebase frontend
   compose --profile tools pull elasticsearch inference-stub perspective-stub dev-auth seed-rebase seed-megastream --ignore-buildable
   echo "devctl: setup complete."
   have_fixtures || fixtures_hint
   echo "Next: devctl up && devctl seed"
+  echo "(For real trained models instead of the stub: devctl fetch-models,"
+  echo " then devctl up --real-models && devctl seed)"
 }
 
 cmd_up() {
+  local arg jetstream=0
+  for arg in "$@"; do
+    case "$arg" in
+    --real-models) GE_DEV_INFERENCE=real ;;
+    --stub-models) GE_DEV_INFERENCE=stub ;;
+    --with-jetstream) jetstream=1 ;;
+    *) die "unknown argument to up: $arg (try: devctl help)" ;;
+    esac
+  done
+
   check_docker
   check_repos
   ensure_runtime
+
+  local inference
+  inference="$(inference_service)"
+  if [[ "$inference" == "inference" ]]; then
+    have_models || { models_hint; exit 1; }
+    [[ -e "$GE_DEV_REPO_ROOT/inference-service/.git" ]] ||
+      die "--real-models runs the inference-service checkout, which is missing:
+        git clone git@github.com:greenearth-social/inference-service.git \"$GE_DEV_REPO_ROOT/inference-service\""
+    check_model_fixture_compat
+  fi
+  record_inference_choice
+
+  # Stop whichever local implementation we're not using. Both are defined
+  # services, so --remove-orphans leaves the one we didn't ask for running,
+  # and it would go on answering requests aimed at a stale base URL.
+  local svc
+  for svc in inference inference-stub; do
+    [[ "$svc" == "$inference" ]] || compose stop "$svc" >/dev/null 2>&1 || true
+  done
+
   # --remove-orphans clears containers for services this file no longer
   # defines — e.g. the standalone `firestore` emulator that the Firebase
-  # suite replaced, which would otherwise linger holding its old port.
-  compose up -d --remove-orphans elasticsearch firebase dev-auth inference-stub perspective-stub
+  # suite replaced, which would otherwise linger holding its old port. The
+  # unquoted expansion drops the argument entirely in `external` mode, where
+  # there's no local inference service to start.
+  # shellcheck disable=SC2086  # deliberate: empty means "no such service"
+  compose up -d --remove-orphans elasticsearch firebase dev-auth $inference perspective-stub
   echo "devctl: initializing Elasticsearch (templates, indexes, API keys)..."
   compose run --rm es-init
+  export_api_es_env
   compose up -d api frontend
   cat <<EOF
 devctl: environment is up.
@@ -193,6 +368,23 @@ devctl: environment is up.
   functions     127.0.0.1:${FUNCTIONS_PORT}
   emulator UI   http://127.0.0.1:${FIREBASE_UI_PORT}    (browse Firestore data, auth users, function logs)
 EOF
+  case "$inference" in
+  inference)
+    echo "  inference     real models ($(python3 -c "
+import json;print(json.load(open('$DEVENV_DIR/models/data/manifest.json'))['tag'])"))"
+    echo "                first start installs torch (~5 min); watch: devctl logs -t inference"
+    ;;
+  inference-stub)
+    echo "  inference     stub (deterministic, not a trained model — devctl up --real-models)"
+    ;;
+  *)
+    echo "  inference     external: ${GE_DEV_INFERENCE_URL}"
+    ;;
+  esac
+  if [[ $jetstream -eq 1 ]]; then
+    compose --profile jetstream up -d jetstream-ingest
+    echo "  jetstream     streaming live likes from the public firehose (needs internet)"
+  fi
   # The posts alias doesn't exist until the first seed (the ingest binary
   # creates it, as in prod) — treat a missing alias like an empty index.
   local post_count
@@ -213,6 +405,22 @@ cmd_seed() {
   local rw_key
   rw_key="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$DEVENV_DIR/.runtime/es_key_rw.env")"
   [[ -n "$rw_key" ]] || die "no ES key yet — run: devctl up"
+  check_model_fixture_compat
+
+  # megastream_ingest computes each post's ge_post_embedding by calling the
+  # inference service, so the seed is only meaningful once that service has
+  # actually loaded its models. seed-megastream can't depend_on it — which of
+  # the two runs is decided here, not in the compose file — so wait explicitly.
+  # --wait blocks on the healthcheck, which probes /ready, not /health. Nothing
+  # to wait for in `external` mode: that service isn't ours to start.
+  local inference
+  inference="${GE_DEV_INFERENCE_SERVICE-$(inference_service)}"
+  if [[ -n "$inference" ]]; then
+    echo "devctl: waiting for $inference to be ready..."
+    compose up -d --wait "$inference" ||
+      die "$inference never became ready — see: devctl logs $inference"
+  fi
+
   echo "devctl: wiping previously seeded data..."
   compose run --rm seed-wipe
   echo "devctl: rebasing fixture timestamps..."
@@ -227,6 +435,7 @@ cmd_seed() {
   # but only if it was already running, so `seed` never starts a service the
   # developer deliberately stopped.
   if compose ps --status running api | grep -q api; then
+    export_api_es_env
     compose up -d --force-recreate api
     api_running=1
   fi
@@ -350,7 +559,11 @@ Usage: devctl <command> [args]
 
   setup          check prerequisites (docker, sibling repos), build/pull images
   fetch-fixture  download the published fixture set (no account or auth needed)
-  up             start the stack (ES + Firestore emulator + inference stub + api)
+  fetch-models   download the pinned trained models (no account or auth needed)
+  up             start the stack (ES + Firestore emulator + inference + api)
+                 --real-models runs the real inference-service over the
+                 downloaded models; the default is the deterministic stub.
+                 --with-jetstream also streams live likes (needs internet)
   seed           load fixtures: rebase timestamps, ingest posts, load likes
   feed [feed]    view a hydrated feed in the terminal (default: your-feed;
                  --user <did>, --limit, --pages, --json for raw skeleton)
@@ -362,7 +575,10 @@ Usage: devctl <command> [args]
 
 Fixtures: fetch-fixture downloads a published set; fixtures/generate_sample.py
 generates your own (two modes), fixtures/publish_fixture.sh publishes one.
-Config overrides go in devenv.local.env (ports, ES heap, repo root).
+Models: fetch-models downloads the pinned release; models/publish_models.sh
+mirrors a new set out of the prod bucket (maintainers).
+Config overrides go in devenv.local.env (ports, ES heap, repo root,
+GE_DEV_INFERENCE=real to make --real-models the default).
 EOF
 }
 
@@ -373,6 +589,7 @@ cmd="${1:-}"
 case "$cmd" in
 setup) cmd_setup "$@" ;;
 fetch-fixture) cmd_fetch_fixture "$@" ;;
+fetch-models) cmd_fetch_models "$@" ;;
 up) cmd_up "$@" ;;
 seed) cmd_seed "$@" ;;
 feed) cmd_feed "$@" ;;
