@@ -176,14 +176,40 @@ the command to re-check it.
 
 ## Live ingestion (optional)
 
-`devctl up --with-jetstream` additionally streams real-time likes from the
-public Bluesky Jetstream firehose into the local `likes` index, using the same
-`jetstream_ingest` binary as prod. It's off by default because it's the one
-part of this environment that needs the internet and never finishes.
+`devctl up --with-ingest` keeps the local indexes moving with real Bluesky
+data, using the same two binaries as prod:
 
-The posts those likes point at are mostly *not* in the local index — the
-firehose is all of Bluesky, the fixture is a sample — so this is for working on
-ingestion itself rather than for making feeds richer.
+| | Source | Writes | Credentials |
+| --- | --- | --- | --- |
+| `megastream_ingest` | Megastream archives (S3) | posts | S3 key required |
+| `jetstream_ingest` | Jetstream firehose | likes | none — public |
+
+Both are off by default: they're the only parts of this environment that need
+the internet and never finish. `--with-megastream` and `--with-jetstream` start
+one half each, which is worth doing when you're debugging that binary — but for
+anything else you want both, since likes arriving for posts the index will
+never hold aren't much use, and posts without likes leave the like graph
+frozen. `devctl up` warns when only one is running.
+
+Posts are embedded on the way in by the same inference service the seed uses,
+so anything arriving live is immediately reachable by the `two_tower`
+generator's kNN query.
+
+Megastream needs credentials for the archive bucket, in `devenv.local.env`:
+
+```bash
+GE_AWS_S3_ACCESS_KEY=<key>
+GE_AWS_S3_SECRET_KEY=<secret>
+```
+
+Everything else about the bucket is defaulted to what prod reads. `devctl`
+checks for these before starting anything, because without them the container
+just fails validation and restarts, which looks like a broken environment
+rather than a missing setting.
+
+Live ingestion keeps its own cursor, separate from the seed's, so re-seeding
+doesn't rewind it and it doesn't make the next re-seed skip the fixture. The
+indexes grow for as long as it runs; `devctl nuke` resets everything.
 
 ## Live services
 
@@ -206,7 +232,7 @@ you don't have to. Each service needs its key in `devenv.local.env`
 | --- | --- | --- |
 | `es` | `GE_DEV_ES_API_KEY` | read-only is right — the api only reads |
 | `inference` | `GE_DEV_INFERENCE_API_KEY` | |
-| `perspective` | `GE_PERSPECTIVE_API_KEY` | real quota, real money |
+| `perspective` | `GE_PERSPECTIVE_API_KEY` | real quota, be careful |
 
 `devctl up` checks each one is reachable and the key works before starting
 anything, so a bad key fails immediately instead of becoming a 500 in a
@@ -425,7 +451,8 @@ run `devctl feed` and reload.
 | Firebase Emulator UI | `http://127.0.0.1:4000` | browse Firestore data, auth users, function logs |
 | inference | internal only | real inference-service over the trained towers |
 | perspective-stub | internal only | stands in for Google's Perspective API |
-| jetstream-ingest | internal only | `--with-jetstream`; live likes from the public firehose |
+| megastream-ingest | internal only | `--with-ingest`; live posts from the archives |
+| jetstream-ingest | internal only | `--with-ingest`; live likes from the public firehose |
 
 Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 `GE_DEV_PORT_ES`, `GE_DEV_PORT_FIRESTORE`, `GE_DEV_PORT_FRONTEND`,

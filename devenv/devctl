@@ -411,7 +411,7 @@ cmd_setup() {
 }
 
 cmd_up() {
-  local jetstream=0
+  local jetstream=0 megastream=0
   # Start from what's configured, not from what the last `up` recorded, so this
   # command fully determines the result.
   GE_DEV_LIVE="$LIVE_CONFIGURED"
@@ -420,6 +420,17 @@ cmd_up() {
     case "$1" in
     --with-jetstream)
       jetstream=1
+      shift
+      ;;
+    --with-megastream)
+      megastream=1
+      shift
+      ;;
+    # Posts and likes are two halves of the same firehose; one without the
+    # other is rarely what anyone wants.
+    --with-ingest)
+      jetstream=1
+      megastream=1
       shift
       ;;
     --live)
@@ -460,6 +471,17 @@ cmd_up() {
   fi
   preflight_live
 
+  # Checked before anything starts: without these the container just fails its
+  # config validation and restarts, which reads as a broken environment rather
+  # than a missing setting. Jetstream needs no equivalent — it's a public
+  # firehose.
+  if [[ $megastream -eq 1 ]]; then
+    [[ -n "${GE_AWS_S3_ACCESS_KEY:-}" && -n "${GE_AWS_S3_SECRET_KEY:-}" ]] ||
+      die "--with-megastream needs GE_AWS_S3_ACCESS_KEY and GE_AWS_S3_SECRET_KEY
+        in devenv.local.env — the post archives are a private bucket, unlike
+        the public Jetstream firehose."
+  fi
+
   # --remove-orphans clears containers for services this file no longer
   # defines — e.g. the standalone `firestore` emulator that the Firebase
   # suite replaced, which would otherwise linger holding its old port.
@@ -487,9 +509,18 @@ EOF
   fi
   live_has es && echo "  ** the api is reading LIVE Elasticsearch: $GE_DEV_ES_URL"
   live_has perspective && echo "  ** the api is calling the LIVE Perspective API"
+  if [[ $megastream -eq 1 ]]; then
+    compose --profile megastream up -d megastream-ingest
+    echo "  megastream    streaming live posts from the archives (needs internet)"
+  fi
   if [[ $jetstream -eq 1 ]]; then
     compose --profile jetstream up -d jetstream-ingest
     echo "  jetstream     streaming live likes from the public firehose (needs internet)"
+  fi
+  # Likes arriving for posts the index will never hold is a confusing way to
+  # run, and the reverse leaves the like graph frozen.
+  if [[ $jetstream -ne $megastream ]]; then
+    echo "  ** only half of live ingestion is on; --with-ingest runs both" >&2
   fi
   # The posts alias doesn't exist until the first seed (the ingest binary
   # creates it, as in prod) — treat a missing alias like an empty index.
@@ -703,7 +734,8 @@ Usage: devctl <command> [args]
   up             start the stack (ES + Firestore emulator + inference + api)
                  --live es,inference,perspective  use deployed services
                  --live-env stage|prod            which deployment (default stage)
-                 --with-jetstream                 also stream live likes
+                 --with-ingest                    also ingest live posts+likes
+                 (--with-megastream / --with-jetstream for one half)
   tunnel [env]   port-forward a deployed Elasticsearch, for --live es
   seed           load fixtures: rebase timestamps, ingest posts, load likes
   feed [feed]    view a hydrated feed in the terminal (default: your-feed;

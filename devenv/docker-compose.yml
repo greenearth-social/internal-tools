@@ -334,6 +334,58 @@ services:
       - ${GE_DEV_REPO_ROOT:-../..}/api:/app
       - api_venv:/app/.venv
 
+  # Optional: real-time posts from the Megastream archives (issue api#269).
+  #
+  # The other half of live ingestion — jetstream-ingest below brings in likes,
+  # and likes for posts that never arrive aren't much use on their own.
+  # `devctl up --with-ingest` starts both.
+  #
+  # Unlike Jetstream, this isn't a public firehose: the archives live in an S3
+  # bucket that needs credentials, so devctl refuses to start it without them.
+  # Everything except the keys is defaulted to what prod reads.
+  megastream-ingest:
+    image: golang:1.25
+    profiles: ["megastream"]
+    working_dir: /src
+    # spool, not once: `once` drains what's there and exits, which is what the
+    # seed does. spool keeps polling for newly published archives.
+    command:
+      - "go"
+      - "run"
+      - "./cmd/megastream_ingest"
+      - "--source"
+      - "s3"
+      - "--mode"
+      - "spool"
+      - "--max-rewind"
+      - "${GE_DEV_MEGASTREAM_MAX_REWIND:-60}"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
+      # Each post gets embedded on the way in, exactly as at seed time, so
+      # posts arriving live are searchable by the same two_tower kNN query.
+      - GE_INFERENCE_BASE_URL=${GE_DEV_INFERENCE_URL:-http://inference:8000}
+      - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
+      - GE_AWS_REGION=${GE_DEV_AWS_REGION:-us-east-1}
+      - GE_AWS_S3_BUCKET=${GE_DEV_AWS_S3_BUCKET:-graze-mega-02}
+      - GE_AWS_S3_PREFIX=${GE_DEV_AWS_S3_PREFIX:-mega/}
+      - GE_AWS_S3_ACCESS_KEY=${GE_AWS_S3_ACCESS_KEY:-}
+      - GE_AWS_S3_SECRET_KEY=${GE_AWS_S3_SECRET_KEY:-}
+      # A *different* cursor file from seed-megastream's. Sharing one would mean
+      # a re-seed rewinds live ingestion, and live ingestion makes the next
+      # re-seed skip the fixture as already-processed.
+      - GE_MEGASTREAM_STATE_FILE=/runtime/seed/.megastream_live_state.json
+      - GE_INDEX_PERIOD=week
+    env_file:
+      - ./.runtime/es_key_rw.env
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/ingex/ingest:/src
+      - gomod:/go/pkg/mod
+      - gocache:/root/.cache/go-build
+      - ./.runtime:/runtime
+
   # Optional: real-time likes from the public Jetstream firehose (issue api#269).
   #
   # Off by default and gated behind a profile, because it's the one service
