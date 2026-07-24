@@ -25,7 +25,11 @@ FRONTEND_DIR=/frontend
 # Written beside the original: the CLI requires referenced paths to live
 # inside the config file's directory. Regenerated each start, and removed
 # by `devctl down` / `devctl nuke`.
-DERIVED_CONFIG="$FRONTEND_DIR/firebase.devenv.json"
+#
+# The filename carries the instance name for anything but the default
+# instance, because every instance bind-mounts the same frontend checkout and
+# one instance's `down` must not delete the config another is running from.
+DERIVED_CONFIG="$FRONTEND_DIR/${GE_DEV_FIREBASE_CONFIG:-firebase.devenv.json}"
 PROJECT="${GE_DEV_FIREBASE_PROJECT:-greenearth-471522}"
 
 node /firebase/derive-config.mjs "$FRONTEND_DIR" "$DERIVED_CONFIG"

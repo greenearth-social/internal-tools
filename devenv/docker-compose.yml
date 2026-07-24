@@ -54,7 +54,7 @@ services:
       - ELASTIC_PASSWORD=${GE_DEV_ES_PASSWORD:-ge-dev-elastic}
     volumes:
       - ${GE_DEV_REPO_ROOT:-../..}/ingex/index/deploy/k8s/base/templates:/templates:ro
-      - ./.runtime:/runtime
+      - ${GE_DEV_RUNTIME:-./.runtime}:/runtime
 
   # Firebase emulators (Firestore + Auth + Functions), started from the
   # frontend checkout so rules and function code come from the repo we deploy
@@ -72,6 +72,11 @@ services:
     command: ["bash", "/firebase/start.sh"]
     environment:
       - GE_DEV_FIREBASE_PROJECT=${GE_DEV_FIREBASE_PROJECT:-greenearth-471522}
+      # The derived emulator config has to live inside the frontend checkout
+      # (the CLI requires referenced paths to be under the config's directory),
+      # and that checkout is shared by every instance — so name it per
+      # instance rather than have two of them fight over one file.
+      - GE_DEV_FIREBASE_CONFIG=${GE_DEV_FIREBASE_CONFIG:-firebase.devenv.json}
       # --- consumed by functions/src at runtime ---
       # APP_ORIGIN derives the OAuth client_id and redirect_uri. Bluesky's
       # authorization server has to fetch the client metadata from it, so
@@ -139,6 +144,13 @@ services:
       # doesn't need a backend.
       - VITE_USE_MOCK_SERVICES=${GE_DEV_FRONTEND_MOCK:-false}
       - VITE_USE_FIREBASE_EMULATORS=true
+      # Browser-side, so these are *host* ports, not container ones: the
+      # Firebase SDK runs in the developer's browser and connects to the
+      # emulators directly. Without them a second instance's page would talk
+      # to the first instance's Firestore and Auth (frontend#61).
+      - VITE_FIREBASE_EMULATOR_HOST=${GE_DEV_EMULATOR_HOST:-127.0.0.1}
+      - VITE_FIRESTORE_EMULATOR_PORT=${GE_DEV_PORT_FIRESTORE:-8080}
+      - VITE_FIREBASE_AUTH_EMULATOR_PORT=${GE_DEV_PORT_FIREBASE_AUTH:-9099}
       - VITE_FIREBASE_PROJECT_ID=${GE_DEV_FIREBASE_PROJECT:-greenearth-471522}
       # The Firebase JS SDK validates that these are non-empty before it will
       # initialize, even when every call is going to an emulator that ignores
@@ -166,7 +178,7 @@ services:
     volumes:
       - ./dev-auth:/dev-auth:ro
       - ./firebase:/firebase:ro
-      - ./.runtime:/runtime:ro
+      - ${GE_DEV_RUNTIME:-./.runtime}:/runtime:ro
     healthcheck:
       test:
         [
@@ -200,6 +212,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - GE_DEV_TORCH_VERSION=${GE_DEV_TORCH_VERSION:-2.5.1}
+      - GE_DEV_INFERENCE_RELOAD=${GE_DEV_INFERENCE_RELOAD:-}
       - PIPENV_VENV_IN_PROJECT=1
       # As with the api: the checkout may carry a developer's own .env pointing
       # at GCS artifacts and real projects. The compose environment wins.
@@ -208,7 +221,11 @@ services:
       # CPU only. The models run acceptably on CPU, and a CUDA torch build
       # would be a multi-GB download for a laptop that can't use it.
       - GE_INFERENCE_PREFER_CUDA=0
-      - GE_INFERENCE_WARMUP=0
+      # GE_INFERENCE_WARMUP is deliberately not set: _warmup_entry returns on
+      # the CPU check before it ever reads that flag, so pinning it to 0 here
+      # changed nothing at runtime — while leaking into
+      # `devctl exec inference pipenv run pytest`, where one test asserts the
+      # warmup path runs and failed on the container's value.
     env_file:
       # Shipped inside the model bundle and generated from the artifacts
       # themselves (see models/publish_models.sh), so the served dimensions
@@ -327,7 +344,7 @@ services:
     env_file:
       # Written by seed; devctl guarantees it exists before `up`. The ES key
       # deliberately isn't here — see GE_ELASTICSEARCH_API_KEY above.
-      - ./.runtime/probe.env
+      - ${GE_DEV_RUNTIME:-./.runtime}/probe.env
     ports:
       - "127.0.0.1:${GE_DEV_PORT_API:-8300}:8000"
     volumes:
@@ -379,12 +396,12 @@ services:
       - GE_MEGASTREAM_STATE_FILE=/runtime/seed/.megastream_live_state.json
       - GE_INDEX_PERIOD=week
     env_file:
-      - ./.runtime/es_key_rw.env
+      - ${GE_DEV_RUNTIME:-./.runtime}/es_key_rw.env
     volumes:
       - ${GE_DEV_REPO_ROOT:-../..}/ingex/ingest:/src
       - gomod:/go/pkg/mod
       - gocache:/root/.cache/go-build
-      - ./.runtime:/runtime
+      - ${GE_DEV_RUNTIME:-./.runtime}:/runtime
 
   # Optional: real-time likes from the public Jetstream firehose (issue api#269).
   #
@@ -425,12 +442,12 @@ services:
       # holding ~144 near-empty indices.
       - GE_INDEX_PERIOD=week
     env_file:
-      - ./.runtime/es_key_rw.env
+      - ${GE_DEV_RUNTIME:-./.runtime}/es_key_rw.env
     volumes:
       - ${GE_DEV_REPO_ROOT:-../..}/ingex/ingest:/src
       - gomod:/go/pkg/mod
       - gocache:/root/.cache/go-build
-      - ./.runtime:/runtime
+      - ${GE_DEV_RUNTIME:-./.runtime}:/runtime
 
   # --- seed pipeline (one-shot, `docker compose run --rm <svc>`; devctl seed) ---
 
@@ -444,7 +461,7 @@ services:
     volumes:
       - ./seed:/seedscripts:ro
       - ./fixtures/data:/fixtures:ro
-      - ./.runtime:/runtime
+      - ${GE_DEV_RUNTIME:-./.runtime}:/runtime
 
   # Runs the real megastream_ingest binary (byte-identical to prod) against the
   # rebased fixtures. Uses the read-write ES key minted by es-init.
@@ -468,12 +485,12 @@ services:
       - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
       - GE_INDEX_PERIOD=week
     env_file:
-      - ./.runtime/es_key_rw.env
+      - ${GE_DEV_RUNTIME:-./.runtime}/es_key_rw.env
     volumes:
       - ${GE_DEV_REPO_ROOT:-../..}/ingex/ingest:/src
       - gomod:/go/pkg/mod
       - gocache:/root/.cache/go-build
-      - ./.runtime:/runtime
+      - ${GE_DEV_RUNTIME:-./.runtime}:/runtime
 
   # Wipes previously seeded data indexes so each seed is a fresh load.
   seed-wipe:
@@ -487,7 +504,7 @@ services:
       - PYTHONUNBUFFERED=1
       - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
     env_file:
-      - ./.runtime/es_key_rw.env
+      - ${GE_DEV_RUNTIME:-./.runtime}/es_key_rw.env
     volumes:
       - ./seed:/seedscripts:ro
 
@@ -503,10 +520,10 @@ services:
       - PYTHONUNBUFFERED=1
       - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
     env_file:
-      - ./.runtime/es_key_rw.env
+      - ${GE_DEV_RUNTIME:-./.runtime}/es_key_rw.env
     volumes:
       - ./seed:/seedscripts:ro
-      - ./.runtime:/runtime
+      - ${GE_DEV_RUNTIME:-./.runtime}:/runtime
 
 volumes:
   esdata:

@@ -1,4 +1,7 @@
+# .runtime/ for the default instance, .runtime.<name>/ for the rest: minted
+# ES keys, the seeded persona, and the rebased fixture each instance ingests.
 .runtime/
+.runtime.*/
 fixtures/data/
 devenv.local.env
 models/data/
