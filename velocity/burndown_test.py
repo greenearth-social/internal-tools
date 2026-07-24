@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from . import burndown
 from .conftest import NOW, make_item
@@ -50,7 +50,8 @@ def test_backlog_total_counts_unified_view_statuses():
 
 
 def test_release_marker_dates_use_position_not_points():
-    # velocity 5; a marker sits after 5 pts of work, so it lands in week 1
+    # velocity 5; the marker sits after 5 pts of work == exactly one week,
+    # so it's reached on the last day of that week (Sun 2026-06-28).
     items = [
         _backlog(5, id="a"),
         make_item(status="Backlog", title="🚀 GA demarcator ✅", id="mark"),
@@ -58,11 +59,36 @@ def test_release_marker_dates_use_position_not_points():
     ]
     markers = burndown.release_marker_dates(items, velocity=5, now=NOW)
     assert len(markers) == 1
-    wk, item = markers[0]
+    day, item = markers[0]
     assert item.id == "mark"
-    assert wk == date(2026, 6, 22)  # everything above (5 pts) done in week 1
+    assert day == date(2026, 6, 28)
     # the marker contributes no points to the backlog total
     assert burndown.backlog_total(items) == 10
+
+
+def test_assign_tasks_to_dates_interpolates_within_the_week():
+    # velocity 7 == 1 pt/day, so N points lands N days in (boundary -> last day)
+    items = [_backlog(1, id="a"), _backlog(2, id="b"), _backlog(4, id="c")]
+    dates = dict((it.id, d) for d, it in burndown.assign_tasks_to_dates(items, velocity=7, now=NOW))
+    assert dates["a"] == date(2026, 6, 24)  # 1 pt -> day 0 (clamped to today)
+    assert dates["b"] == date(2026, 6, 24)  # 3 pts -> day 2, still clamped
+    assert dates["c"] == date(2026, 6, 28)  # 7 pts -> exact week boundary -> day 6
+
+
+def test_assign_tasks_to_dates_never_projects_into_the_past():
+    items = [_backlog(1, id="a")]
+    ((day, _),) = burndown.assign_tasks_to_dates(items, velocity=100, now=NOW)
+    assert day == NOW.date()
+
+
+def test_dates_always_fall_inside_their_assigned_week():
+    items = [_backlog(p, id=f"i{p}") for p in (1, 2, 3, 5, 8, 13, 21)]
+    for velocity in (3, 5, 7, 21.3):
+        dates = burndown.assign_tasks_to_dates(items, velocity, now=NOW)
+        weeks = burndown.assign_tasks_to_weeks(items, velocity, now=NOW)
+        for (day, a), (wk, b) in zip(dates, weeks, strict=True):
+            assert a is b
+            assert wk <= day < wk + timedelta(days=7)
 
 
 def test_project_burndown_counts_down_to_zero():

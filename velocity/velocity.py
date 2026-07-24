@@ -32,6 +32,11 @@ def current_week_start(now: datetime | None = None) -> date:
     return week_start(_now(now))
 
 
+def current_date(now: datetime | None = None) -> date:
+    """Today's date."""
+    return _now(now).date()
+
+
 def weekly_completed_points(items: list[ProjectItem]) -> dict[date, int]:
     """Map each week (Monday) to the points completed in it.
 
