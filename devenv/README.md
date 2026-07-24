@@ -27,7 +27,9 @@ with your normal git, while everything executes inside containers.
 ```
 
 If your layout differs, set `GE_DEV_REPO_ROOT=<parent>` in
-`devenv/devenv.local.env`.
+`devenv/devenv.local.env`. A single instance can also mount a different
+working copy with `up --repo-root <dir>` — see
+[Running more than one environment](#running-more-than-one-environment).
 
 **New here?** [docs/onboarding.md](docs/onboarding.md) is the full
 walkthrough, from clone to a ranked feed. The rest of the docs directory:
@@ -166,6 +168,24 @@ Named instances take the next free block of ports: the first gets `+10` (api
 allocation is made once and remembered in the instance's runtime directory, so
 an instance's ports don't move between restarts.
 
+### Each instance can mount its own working copy
+
+By default every instance bind-mounts the same sibling checkouts. That's fine
+for one task at a time, but the point of instances is parallel work — and
+parallel work wants parallel code. `up --repo-root <dir>` points an instance at
+a different directory of checkouts (a second clone, or git worktrees — see the
+recipe in [docs/agents.md](docs/agents.md)):
+
+```bash
+./devctl up --name agent1 --repo-root ~/src/ge-agent1
+```
+
+The choice is remembered per instance, exactly like the `--live` and
+`--dedicated-es` choices: every later command (`exec`, `test`, `nuke`) acts on
+the recorded working copy, a later bare `up` recreates against it rather than
+reverting to the default, and `devctl ls` shows which instance mounts what.
+Pass `--repo-root` again to move an instance; `nuke` forgets it.
+
 ### A named instance shares `dev`'s Elasticsearch
 
 Elasticsearch is the expensive part — ~1.9GB of an instance's ~3GB, and an hour
@@ -219,9 +239,10 @@ kernel killed. To actually run two clusters, give Docker ~12GB (Docker Desktop
   together). Content-addressed and safe for concurrent use, so sharing them
   saves a dedicated instance a full module download before it can seed. They're
   declared external, which means `devctl nuke --name x` leaves them alone.
-- **The frontend checkout**, unavoidably: `functions/lib` is compiled into it
-  by whichever instance starts. `node_modules` is a per-instance volume, and
-  the derived Firebase config is named per instance
+- **The frontend checkout, between instances on the same repo root**:
+  `functions/lib` is compiled into it by whichever instance starts. Instances
+  with their own `--repo-root` don't share it. `node_modules` is a per-instance
+  volume, and the derived Firebase config is named per instance
   (`firebase.devenv.<name>.json`) so one instance's `down` can't delete
   another's.
 
@@ -661,10 +682,11 @@ instance name, same as passing `--name`), `GE_DEV_API_RELOAD=1` /
   `network-likes` feed is normally the sample, not a fault. The api says which
   in its logs ("No liked posts found for followed users of ..."). `random`,
   `popularity`, and `post_similarity` have no such dependency.
-- **Instances share the frontend checkout.** `functions/lib` is compiled into
-  it by whichever instance starts, so two instances on two different frontend
-  branches will overwrite each other's build. Everything that can be per
-  instance is.
+- **Instances on the same repo root share the frontend checkout.**
+  `functions/lib` is compiled into it by whichever instance starts, so two
+  such instances on two different frontend branches will overwrite each
+  other's build. Give each its own working copy (`up --repo-root <dir>`) and
+  the collision disappears. Everything that can be per instance is.
 - **A named instance shares `dev`'s Elasticsearch** (see [Running more than one
   environment](#running-more-than-one-environment)), so it's read-only against
   that data and depends on `dev` being up. `--dedicated-es` opts out at the

@@ -75,20 +75,40 @@ reasonable:
 
 ## Working in parallel
 
-Give each concurrent agent its own instance and its own branch:
+Give each concurrent agent its own instance **and its own working copy** —
+that's the whole point of instances: several agents each editing, testing
+and rendering feeds against their own code, none of them able to trip over
+another's half-finished change.
+
+Git worktrees make the working copies cheap (shared object store, no
+re-clone). Put one worktree of each repo under a directory per agent, then
+point the instance at it:
 
 ```bash
-devctl up --name agent1        # ~90s; shares dev's Elasticsearch, read-only
+ROOT=~/src/ge-agent1
+mkdir -p "$ROOT"
+for r in api ingex frontend inference-service; do
+  git -C ~/src/greenearth-social/$r worktree add "$ROOT/$r" -b agent1
+done
+
+devctl up --name agent1 --repo-root "$ROOT"   # ~90s; shares dev's ES, read-only
 devctl --name agent1 test api
 devctl --name agent1 feed
-devctl nuke --name agent1      # when the task is done
+devctl nuke --name agent1                     # when the task is done
 ```
+
+`--repo-root` is remembered per instance: later commands and later `up`s act
+on the same working copy without repeating the flag, `devctl ls` shows which
+instance mounts what, and `devctl nuke` forgets it. A plain clone of the
+repos works exactly the same way — worktrees are just the cheap way to get
+one.
 
 Named instances cost ~1GB each (they read `dev`'s cluster rather than
 running their own), so a well-provisioned machine holds several. Two
-caveats: the frontend checkout is shared (two instances on different
-frontend branches will overwrite each other's `functions/lib` build), and a
-sharer can't seed — data changes happen on `dev`.
+caveats: instances sharing one working copy also share its frontend
+`functions/lib` build (two frontend branches would overwrite each other —
+separate `--repo-root`s dissolve this), and a sharer can't seed — data
+changes happen on `dev`.
 
 For agent farms, run the instances on a remote Linux host
 ([remote.md](remote.md)) — same setup, more memory, and your laptop stays
