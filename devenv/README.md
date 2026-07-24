@@ -75,30 +75,44 @@ disposable by design — when in doubt, `nuke` and re-`seed`.
 ## Running commands inside the environment
 
 Dependencies are installed in containers, not on your host — there is no
-`node_modules`, no `.venv` and no Go toolchain in your checkouts. `devctl exec`
-runs anything inside a service, with the right interpreter, dependencies and
+`node_modules`, no `.venv` and no Go toolchain in your checkouts. Everything
+runs through `devctl`.
+
+`devctl test` runs a repo's test suite with the right runner, or all of them
+with no argument:
+
+```bash
+./devctl test               # api, inference, ingex, frontend
+./devctl test api           # one repo
+./devctl test ingex         # Go tests, in a throwaway container — no stack needed
+```
+
+`api`, `inference` and `frontend` run in the live containers (so the stack has
+to be up); `ingex` gets an ephemeral Go container over the same bind-mounted
+source the ingest uses. It exits nonzero and names the suite if anything fails.
+
+For anything finer — a single file, a `-k` filter, a linter, a one-off script —
+`devctl exec` runs any command inside a service, with the right interpreter and
 environment already in place:
 
 ```bash
-./devctl exec api pipenv run pytest
 ./devctl exec api pipenv run pytest src/app/lib/firestore_test.py -v
 ./devctl exec api pipenv run ruff check .
 ./devctl exec frontend npm run typecheck
-./devctl exec inference pipenv run pytest
 ./devctl es /posts/_count
 ```
 
-This is also the point of having one wrapper: a coding agent's sandbox can
-allow `devctl` and get all of the above, rather than being granted `docker`,
+This is the point of having one wrapper: a coding agent's sandbox can allow
+`devctl` and get all of the above, rather than being granted `docker`,
 `pipenv`, `npm` and `go` separately.
 
 ### Pointing a coding agent at this
 
 There's a skill at `internal-tools/.claude/skills/devenv/` covering what an
-agent needs: check before starting, run tests through `devctl exec` rather than
-on the host, restart instead of expecting reload, use `--name` to work in
-parallel, and the handful of things that reliably waste time (a feed before
-seeding, a model change without a re-seed).
+agent needs: check before starting, run tests with `devctl test` (or `devctl
+exec` for finer control) rather than on the host, restart instead of expecting
+reload, use `--name` to work in parallel, and the handful of things that
+reliably waste time (a feed before seeding, a model change without a re-seed).
 
 Claude Code finds it automatically when the session starts in this repo, or in
 the directory that holds all the sibling checkouts — nested `.claude/skills/`

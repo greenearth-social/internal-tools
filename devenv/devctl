@@ -215,15 +215,22 @@ check_repos() {
     echo "devctl: note: optional repo not checked out: $GE_DEV_REPO_ROOT/engagement-prediction" >&2
 }
 
-ensure_runtime() {
-  # The Go module and build caches are declared external so that they survive
-  # one instance's `nuke` and are shared by all of them; compose won't create
-  # an external volume, so we do.
+# The Go module and build caches are declared external so that they survive
+# one instance's `nuke` and are shared by all of them; compose won't create an
+# external volume, so we do. Also used directly by `devctl test ingex`, whose
+# ephemeral container isn't a compose service.
+GO_IMAGE="golang:1.25"
+
+ensure_go_caches() {
   local volume
   for volume in ge-dev-gomod ge-dev-gocache; do
     docker volume inspect "$volume" >/dev/null 2>&1 ||
       docker volume create "$volume" >/dev/null
   done
+}
+
+ensure_runtime() {
+  ensure_go_caches
   mkdir -p "$RUNTIME/seed" "$DEVENV_DIR/models/data"
   # compose env_file entries must exist before any `compose` invocation.
   touch "$RUNTIME/es_key_ro.env" \
@@ -1255,53 +1262,148 @@ cmd_restart() {
   echo "devctl: restarted$(instance_label): $*"
 }
 
+# The test suites, and how each runs. api/inference/frontend run in the live
+# container, where their dependencies are already installed; ingex is Go with
+# no long-running service, so it gets an ephemeral container over the same
+# bind-mounted source and shared caches the ingest uses. `devctl exec` covers
+# anything finer (a single file, a -k filter, -v) — see `devctl help`.
+TEST_SUITES="api inference ingex frontend"
+
+run_test_suite() {
+  case "$1" in
+  api) exec_test api pipenv run pytest ;;
+  inference) exec_test inference pipenv run pytest ;;
+  frontend) exec_test frontend npm run test:unit ;;
+  ingex)
+    local t=""
+    [[ -t 1 ]] && t="-t" || true
+    docker run --rm $t \
+      -v "$GE_DEV_REPO_ROOT/ingex/ingest:/src" -w /src \
+      -v ge-dev-gomod:/go/pkg/mod -v ge-dev-gocache:/root/.cache/go-build \
+      "$GO_IMAGE" go test -race ./...
+    ;;
+  esac
+}
+
+exec_test() {
+  local svc="$1"
+  shift
+  local tty=()
+  [[ -t 1 ]] || tty=(-T)
+  compose exec ${tty[@]+"${tty[@]}"} -e PIPENV_VERBOSITY=-1 "$svc" "$@"
+}
+
+cmd_test() {
+  # Run a repo's test suite inside the environment, or all of them with no
+  # argument. The point is a first-class, allowlistable entry point for "run
+  # the tests" that doesn't require knowing each repo's runner.
+  #
+  #   devctl test              # every suite
+  #   devctl test api          # just one
+  #   devctl --name alpha test api
+  check_docker
+  ensure_go_caches
+
+  local suites=("$@")
+  [[ ${#suites[@]} -gt 0 ]] || suites=($TEST_SUITES)
+
+  local s
+  for s in "${suites[@]}"; do
+    case " $TEST_SUITES " in
+    *" $s "*) ;;
+    *) die "unknown test suite: $s (choose from: $TEST_SUITES, or omit for all)" ;;
+    esac
+  done
+
+  # The container suites need the stack up. Check them all first, so a bare
+  # `devctl test` with nothing running says so once rather than dying on the
+  # first suite after ingex has already run.
+  local need_up=()
+  for s in "${suites[@]}"; do
+    case "$s" in
+    api | inference | frontend)
+      compose ps --status running "$s" 2>/dev/null | grep -q "$s" || need_up+=("$s")
+      ;;
+    esac
+  done
+  if [[ ${#need_up[@]} -gt 0 ]]; then
+    die "these need the stack running: ${need_up[*]}
+        start it:  devctl up$([[ "$INSTANCE" == "dev" ]] || echo " --name $INSTANCE")
+        (ingex tests need nothing running: devctl test ingex)"
+  fi
+
+  local failed=()
+  for s in "${suites[@]}"; do
+    echo
+    echo "devctl: ===== $s ====="
+    run_test_suite "$s" || failed+=("$s")
+  done
+
+  echo
+  [[ ${#failed[@]} -eq 0 ]] || die "test failures: ${failed[*]}"
+  echo "devctl: all passed (${suites[*]})"
+}
+
 usage() {
   cat <<EOF
 devctl — Green Earth local dev environment
 
-Usage: devctl <command> [args]
+Usage: devctl [--name <instance>] <command> [args]
 
-  setup          check prerequisites, build/pull images, download models,
-                 install inference-service's dependencies
-  fetch-fixture  download the published fixture set (no account or auth needed)
-  fetch-models   download the pinned trained models (no account or auth needed)
-  up             start the stack (ES + Firestore emulator + inference + api)
-                 --live es,inference,perspective  use deployed services
-                 --live-env stage|prod            which deployment (default stage)
-                 --with-ingest                    also ingest live posts+likes
-                 (--with-megastream / --with-jetstream for one half)
-                 --watch                          reload api/inference on edit
-                 --dedicated-es                   own Elasticsearch, not shared
-  tunnel [env]   port-forward a deployed Elasticsearch, for --live es
-  seed           load fixtures: rebase timestamps, ingest posts, load likes
-  feed [feed]    view a hydrated feed in the terminal (default: your-feed;
-                 --user <did>, --limit, --pages, --json for raw skeleton)
-  login [did]    print a sign-in URL for the frontend as the seeded persona
-  status         container status + index doc counts
-  logs [svc...]  print recent logs and exit (-t follows instead)
-  exec <svc> ... run a command inside a service (e.g. exec api pipenv run pytest)
-  es <path>      query this instance's Elasticsearch (read-only key, e.g.
-                 devctl es /posts/_count)
-  restart <svc>  recreate one service, picking up code and config changes
-  ports [svc]    this instance's published ports (one number with a service)
-  ls             every instance on this machine, and whether it's running
-  down           stop containers (data volumes survive)
-  nuke           stop and delete everything (volumes, minted keys, seed state)
+Setup (first run):
+  setup            check prerequisites, build/pull images, download models,
+                   install inference-service's dependencies
+  fetch-fixture    download the published fixture set (no account or auth needed)
+  fetch-models     download the pinned trained models (no account or auth needed)
 
-Instances: --name <n> runs a second environment — its own containers, volumes
-and ports. It works on every command (devctl --name alpha up, then
-devctl --name alpha seed) and defaults to "dev". A named instance reads the
-default instance's Elasticsearch by default (it's the memory-hungry part), so
-it's read-only against that data — seed the owner, or pass --dedicated-es to
-give the instance its own cluster to seed.
-Fixtures: fetch-fixture downloads a published set; fixtures/generate_sample.py
-generates your own (two modes), fixtures/publish_fixture.sh publishes one.
-Models: fetch-models downloads the pinned release; models/publish_models.sh
-mirrors a new set out of the prod bucket (maintainers).
-Live services need a key in devenv.local.env: GE_DEV_ES_API_KEY,
-GE_DEV_INFERENCE_API_KEY, GE_PERSPECTIVE_API_KEY. Set GE_DEV_LIVE there to
-make the choice stick without passing --live every time.
-Other config overrides go in the same file (ports, ES heap, repo root).
+Run the stack:
+  up               start the stack (ES + Firebase emulators + inference + api)
+                     --live es,inference,perspective  use deployed services
+                     --live-env stage|prod            which deployment (default stage)
+                     --with-ingest                    also ingest live posts+likes
+                       (--with-megastream / --with-jetstream for one half)
+                     --watch                          reload api/inference on edit
+                     --dedicated-es                   own Elasticsearch, not shared
+  seed             load fixtures: rebase timestamps, ingest posts, load likes
+  restart <svc>    recreate one service, picking up code and config changes
+  down             stop containers (data volumes survive)
+  nuke             stop and delete everything (volumes, minted keys, seed state)
+
+Work with it:
+  test [svc]       run a repo's tests inside the env, or all with no arg
+                     (api, inference, ingex, frontend)
+  exec <svc> ...   run any command in a service (e.g. exec api pipenv run pytest)
+  feed [feed]      view a hydrated feed in the terminal (default: your-feed;
+                   --user <did>, --limit, --pages, --json for raw skeleton)
+  es <path>        query this instance's Elasticsearch (read-only key, e.g.
+                   devctl es /posts/_count)
+  login [did]      print a sign-in URL for the frontend as the seeded persona
+  status           container status + index doc counts
+  logs [svc...]    print recent logs and exit (-t follows instead)
+
+Instances & ports:
+  ls               every instance on this machine, and whether it's running
+  ports [svc]      this instance's published ports (one number with a service)
+  tunnel [env]     port-forward a deployed Elasticsearch, for --live es
+
+Instances
+  --name <n> runs a second environment with its own containers, volumes and
+  ports; it works on every command and defaults to "dev". A named instance
+  reads dev's Elasticsearch (the memory-hungry part), so it's read-only against
+  that data — seed dev, or pass --dedicated-es to give it its own cluster.
+
+Fixtures & models
+  fetch-fixture and fetch-models download published sets — no account needed.
+  Roll your own with fixtures/generate_sample.py (two modes) and
+  fixtures/publish_fixture.sh; maintainers publish models with
+  models/publish_models.sh (from the prod bucket).
+
+Configuration (devenv.local.env, gitignored)
+  Live-service keys:   GE_DEV_ES_API_KEY, GE_DEV_INFERENCE_API_KEY,
+                       GE_PERSPECTIVE_API_KEY
+  Stick a live choice: GE_DEV_LIVE, GE_DEV_LIVE_ENV (else a bare 'up' is all-local)
+  Other overrides:     ports (GE_DEV_PORT_*), ES heap (GE_DEV_ES_HEAP),
+                       repo root (GE_DEV_REPO_ROOT)
 EOF
 }
 
@@ -1332,6 +1434,7 @@ login) cmd_login "$@" ;;
 status | ps) cmd_status "$@" ;;
 logs) cmd_logs "$@" ;;
 exec) cmd_exec "$@" ;;
+test) cmd_test "$@" ;;
 es) cmd_es "$@" ;;
 restart) cmd_restart "$@" ;;
 ports) cmd_ports "$@" ;;
