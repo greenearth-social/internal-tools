@@ -67,11 +67,9 @@ check_repos() {
     fi
   done
   [[ $missing -eq 0 ]] || die "missing required repos (or set GE_DEV_REPO_ROOT to the directory that contains them)"
-  for repo in engagement-prediction; do
-    if [[ ! -e "$GE_DEV_REPO_ROOT/$repo/.git" ]]; then
-      echo "devctl: note: optional repo not checked out: $GE_DEV_REPO_ROOT/$repo" >&2
-    fi
-  done
+  # Only needed to retrain or republish models, not to run the environment.
+  [[ -e "$GE_DEV_REPO_ROOT/engagement-prediction/.git" ]] ||
+    echo "devctl: note: optional repo not checked out: $GE_DEV_REPO_ROOT/engagement-prediction" >&2
 }
 
 ensure_runtime() {
@@ -83,61 +81,151 @@ ensure_runtime() {
     "$DEVENV_DIR/models/data/models.env"
 }
 
-# --- inference backend ------------------------------------------------------
-# By default the environment runs the real inference-service over the published
-# trained models. `GE_DEV_INFERENCE=external` instead points the api at a
-# service this environment doesn't run. Which one is in effect gets recorded in
-# .runtime/ so later commands — seed, feed, status — agree with what `up` did.
+# --- live services ----------------------------------------------------------
+# Everything runs locally by default. `--live <svc>[,<svc>]` (or GE_DEV_LIVE in
+# devenv.local.env) points individual dependencies at deployed ones instead,
+# for the cases where the local stand-in can't reproduce what you're chasing.
+#
+#   devctl up --live inference,perspective
+#   devctl up --live es --live-env prod
+#
+# `up` is the only command that decides: it reads the flag, falling back to
+# devenv.local.env, and records the result in .runtime/. Every other command
+# reads that record, so `seed` and `status` act on the environment that is
+# actually running. Deciding this way means a bare `devctl up` always returns
+# to all-local, instead of quietly inheriting a live service from hours ago.
 
-INFERENCE_STATE="$DEVENV_DIR/.runtime/inference.env"
-# Captured before the state file is sourced, so `external` can tell a URL the
-# developer configured from one devctl derived on a previous run. Without this
-# split, the `http://inference:8000` left in .runtime/ by an earlier local run
-# satisfies the external-mode check and the api quietly keeps using it.
-GE_DEV_INFERENCE_URL_CONFIGURED="${GE_DEV_INFERENCE_URL:-}"
-if [[ -f "$INFERENCE_STATE" ]]; then
+LIVE_STATE="$DEVENV_DIR/.runtime/live.env"
+LIVE_CONFIGURED="${GE_DEV_LIVE:-}"
+LIVE_ENV_CONFIGURED="${GE_DEV_LIVE_ENV:-stage}"
+if [[ -f "$LIVE_STATE" ]]; then
   set -a
   # shellcheck source=/dev/null
-  source "$INFERENCE_STATE"
+  source "$LIVE_STATE"
   set +a
 fi
+GE_DEV_LIVE="${GE_DEV_LIVE:-}"
+GE_DEV_LIVE_ENV="${GE_DEV_LIVE_ENV:-stage}"
 
-# Empty for `external`, where the api talks to an inference service this
-# environment doesn't run (a deployed one, or one you're running by hand).
-inference_service() {
-  case "${GE_DEV_INFERENCE:-local}" in
-  local) echo inference ;;
-  external) echo "" ;;
-  *) die "GE_DEV_INFERENCE must be local or external (got: $GE_DEV_INFERENCE)" ;;
+LIVE_SERVICES="es inference perspective"
+
+live_has() {
+  case ",${GE_DEV_LIVE}," in
+  *",$1,"*) return 0 ;;
+  *) return 1 ;;
   esac
 }
 
-record_inference_choice() {
+# Where each live service actually is, and which variable holds its key. Kept
+# here so nobody has to remember a Cloud Run hostname to use one.
+live_url() {
+  case "$1:$GE_DEV_LIVE_ENV" in
+  inference:stage) echo "https://inference-stage.greenearth.social" ;;
+  inference:prod) echo "https://inference.greenearth.social" ;;
+  perspective:*) echo "https://commentanalyzer.googleapis.com" ;;
+  # Reached through the tunnel `devctl tunnel` opens: the cluster's ES sits
+  # behind an internal load balancer, so there's no address a container could
+  # dial directly. host.docker.internal is the host running kubectl.
+  es:*) echo "https://host.docker.internal:${GE_DEV_ES_TUNNEL_PORT:-9200}" ;;
+  esac
+}
+
+live_key_var() {
+  case "$1" in
+  inference) echo GE_DEV_INFERENCE_API_KEY ;;
+  perspective) echo GE_PERSPECTIVE_API_KEY ;;
+  es) echo GE_DEV_ES_API_KEY ;;
+  esac
+}
+
+# Turns GE_DEV_LIVE into the GE_DEV_*_URL variables docker-compose.yml reads,
+# after checking that each service named there is real and has a key. Failing
+# here beats failing as a 401 inside a container ten seconds later.
+resolve_live() {
+  # Environment first: a typo'd --live-env would otherwise be reported as
+  # whichever key happened to be missing, which reads as an unrelated problem.
+  case "$GE_DEV_LIVE_ENV" in
+  stage | prod) ;;
+  *) die "--live-env must be stage or prod (got: $GE_DEV_LIVE_ENV)" ;;
+  esac
+
   local svc
-  svc="$(inference_service)"
-  # Only derived facts go in the state file — never the mode, and never a URL
-  # the developer configured. Recording those would let a stale .runtime/ file
-  # silently outrank a freshly edited devenv.local.env.
-  if [[ -n "$svc" ]]; then
-    cat >"$INFERENCE_STATE" <<EOF
-GE_DEV_INFERENCE_SERVICE=$svc
-GE_DEV_INFERENCE_URL=http://${svc}:8000
-EOF
-    export GE_DEV_INFERENCE_URL="http://${svc}:8000"
-  else
-    [[ -n "$GE_DEV_INFERENCE_URL_CONFIGURED" ]] ||
-      die "GE_DEV_INFERENCE=external needs GE_DEV_INFERENCE_URL (and usually
-        GE_DEV_INFERENCE_API_KEY) set in devenv.local.env"
-    export GE_DEV_INFERENCE_URL="$GE_DEV_INFERENCE_URL_CONFIGURED"
-    echo "GE_DEV_INFERENCE_SERVICE=" >"$INFERENCE_STATE"
+  for svc in ${GE_DEV_LIVE//,/ }; do
+    [[ " $LIVE_SERVICES " == *" $svc "* ]] ||
+      die "unknown live service: $svc (choose from: $LIVE_SERVICES)"
+    local key_var
+    key_var="$(live_key_var "$svc")"
+    [[ -n "${!key_var:-}" ]] ||
+      die "--live $svc needs $key_var — set it in devenv.local.env"
+  done
+
+  # GE_DEV_INFERENCE_URL doubles as the escape hatch for an inference service
+  # that isn't one of ours — one you're running by hand, say. Setting it
+  # directly skips the lookup above but still routes the api away from local.
+  if live_has inference; then
+    export GE_DEV_INFERENCE_URL="${GE_DEV_INFERENCE_URL:-$(live_url inference)}"
   fi
+  live_has perspective && export GE_DEV_PERSPECTIVE_HOST="$(live_url perspective)"
+  live_has es && export GE_DEV_ES_URL="$(live_url es)"
+
+  if [[ "$GE_DEV_LIVE_ENV" == "prod" && -n "$GE_DEV_LIVE" ]]; then
+    echo "devctl: WARNING — using PROD services: $GE_DEV_LIVE" >&2
+  fi
+  return 0
+}
+
+record_live_choice() {
+  cat >"$LIVE_STATE" <<EOF
+GE_DEV_LIVE=$GE_DEV_LIVE
+GE_DEV_LIVE_ENV=$GE_DEV_LIVE_ENV
+EOF
+}
+
+# Reach each live service once, from the host, before anything depends on it.
+# A bad key or a closed tunnel otherwise shows up as feeds that 500 with the
+# reason buried in a container log.
+#
+# host.docker.internal is how a *container* names the host, and it doesn't
+# resolve on the host itself — so probing it verbatim would report every tunnel
+# as closed. Since that name only ever appears in the tunnel URL, and a tunnel
+# is a host-local listener, 127.0.0.1 is the same endpoint seen from here.
+probe_url() {
+  echo "${1//host.docker.internal/127.0.0.1}"
+}
+
+preflight_live() {
+  local code
+  if live_has inference; then
+    code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 15 \
+      -H "X-API-Key: ${GE_DEV_INFERENCE_API_KEY}" \
+      "$(probe_url "$GE_DEV_INFERENCE_URL")/ready" 2>/dev/null || true)"
+    case "$code" in
+    200) echo "devctl: live inference OK ($GE_DEV_INFERENCE_URL)" ;;
+    401 | 403) die "live inference rejected GE_DEV_INFERENCE_API_KEY (HTTP $code)" ;;
+    000) die "live inference unreachable at $GE_DEV_INFERENCE_URL" ;;
+    *) die "live inference returned HTTP $code from $GE_DEV_INFERENCE_URL/ready" ;;
+    esac
+  fi
+  if live_has es; then
+    code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 15 \
+      -H "Authorization: ApiKey ${GE_DEV_ES_API_KEY}" \
+      "$(probe_url "$GE_DEV_ES_URL")/_cluster/health" 2>/dev/null || true)"
+    case "$code" in
+    200) echo "devctl: live Elasticsearch OK ($GE_DEV_ES_URL)" ;;
+    401 | 403) die "live Elasticsearch rejected GE_DEV_ES_API_KEY (HTTP $code)" ;;
+    000) die "live Elasticsearch unreachable at $GE_DEV_ES_URL — is the tunnel open?
+        devctl tunnel $GE_DEV_LIVE_ENV" ;;
+    *) die "live Elasticsearch returned HTTP $code" ;;
+    esac
+  fi
+  # Perspective isn't probed: every call costs quota, and a bad key surfaces
+  # immediately as a failed feed rather than something subtle.
 }
 
 # The api reads its ES endpoint from the compose `environment` block rather
-# than an env_file, so that devenv.local.env can point it at a deployed cluster
-# (an `environment` entry always wins over env_file, so the file can't be the
-# fallback). That makes supplying the local key devctl's job. Call this after
-# es-init has minted one and before starting or recreating the api.
+# than an env_file, so that it can be pointed at a deployed cluster (an
+# `environment` entry always wins over env_file, so the file can't be the
+# fallback). That makes supplying the local key devctl's job.
 export_api_es_env() {
   if [[ -z "${GE_DEV_ES_API_KEY:-}" ]]; then
     GE_DEV_ES_API_KEY="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' \
@@ -150,6 +238,12 @@ export_api_es_env() {
 
 have_models() {
   [[ -f "$DEVENV_DIR/models/data/manifest.json" ]]
+}
+
+models_tag() {
+  python3 -c "
+import json
+print(json.load(open('$DEVENV_DIR/models/data/manifest.json'))['tag'])"
 }
 
 models_hint() {
@@ -186,6 +280,34 @@ have_fixtures() {
   [[ -f "$DEVENV_DIR/fixtures/data/manifest.json" ]]
 }
 
+# Download a release asset and replace `dest` with its contents. Deliberately
+# curl against the public releases API rather than the gh CLI: both these repos
+# are public, so a fresh clone can fetch what it needs with no GitHub account,
+# no auth, and no extra tooling installed.
+fetch_release_asset() {
+  local tag="$1" asset="$2" dest="$3" size="$4"
+  command -v curl >/dev/null || die "curl is required to download $asset"
+
+  local workdir
+  workdir="$(mktemp -d)"
+  # shellcheck disable=SC2064  # expand workdir now, not at trap time
+  trap "rm -rf '$workdir'" RETURN
+
+  echo "devctl: downloading $tag ($size)..."
+  curl -fL --progress-bar \
+    "https://github.com/$FIXTURE_REPO/releases/download/$tag/$asset" \
+    -o "$workdir/$asset" ||
+    die "download failed — check network access to github.com, and that $tag exists in $FIXTURE_REPO"
+
+  # Extract into a scratch directory first so a torn archive can't leave the
+  # destination holding half of one release and half of another.
+  mkdir -p "$workdir/x"
+  tar -xf "$workdir/$asset" -C "$workdir/x" || die "$tag: archive is unreadable"
+  rm -rf "$dest"
+  mkdir -p "$(dirname "$dest")"
+  mv "$workdir/x" "$dest"
+}
+
 fixtures_hint() {
   cat >&2 <<EOF
 
@@ -207,12 +329,12 @@ EOF
 }
 
 cmd_fetch_fixture() {
-  # Deliberately curl + the public releases API rather than the gh CLI: the
-  # repo is public, so a fresh clone can fetch a fixture with no GitHub
-  # account, no auth, and no extra tooling installed.
   command -v curl >/dev/null || die "curl is required to download fixtures"
   command -v python3 >/dev/null || die "python3 is required to download fixtures"
 
+  # Newest fixture release, unlike the models, which are pinned — a fixture is
+  # a sample of Bluesky rather than something the rest of the stack has to
+  # agree with.
   local tag
   tag="$(curl -fsSL "https://api.github.com/repos/$FIXTURE_REPO/releases?per_page=50" 2>/dev/null |
     python3 -c "
@@ -230,22 +352,9 @@ print(tags[0] if tags else '')
 Generate a set locally instead — see: devctl help"
   fi
 
-  local workdir
-  workdir="$(mktemp -d)"
-  # shellcheck disable=SC2064  # expand workdir now, not at trap time
-  trap "rm -rf '$workdir'" RETURN
-
-  echo "devctl: downloading fixture release $tag (~170MB)..."
-  curl -fL --progress-bar \
-    "https://github.com/$FIXTURE_REPO/releases/download/$tag/$FIXTURE_ASSET" \
-    -o "$workdir/$FIXTURE_ASSET" ||
-    die "download failed — check network access to github.com"
-
   # Replace rather than merge: mixing chunks from different samples would give
   # the seed an inconsistent post/like graph.
-  rm -rf "$DEVENV_DIR/fixtures/data"
-  mkdir -p "$DEVENV_DIR/fixtures/data"
-  tar -xf "$workdir/$FIXTURE_ASSET" -C "$DEVENV_DIR/fixtures/data"
+  fetch_release_asset "$tag" "$FIXTURE_ASSET" "$DEVENV_DIR/fixtures/data" "~170MB"
 
   python3 - "$DEVENV_DIR/fixtures/data/manifest.json" <<'PY'
 import json, sys, pathlib
@@ -260,27 +369,11 @@ PY
 cmd_fetch_models() {
   # Same public-release channel as the fixture, and for the same reason: a
   # fresh clone gets working trained models with no Google account, no GCS
-  # credentials and no ClearML. Pinned to a tag rather than "newest" — see
-  # MODELS_TAG.
-  command -v curl >/dev/null || die "curl is required to download models"
-
-  local workdir
-  workdir="$(mktemp -d)"
-  # shellcheck disable=SC2064  # expand workdir now, not at trap time
-  trap "rm -rf '$workdir'" RETURN
-
-  echo "devctl: downloading model release $MODELS_TAG (~33MB)..."
-  curl -fL --progress-bar \
-    "https://github.com/$FIXTURE_REPO/releases/download/$MODELS_TAG/$MODELS_ASSET" \
-    -o "$workdir/$MODELS_ASSET" ||
-    die "download failed — check network access to github.com, or that $MODELS_TAG exists in $FIXTURE_REPO"
-
+  # credentials and no ClearML.
   # Replace rather than merge: the serving manifests name specific weight
   # files, and a half-updated directory would load one release's towers
   # against another's author index map.
-  rm -rf "$DEVENV_DIR/models/data"
-  mkdir -p "$DEVENV_DIR/models/data"
-  tar -xf "$workdir/$MODELS_ASSET" -C "$DEVENV_DIR/models/data"
+  fetch_release_asset "$MODELS_TAG" "$MODELS_ASSET" "$DEVENV_DIR/models/data" "~33MB"
 
   python3 - "$DEVENV_DIR/models/data/manifest.json" <<'PY'
 import json, sys, pathlib
@@ -318,38 +411,61 @@ cmd_setup() {
 }
 
 cmd_up() {
-  local arg jetstream=0
-  for arg in "$@"; do
-    case "$arg" in
-    --with-jetstream) jetstream=1 ;;
-    *) die "unknown argument to up: $arg (try: devctl help)" ;;
+  local jetstream=0
+  # Start from what's configured, not from what the last `up` recorded, so this
+  # command fully determines the result.
+  GE_DEV_LIVE="$LIVE_CONFIGURED"
+  GE_DEV_LIVE_ENV="$LIVE_ENV_CONFIGURED"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --with-jetstream)
+      jetstream=1
+      shift
+      ;;
+    --live)
+      GE_DEV_LIVE="$2"
+      shift 2
+      ;;
+    --live-env)
+      GE_DEV_LIVE_ENV="$2"
+      shift 2
+      ;;
+    *) die "unknown argument to up: $1 (try: devctl help)" ;;
     esac
   done
 
   check_docker
   check_repos
   ensure_runtime
+  resolve_live
+  record_live_choice
 
-  local inference
-  inference="$(inference_service)"
-  if [[ -n "$inference" ]]; then
+  # One list, built from what's staying local. A live service's container isn't
+  # just skipped but stopped: it's still a defined service, so --remove-orphans
+  # leaves it running, and it would go on answering nothing.
+  local local_services=(elasticsearch firebase dev-auth)
+  local svc
+  for svc in inference perspective-stub; do
+    local name="${svc%-stub}"
+    if live_has "$name"; then
+      compose stop "$svc" >/dev/null 2>&1 || true
+    else
+      local_services+=("$svc")
+    fi
+  done
+
+  if ! live_has inference; then
     have_models || { models_hint; exit 1; }
     check_model_fixture_compat
-  else
-    # Switching to `external` has to stop the local one explicitly: it's still
-    # a defined service, so --remove-orphans leaves it running, and it would go
-    # on answering requests aimed at a base URL nothing points to any more.
-    compose stop inference >/dev/null 2>&1 || true
   fi
-  record_inference_choice
+  preflight_live
 
   # --remove-orphans clears containers for services this file no longer
   # defines — e.g. the standalone `firestore` emulator that the Firebase
-  # suite replaced, which would otherwise linger holding its old port. The
-  # unquoted expansion drops the argument entirely in `external` mode, where
-  # there's no local inference service to start.
-  # shellcheck disable=SC2086  # deliberate: empty means "no such service"
-  compose up -d --remove-orphans elasticsearch firebase dev-auth $inference perspective-stub
+  # suite replaced, which would otherwise linger holding its old port.
+  # --wait because the api no longer depends_on the swappable ones, so this is
+  # what guarantees they're serving before it starts.
+  compose up -d --remove-orphans --wait "${local_services[@]}"
   echo "devctl: initializing Elasticsearch (templates, indexes, API keys)..."
   compose run --rm es-init
   export_api_es_env
@@ -364,12 +480,13 @@ devctl: environment is up.
   functions     127.0.0.1:${FUNCTIONS_PORT}
   emulator UI   http://127.0.0.1:${FIREBASE_UI_PORT}    (browse Firestore data, auth users, function logs)
 EOF
-  if [[ -n "$inference" ]]; then
-    echo "  inference     $(python3 -c "
-import json;print(json.load(open('$DEVENV_DIR/models/data/manifest.json'))['tag'])")    (watch: devctl logs -t inference)"
+  if live_has inference; then
+    echo "  inference     LIVE $GE_DEV_INFERENCE_URL"
   else
-    echo "  inference     external: ${GE_DEV_INFERENCE_URL}"
+    echo "  inference     $(models_tag)    (watch: devctl logs -t inference)"
   fi
+  live_has es && echo "  ** the api is reading LIVE Elasticsearch: $GE_DEV_ES_URL"
+  live_has perspective && echo "  ** the api is calling the LIVE Perspective API"
   if [[ $jetstream -eq 1 ]]; then
     compose --profile jetstream up -d jetstream-ingest
     echo "  jetstream     streaming live likes from the public firehose (needs internet)"
@@ -396,18 +513,26 @@ cmd_seed() {
   [[ -n "$rw_key" ]] || die "no ES key yet — run: devctl up"
   check_model_fixture_compat
 
+  resolve_live
+
+  # Seeding always writes to the *local* cluster — the seed services address it
+  # directly and ignore GE_DEV_ES_URL, so there is no way for this to touch a
+  # deployed one. Worth saying out loud, because the api is meanwhile reading
+  # somewhere else and the data about to be loaded won't show up in a feed.
+  if live_has es; then
+    echo "devctl: note — seeding local Elasticsearch, but the api is reading" >&2
+    echo "        $GE_DEV_ES_URL, so this data won't appear in feeds." >&2
+  fi
+
   # megastream_ingest computes each post's ge_post_embedding by calling the
   # inference service, so the seed is only meaningful once that service has
-  # actually loaded its models. seed-megastream can't depend_on it — which of
-  # the two runs is decided here, not in the compose file — so wait explicitly.
-  # --wait blocks on the healthcheck, which probes /ready, not /health. Nothing
-  # to wait for in `external` mode: that service isn't ours to start.
-  local inference
-  inference="${GE_DEV_INFERENCE_SERVICE-$(inference_service)}"
-  if [[ -n "$inference" ]]; then
-    echo "devctl: waiting for $inference to be ready..."
-    compose up -d --wait "$inference" ||
-      die "$inference never became ready — see: devctl logs $inference"
+  # actually loaded its models. seed-megastream can't depend_on it — whether it
+  # runs at all is decided here, not in the compose file — so wait explicitly.
+  # --wait blocks on the healthcheck, which probes /ready, not /health.
+  if ! live_has inference; then
+    echo "devctl: waiting for inference to be ready..."
+    compose up -d --wait inference ||
+      die "inference never became ready — see: devctl logs inference"
   fi
 
   echo "devctl: wiping previously seeded data..."
@@ -463,6 +588,31 @@ cmd_feed() {
   [[ -t 1 ]] || tty=(-T)
   compose exec ${tty[@]+"${tty[@]}"} -e PIPENV_VERBOSITY=-1 api \
     pipenv run python scripts/feed_view.py "$@"
+}
+
+cmd_tunnel() {
+  # `--live es` needs one of these open: the cluster sits behind an internal
+  # load balancer with no address a container can dial. Runs in the foreground
+  # and restarts itself, because kubectl port-forward drops connections
+  # routinely and a silently dead tunnel looks like a broken environment.
+  local env="${1:-$GE_DEV_LIVE_ENV}"
+  case "$env" in
+  stage | prod) ;;
+  *) die "usage: devctl tunnel [stage|prod]" ;;
+  esac
+
+  command -v kubectl >/dev/null || die "kubectl is required for devctl tunnel"
+  local ns="${GE_DEV_ES_NAMESPACE:-greenearth-$env}"
+  local svc="${GE_DEV_ES_SERVICE:-svc/greenearth-es-internal-lb}"
+  local port="${GE_DEV_ES_TUNNEL_PORT:-9200}"
+
+  echo "devctl: tunneling $ns/$svc to localhost:$port (ctrl-c to stop)"
+  echo "        then, in another shell: devctl up --live es --live-env $env"
+  while true; do
+    kubectl port-forward "$svc" "${port}:9200" -n "$ns" || true
+    echo "devctl: tunnel dropped, reconnecting..." >&2
+    sleep 2
+  done
 }
 
 cmd_login() {
@@ -551,7 +701,10 @@ Usage: devctl <command> [args]
   fetch-fixture  download the published fixture set (no account or auth needed)
   fetch-models   download the pinned trained models (no account or auth needed)
   up             start the stack (ES + Firestore emulator + inference + api)
-                 --with-jetstream also streams live likes (needs internet)
+                 --live es,inference,perspective  use deployed services
+                 --live-env stage|prod            which deployment (default stage)
+                 --with-jetstream                 also stream live likes
+  tunnel [env]   port-forward a deployed Elasticsearch, for --live es
   seed           load fixtures: rebase timestamps, ingest posts, load likes
   feed [feed]    view a hydrated feed in the terminal (default: your-feed;
                  --user <did>, --limit, --pages, --json for raw skeleton)
@@ -565,9 +718,10 @@ Fixtures: fetch-fixture downloads a published set; fixtures/generate_sample.py
 generates your own (two modes), fixtures/publish_fixture.sh publishes one.
 Models: fetch-models downloads the pinned release; models/publish_models.sh
 mirrors a new set out of the prod bucket (maintainers).
-Config overrides go in devenv.local.env (ports, ES heap, repo root,
-GE_DEV_INFERENCE=external + GE_DEV_INFERENCE_URL to use a remote inference
-service instead of the local one).
+Live services need a key in devenv.local.env: GE_DEV_ES_API_KEY,
+GE_DEV_INFERENCE_API_KEY, GE_PERSPECTIVE_API_KEY. Set GE_DEV_LIVE there to
+make the choice stick without passing --live every time.
+Other config overrides go in the same file (ports, ES heap, repo root).
 EOF
 }
 
@@ -580,6 +734,7 @@ setup) cmd_setup "$@" ;;
 fetch-fixture) cmd_fetch_fixture "$@" ;;
 fetch-models) cmd_fetch_models "$@" ;;
 up) cmd_up "$@" ;;
+tunnel) cmd_tunnel "$@" ;;
 seed) cmd_seed "$@" ;;
 feed) cmd_feed "$@" ;;
 login) cmd_login "$@" ;;

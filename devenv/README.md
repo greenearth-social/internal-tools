@@ -133,12 +133,6 @@ It costs about 465MB of RAM and an 893MB venv volume. It does not cost you
 speed — the post tower embeds ~6,000 posts/sec, so seeding is no slower than
 with a fake, and ranking adds ~90ms to a ~700ms feed request.
 
-An earlier version shipped a stub that reimplemented these endpoints with
-deterministic pseudo-scores. It's gone: keeping a second implementation of
-someone else's API in sync turned out to cost more than it saved, and it
-drifted at least once — a wrong `/ready` shape broke the `two_tower` generator
-in a way that looked like a model problem.
-
 ### Model and fixture have to agree
 
 `megastream_ingest` computes each post's `ge_post_embedding` by calling the
@@ -191,51 +185,63 @@ The posts those likes point at are mostly *not* in the local index — the
 firehose is all of Bluesky, the fixture is a sample — so this is for working on
 ingestion itself rather than for making feeds richer.
 
-## Running against real services
+## Live services
 
-Every external dependency has a local stand-in, and each can be swapped for the
-real thing independently. Put the overrides in `devenv.local.env` (gitignored)
-and re-run `devctl up`. Nothing here is needed for normal work — reach for it
-when you're debugging something the local stand-in can't reproduce.
-
-**Elasticsearch.** Point the api at a deployed cluster. Port-forward it first
-(`kubectl port-forward svc/greenearth-es-internal-lb 9200:9200 -n greenearth-prod`);
-`host.docker.internal` is how the container reaches a tunnel on your host. A
-read-only key is the right one to use — the api only reads.
+Three dependencies can be pointed at deployed instances instead of the local
+ones, individually, for when a local stand-in can't reproduce what you're
+chasing:
 
 ```bash
-GE_DEV_ES_URL=https://host.docker.internal:9200
-GE_DEV_ES_API_KEY=<read-only key>
+./devctl up --live perspective              # real Perspective API
+./devctl up --live inference                # deployed inference-service
+./devctl up --live es,inference             # several at once
+./devctl up --live inference --live-env prod
 ```
 
-The local Elasticsearch keeps running and `devctl status` keeps reporting it,
-so the counts you see there are no longer what the api is querying.
+`--live-env` picks stage (default) or prod; `devctl` knows the endpoints, so
+you don't have to. Each service needs its key in `devenv.local.env`
+(gitignored):
 
-**Inference.** `GE_DEV_INFERENCE=external` starts neither local implementation
-and points the api at whatever you name:
+| `--live` | Key | Notes |
+| --- | --- | --- |
+| `es` | `GE_DEV_ES_API_KEY` | read-only is right — the api only reads |
+| `inference` | `GE_DEV_INFERENCE_API_KEY` | |
+| `perspective` | `GE_PERSPECTIVE_API_KEY` | real quota, real money |
+
+`devctl up` checks each one is reachable and the key works before starting
+anything, so a bad key fails immediately instead of becoming a 500 in a
+container log. Set `GE_DEV_LIVE=inference` in `devenv.local.env` to make a
+choice stick without passing `--live` every time; otherwise a bare `devctl up`
+always returns to all-local.
+
+### Elasticsearch needs a tunnel
+
+The cluster sits behind an internal load balancer, so `--live es` reaches it
+through a port-forward. Run one in its own terminal:
 
 ```bash
-GE_DEV_INFERENCE=external
-GE_DEV_INFERENCE_URL=https://inference-stage.greenearth.social
-GE_DEV_INFERENCE_API_KEY=<key>
+./devctl tunnel stage     # or: prod
 ```
 
-Mind the embeddings: a deployed service serves whatever models it was deployed
-with, and your seeded posts were embedded by whatever was running at seed time.
-If the two disagree the `two_tower` generator returns little or nothing, since
-it filters kNN by the model UUID that produced the field. Seeding *while*
-pointed at the external service keeps them consistent — but note that seeding
-sends every post in the fixture through it.
+It reconnects on its own — `kubectl port-forward` drops connections routinely,
+and a silently dead tunnel looks like a broken environment.
 
-**Perspective.** The `perspective` ranker calls Google's Perspective API:
+**Seeding always writes to the local cluster**, never to a live one: the seed
+services address Elasticsearch directly and ignore the live setting. So with
+`--live es` the data you seed is not the data the api reads, and `devctl
+status` counts the local cluster. `devctl seed` says so when it notices.
 
-```bash
-GE_DEV_PERSPECTIVE_HOST=https://commentanalyzer.googleapis.com
-GE_PERSPECTIVE_API_KEY=<your key>
-```
+### Live inference and your seeded embeddings
 
-**Bluesky OAuth.** Covered separately under "Working on real Bluesky auth" — it
-needs a public tunnel, not just a variable.
+A deployed service serves whatever models it was deployed with, while your
+seeded posts were embedded by whatever ran at seed time. If those disagree the
+`two_tower` generator returns little or nothing, because it filters kNN by the
+model UUID that produced the field. Re-seeding while pointed at the live
+service keeps them consistent — but that sends every post in the fixture
+through it.
+
+**Bluesky OAuth** is covered separately under "Working on real Bluesky auth" —
+it needs a public tunnel, not just a key.
 
 ## Seeding and time rebasing
 
@@ -427,24 +433,18 @@ Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 `GE_DEV_ES_HEAP`, `GE_DEV_NAME`
 (compose project name), `GE_DEV_API_RELOAD=1` (uvicorn --reload watch mode),
 `GE_DEV_MODELS_TAG` (use a model release other than the pinned one),
-`GE_DEV_INFERENCE=external` + `GE_DEV_INFERENCE_URL` (use a remote inference
-service instead of the local one).
+`GE_DEV_LIVE` / `GE_DEV_LIVE_ENV` (see [Live services](#live-services)).
 
 ## Current limitations (by milestone)
 
 - **The model release is a hard dependency.** `devctl setup` needs to reach
   GitHub Releases to download it; there's no offline fallback any more now that
   the stub is gone. Once fetched, everything runs offline.
-- **Perspective is still stubbed.** The `perspective` ranker (used by
-  `your-feed`) calls Google's Perspective API and hard-fails without a key, so
+- **Perspective is stubbed.** The `perspective` ranker (used by `your-feed`)
+  calls Google's Perspective API and hard-fails without a key, so
   `perspective-stub` answers it locally with deterministic hash-derived
-  scores — stable per post, but not content analysis. To score against the
-  real API, set both in `devenv.local.env`:
-
-  ```bash
-  GE_DEV_PERSPECTIVE_HOST=https://commentanalyzer.googleapis.com
-  GE_PERSPECTIVE_API_KEY=<your key>
-  ```
+  scores — stable per post, but not content analysis. Use
+  `devctl up --live perspective` to score against the real API.
 - Feeds can reference posts outside the fixture — `your-feed` pins a specific
   post, and a cached feed can outlive a re-seed — so `devctl feed` may show
   "(not in Elasticsearch)" for an item. That's the viewer reporting a real
