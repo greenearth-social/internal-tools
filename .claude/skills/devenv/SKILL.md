@@ -87,10 +87,11 @@ recompile on `devctl restart`.
 
 ## Working in parallel
 
-Two tasks at once get two instances, with their own containers and ports:
+Two tasks at once get two instances, with their own containers and ports —
+and, when the tasks involve editing code, their own working copies:
 
 ```bash
-devctl up --name featurework     # a second environment, ~90s
+devctl up --name featurework --repo-root ~/src/ge-featurework
 devctl --name featurework exec api pipenv run pytest
 devctl ports --name featurework  # which ports this one got
 devctl nuke --name featurework   # destroys only this instance
@@ -99,6 +100,14 @@ devctl nuke --name featurework   # destroys only this instance
 `--name` applies to every command and defaults to `dev`. Forgetting it acts on
 the default instance, so prefer `devctl --name X <cmd>` consistently once you
 have one.
+
+`--repo-root` mounts the instance's services from a different directory of
+checkouts (a second clone or git worktrees — recipe in `devenv/docs/agents.md`).
+It's remembered per instance: later commands and bare `up`s keep it, and
+`devctl ls` shows which instance mounts what. Without it, instances share the
+default checkouts — fine for running tests against one branch, wrong for two
+agents editing in parallel (edits land in both, and the shared frontend
+`functions/lib` build collides).
 
 A named instance **shares `dev`'s Elasticsearch** — that's the expensive part
 (~1.9GB and an hour to seed), so it isn't duplicated. This means:
