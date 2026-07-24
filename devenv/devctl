@@ -27,9 +27,10 @@ MODELS_ASSET="ge-dev-models.tar"
 # Pinned, unlike the fixture, which tracks the newest release. Model artifacts
 # and seeded post embeddings have to agree — the towers only make sense over
 # embeddings produced by the matching post tower — so everyone runs the same
-# models until someone deliberately moves this. Bump it after
-# models/publish_models.sh.
-MODELS_TAG="${GE_DEV_MODELS_TAG:-models-20260723-2131}"
+# models until someone deliberately moves this. The tag names the two training
+# runs in the bundle (two-tower, ranker); models/publish_models.sh derives it
+# from the artifacts and prints what to set here.
+MODELS_TAG="${GE_DEV_MODELS_TAG:-models-1bf1ea3c-177899dd}"
 API_PORT="${GE_DEV_PORT_API:-8300}"
 ES_PORT="${GE_DEV_PORT_ES:-9201}"
 FIRESTORE_PORT="${GE_DEV_PORT_FIRESTORE:-8080}"
