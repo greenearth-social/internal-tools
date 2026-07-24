@@ -77,7 +77,7 @@ def test_assign_tasks_to_dates_interpolates_within_the_week():
 
 def test_assign_tasks_to_dates_never_projects_into_the_past():
     items = [_backlog(1, id="a")]
-    (day, _), = burndown.assign_tasks_to_dates(items, velocity=100, now=NOW)
+    ((day, _),) = burndown.assign_tasks_to_dates(items, velocity=100, now=NOW)
     assert day == NOW.date()
 
 
@@ -86,7 +86,7 @@ def test_dates_always_fall_inside_their_assigned_week():
     for velocity in (3, 5, 7, 21.3):
         dates = burndown.assign_tasks_to_dates(items, velocity, now=NOW)
         weeks = burndown.assign_tasks_to_weeks(items, velocity, now=NOW)
-        for (day, a), (wk, b) in zip(dates, weeks):
+        for (day, a), (wk, b) in zip(dates, weeks, strict=True):
             assert a is b
             assert wk <= day < wk + timedelta(days=7)
 
