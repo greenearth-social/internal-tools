@@ -12,7 +12,7 @@ target-version = "py313"
 # Notebooks are presentation surfaces, not library code: re-importing a symbol
 # in a later cell and keeping an import around for exploration are normal there
 # but read as errors (F811/F401) to the linter.
-extend-exclude = ["notebooks"]
+extend-exclude = ["velocity/notebooks"]
 
 [tool.ruff.lint]
 select = [
@@ -36,6 +36,6 @@ include = ["velocity", "devenv"]
 # silencing the import.
 extraPaths = ["devenv/firebase"]
 # Same exclusion as ruff: notebook cells re-import and shadow freely.
-exclude = ["notebooks", "**/__pycache__"]
+exclude = ["velocity/notebooks", "**/__pycache__"]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
