@@ -137,8 +137,7 @@ def allocate(devenv_dir: Path, name: str, bases: dict[str, int]) -> tuple[int, d
 def resolve_bases(env: dict) -> dict[str, int]:
     """Base ports, honouring GE_DEV_PORT_* overrides from devenv.local.env."""
     return {
-        name: int(env.get(f"GE_DEV_PORT_{name}", default))
-        for name, default in BASE_PORTS.items()
+        name: int(env.get(f"GE_DEV_PORT_{name}", default)) for name, default in BASE_PORTS.items()
     }
 
 

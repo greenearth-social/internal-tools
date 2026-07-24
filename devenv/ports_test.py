@@ -10,9 +10,8 @@ is the guard on that.
 
 import socket
 
-import pytest
-
 import ports
+import pytest
 
 
 @pytest.fixture

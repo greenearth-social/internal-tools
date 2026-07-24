@@ -22,8 +22,9 @@ devctl status    # containers + how many posts/likes/inferences are indexed
 ```
 
 `devctl status` showing zero posts means it's running but unseeded. A first-time
-machine needs `devctl setup` (builds images, downloads ~200MB of models and
-fixtures) — that takes minutes, so don't start it speculatively.
+machine needs `devctl setup` (images, models, inference dependencies including
+torch) and `devctl fetch-fixture` (~170MB of sample data) — several minutes
+between them, so don't start that speculatively.
 
 ## Running things inside the environment
 
@@ -33,7 +34,6 @@ and `go` on the host will fail or use the wrong versions. Use:
 ```bash
 devctl exec api pipenv run pytest
 devctl exec api pipenv run pytest src/app/lib/firestore_test.py -v
-devctl exec api pipenv run ruff check .
 devctl exec frontend npm run typecheck
 devctl exec frontend npm run test:unit
 devctl exec inference pipenv run pytest

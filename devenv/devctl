@@ -156,6 +156,14 @@ check_repos() {
 }
 
 ensure_runtime() {
+  # The Go module and build caches are declared external so that they survive
+  # one instance's `nuke` and are shared by all of them; compose won't create
+  # an external volume, so we do.
+  local volume
+  for volume in ge-dev-gomod ge-dev-gocache; do
+    docker volume inspect "$volume" >/dev/null 2>&1 ||
+      docker volume create "$volume" >/dev/null
+  done
   mkdir -p "$RUNTIME/seed" "$DEVENV_DIR/models/data"
   # compose env_file entries must exist before any `compose` invocation.
   touch "$RUNTIME/es_key_ro.env" \

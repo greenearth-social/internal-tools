@@ -158,19 +158,29 @@ allocation is made once and remembered in the instance's runtime directory, so
 an instance's ports don't move between restarts.
 
 A named instance starts with an empty Elasticsearch, so it needs its own
-`devctl seed`. Fixtures and models are downloaded once and shared — those are
-read-only.
+`devctl seed` — a few minutes, mostly spent embedding each post through that
+instance's inference service.
 
 Cost is the thing to watch: each instance runs its own Elasticsearch, so budget
 ~1GB of heap plus container overhead per instance. Two is comfortable on a
 laptop; drop `GE_DEV_ES_HEAP=512m` into `devenv.local.env` if you want more.
 `devctl ls` shows what's still running.
 
-Three things are shared between instances because they live in the frontend
-checkout rather than in a volume: `functions/lib` (rebuilt by whichever
-instance starts), `node_modules` (per-instance volumes, but installed from the
-same lockfile), and the derived Firebase config — which is named per instance
-(`firebase.devenv.<name>.json`) so one instance's `down` can't delete another's.
+What's shared, and why:
+
+- **Fixtures and models** — downloaded once, read-only, identical for everyone.
+- **The Go module and build caches** (`ge-dev-gomod`, `ge-dev-gocache`, ~2GB
+  together). Content-addressed and safe for concurrent use, so sharing them
+  saves each new instance a full module download before it can seed. They're
+  declared external, which means `devctl nuke --name x` leaves them alone.
+- **The frontend checkout**, unavoidably: `functions/lib` is compiled into it
+  by whichever instance starts. `node_modules` is a per-instance volume, and
+  the derived Firebase config is named per instance
+  (`firebase.devenv.<name>.json`) so one instance's `down` can't delete
+  another's.
+
+Everything else — data volumes, minted keys, seeded personas, ports — is per
+instance.
 
 ## Fixtures
 
@@ -619,8 +629,8 @@ instance name, same as passing `--name`), `GE_DEV_API_RELOAD=1` /
   `popularity`, and `post_similarity` have no such dependency.
 - **Instances share the frontend checkout.** `functions/lib` is compiled into
   it by whichever instance starts, so two instances on two different frontend
-  branches will overwrite each other's build. Everything else — data, keys,
-  ports, the derived Firebase config — is per instance.
+  branches will overwrite each other's build. Everything that can be per
+  instance is.
 - **`--name` is not remembered between commands.** Each invocation needs it
   (`devctl --name x seed`); without it you act on the default instance. Set
   `GE_DEV_INSTANCE` in your shell if you're staying in one for a while.

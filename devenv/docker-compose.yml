@@ -529,8 +529,17 @@ volumes:
   esdata:
   api_venv:
   inference_venv:
+  # Shared by every instance, unlike everything else here, and external so
+  # that `devctl nuke --name x` can't delete a cache another instance is
+  # using. Both are content-addressed and safe for concurrent use — Go locks
+  # within them — so the only thing sharing changes is that a second instance
+  # doesn't re-download the module graph. devctl creates them.
   gomod:
+    name: ge-dev-gomod
+    external: true
   gocache:
+    name: ge-dev-gocache
+    external: true
   # Kept out of the bind-mounted checkout so container installs (Linux
   # binaries, node 24) never collide with what the developer has on the host.
   frontend_node_modules:
