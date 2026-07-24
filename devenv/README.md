@@ -29,22 +29,26 @@ with your normal git, while everything executes inside containers.
 If your layout differs, set `GE_DEV_REPO_ROOT=<parent>` in
 `devenv/devenv.local.env`.
 
+**New here?** [docs/onboarding.md](docs/onboarding.md) is the full
+walkthrough, from clone to a ranked feed. The rest of the docs directory:
+[troubleshooting](docs/troubleshooting.md) (symptoms → fixes),
+[runbooks](docs/runbooks.md) (regenerating fixtures and models),
+[remote](docs/remote.md) (running this on another machine), and
+[agents](docs/agents.md) (using it as a coding-agent sandbox).
+
 ## Quick start
 
 ```bash
 cd internal-tools/devenv
-
-./devctl setup           # prerequisites, images, models, inference deps
-./devctl fetch-fixture   # downloads the published sample (~170MB)
-./devctl up              # ES + Firebase emulators + inference + api + frontend
-./devctl seed            # rebase timestamps, ingest posts, load likes
+./devctl bootstrap       # setup + fetch fixture + up + seed, resumable
 ./devctl feed
 ```
 
-`setup` is the slow one — it builds images, downloads the pinned models
-(~33MB), and installs inference-service's dependencies including torch.
-Budget a few minutes on a cold cache. Everything after it is quick, and
-works offline.
+Bootstrap runs the whole first-time sequence — image builds, the pinned
+models (~33MB), the published data sample (~170MB), start, seed. Budget
+20–30 minutes, most of it the seed. The individual steps are also commands
+(`setup`, `fetch-fixture`, `up`, `seed`) when you want just one; after
+setup, everything but the downloads works offline.
 
 `devctl feed <feed>` shows a feed in the terminal: it requests
 `getFeedSkeleton` from the local api as the seeded dev persona, hydrates each
@@ -66,11 +70,13 @@ signed-in path and records a snapshot. The viewer is a read-only client — it
 never posts, likes, or writes anything. `--no-pipeline` skips the snapshot
 lookup and shows the feed as a plain client would.
 
-Other commands: `devctl status`, `devctl logs [service]` (add `-t` to
-follow), `devctl es <path>` (query Elasticsearch), `devctl exec <service>
-<cmd>` (run something inside a container), `devctl restart <service>`,
-`devctl down` (stop, keep data), `devctl nuke` (delete everything). Data is
-disposable by design — when in doubt, `nuke` and re-`seed`.
+Other commands: `devctl status`, `devctl doctor` (check everything, name
+the fix — run it first when the environment misbehaves), `devctl logs
+[service]` (add `-t` to follow), `devctl es <path>` (query Elasticsearch),
+`devctl exec <service> <cmd>` (run something inside a container), `devctl
+restart <service>`, `devctl down` (stop, keep data), `devctl nuke` (delete
+everything). Data is disposable by design — when in doubt, `nuke` and
+re-`seed`.
 
 ## Running commands inside the environment
 
@@ -108,25 +114,15 @@ This is the point of having one wrapper: a coding agent's sandbox can allow
 
 ### Pointing a coding agent at this
 
-There's a skill at `internal-tools/.claude/skills/devenv/` covering what an
-agent needs: check before starting, run tests with `devctl test` (or `devctl
-exec` for finer control) rather than on the host, restart instead of expecting
-reload, use `--name` to work in parallel, and the handful of things that
-reliably waste time (a feed before seeding, a model change without a re-seed).
-
-Claude Code finds it automatically when the session starts in this repo, or in
-the directory that holds all the sibling checkouts — nested `.claude/skills/`
-directories below the working directory are discovered on demand, where it
-appears as `internal-tools:devenv`. For a session started inside one of the
-other repos, add this one:
-
-```bash
-claude --add-dir ../internal-tools
-```
-
-`--add-dir` loads `.claude/skills/` from the added directory (an explicit
-exception to it otherwise granting only file access), which also gives the
-agent read access to `devctl` and this README.
+This is the point of having one wrapper: a sandbox that allows `devctl` gets
+tests, execs, logs, feeds, and diagnosis without being granted `docker`,
+`pipenv`, `npm` and `go` separately — and everything that could touch a
+deployed system is enforced read-only in code. **[docs/agents.md](docs/agents.md)**
+covers the sandbox recipe, what an unattended agent can and can't damage, and
+running one instance per agent. The skill at
+`internal-tools/.claude/skills/devenv/` teaches the working loop; Claude Code
+finds it automatically in this repo or the parent directory, or via
+`claude --add-dir ../internal-tools` from a sibling repo.
 
 ### Editing code
 
@@ -263,25 +259,13 @@ complete ATProto archives exist elsewhere already.
 
 `fixtures/generate_sample.py` is the committed, parameterized generator — what
 makes a good sample is encoded in it (contiguous window, cohort-densified
-likes, hydrated danglers, dev personas; see its docstring). Output goes to
-`fixtures/data/` (gitignored): megastream-format `.db.zip` post chunks,
-`likes.jsonl.gz`, `like_counts.jsonl.gz`, and `manifest.json`. Publish a fresh
-one for the team with `fixtures/publish_fixture.sh`.
+likes, hydrated danglers, dev personas; see its docstring). `--source prod-es`
+samples a real cluster through a port-forward; `--source megastream-files`
+builds from megastream archives with a synthesized like graph, no credentials
+needed. Output goes to `fixtures/data/` (gitignored).
 
-- `--source prod-es` samples a real cluster. A read-only key is enough. For
-  prod, port-forward first
-  (`kubectl port-forward svc/greenearth-es-internal-lb 9200:9200 -n greenearth-prod`)
-  and set `GE_ELASTICSEARCH_URL=https://localhost:9200` plus
-  `GE_ELASTICSEARCH_API_KEY`. A default 48h run takes ~25 min over the
-  tunnel and yields roughly 130k posts / 210k likes (~170 MB on disk),
-  which seeds in about 10 minutes. Posts are sampled per hour bucket (half
-  by like_count, half arbitrary) so coverage spans the whole window rather
-  than the first sliver of it.
-- `--source megastream-files` builds from existing megastream `.db.zip` files
-  (default: `ingex/ingest/test_data/megastream`) and synthesizes the like
-  graph — no credentials, deterministic under `--seed`. The checked-in test
-  files only contain a handful of posts; point `--input` at a real megastream
-  archive for a meatier fixture.
+The full procedure — generating, sanity-checking, and publishing a fixture
+for the team — is in [docs/runbooks.md](docs/runbooks.md).
 
 ## Models
 
@@ -323,17 +307,9 @@ overridable with `GE_DEV_MODELS_TAG`. The tag names the two training runs it
 holds (`models-<two-tower>-<ranker>`), so it says what's in it and re-publishing
 the same artifacts is idempotent.
 
-Maintainers publish a new set with `models/publish_models.sh`, which mirrors
-the newest artifacts out of the prod model bucket (needs `gcloud` with read
-access), rewrites the manifests, and cuts a release. Use `--dry-run` to stage
-and inspect the bundle without uploading. Then set `MODELS_TAG` to the tag it
-prints.
-
-One value in that bundle isn't derivable from the artifacts: `max_history_len`,
-how far back the user tower and ranker look. It isn't in the serving manifest,
-so it's mirrored from how prod deploys the same models, and getting it wrong
-degrades embeddings silently rather than failing. `publish_models.sh` carries
-the command to re-check it.
+Maintainers publish a new bundle with `models/publish_models.sh` and move the
+pin — the procedure, including the `max_history_len` check that fails silently
+when skipped, is in [docs/runbooks.md](docs/runbooks.md).
 
 ## Live ingestion (optional)
 
@@ -467,8 +443,11 @@ it needs a public tunnel, not just a key.
    routing=`author_did`) and applies per-post `like_count`, which the
    popularity generator ranks on.
 
-A seeded window drifts stale after a day or two and recency-anchored feeds go
-empty — that's expected; just re-run `devctl seed`.
+A seeded window drifts stale as real time moves on: the api's recency windows
+are anchored to *now* (popularity looks back 24h), so from about a day after a
+seed, recency-anchored feeds go empty — expected, not a fault. `devctl
+status`, `devctl feed` and `devctl doctor` all warn once the seed is old
+enough for this; the fix is just `devctl seed` again.
 
 ## How ES mirrors prod
 
@@ -636,7 +615,10 @@ run `devctl feed` and reload.
 | jetstream-ingest | internal only | `--with-ingest`; live likes from the public firehose |
 
 These are the default instance's ports; a named instance's are these plus its
-offset (`devctl ports --name <n>`).
+offset (`devctl ports --name <n>`). Everything binds `127.0.0.1` only —
+nothing is reachable from the network. To use the environment from another
+machine, forward the ports over SSH (`devctl ports --ssh` prints the flags):
+see [docs/remote.md](docs/remote.md).
 
 Override the bases in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 `GE_DEV_PORT_ES`, `GE_DEV_PORT_FIRESTORE`, `GE_DEV_PORT_FRONTEND`,
@@ -645,6 +627,8 @@ Other settings in the same file: `GE_DEV_ES_HEAP`, `GE_DEV_INSTANCE` (default
 instance name, same as passing `--name`), `GE_DEV_API_RELOAD=1` /
 `GE_DEV_INFERENCE_RELOAD=1` (what `--watch` sets),
 `GE_DEV_MODELS_TAG` (use a model release other than the pinned one),
+`GE_DEV_BIND` (published-port bind address — loopback unless you've read
+[docs/remote.md](docs/remote.md)),
 `GE_DEV_LIVE` / `GE_DEV_LIVE_ENV` (see [Live services](#live-services)).
 
 ## Current limitations (by milestone)
@@ -684,7 +668,8 @@ instance name, same as passing `--name`), `GE_DEV_API_RELOAD=1` /
 - **A named instance shares `dev`'s Elasticsearch** (see [Running more than one
   environment](#running-more-than-one-environment)), so it's read-only against
   that data and depends on `dev` being up. `--dedicated-es` opts out at the
-  cost of a second cluster.
+  cost of a second cluster. On a native-Linux host, sharing needs one extra
+  setting (`GE_DEV_BIND`) — see [docs/remote.md](docs/remote.md).
 - **`--name` is not remembered between commands.** Each invocation needs it
   (`devctl --name x exec ...`); without it you act on the default instance. Set
   `GE_DEV_INSTANCE` in your shell if you're staying in one for a while.

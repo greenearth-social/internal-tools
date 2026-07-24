@@ -18,13 +18,18 @@ Check whether the environment is already up before starting one:
 
 ```bash
 devctl ls        # every instance on this machine, running or not
-devctl status    # containers + how many posts/likes/inferences are indexed
+devctl status    # containers + doc counts + seed age
 ```
 
-`devctl status` showing zero posts means it's running but unseeded. A first-time
-machine needs `devctl setup` (images, models, inference dependencies including
-torch) and `devctl fetch-fixture` (~170MB of sample data) — several minutes
-between them, so don't start that speculatively.
+`devctl status` showing zero posts means it's running but unseeded. A
+first-time machine needs one command, `devctl bootstrap` (images, models,
+~170MB of sample data, start, seed) — it's 20–30 minutes and resumable, so
+don't start it speculatively, but do resume it if it was interrupted.
+
+When the environment misbehaves — feeds empty, containers exited, requests
+failing — run `devctl doctor` before debugging by hand. It checks
+everything (artifacts, containers, Elasticsearch, seed age, memory) and
+names the fix for what it finds.
 
 ## Running tests
 
@@ -128,6 +133,10 @@ instance. The cluster has security enabled, so a bare
   for inference to load its models before seeding.
 - **Don't expect a feed before seeding.** An empty index returns an empty feed,
   not an error.
+- **Seeded data goes stale after ~23 hours** — the api's recency windows are
+  anchored to now, so recency-ranked feeds go empty with nothing visibly
+  wrong. `status`, `feed` and `doctor` warn when this is the case; the fix is
+  `devctl seed`, not debugging your change.
 - **A changed model or fixture needs a re-seed.** Post embeddings are stamped
   with the post tower's ID and the ranker filters on it; a mismatch shows up as
   a thin feed rather than a failure.
@@ -138,6 +147,10 @@ instance. The cluster has security enabled, so a bare
 
 ## Where to look next
 
-`internal-tools/devenv/README.md` covers fixtures and how to regenerate them,
-model provenance, seeding and time rebasing, the Firebase/auth setup, live
-services and tunnels, and known limitations. `devctl help` lists every command.
+`internal-tools/devenv/README.md` covers how the environment works — fixtures,
+models, seeding and time rebasing, the Firebase/auth setup, live services and
+tunnels. `devenv/docs/` has the task guides: `troubleshooting.md` (symptoms →
+fixes), `onboarding.md` (fresh-machine walkthrough), `agents.md` (sandboxing,
+parallel instances), `remote.md` (the environment on another host),
+`runbooks.md` (regenerating fixtures/models). `devctl help` lists every
+command.
