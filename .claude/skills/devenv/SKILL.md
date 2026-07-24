@@ -26,17 +26,32 @@ machine needs `devctl setup` (images, models, inference dependencies including
 torch) and `devctl fetch-fixture` (~170MB of sample data) — several minutes
 between them, so don't start that speculatively.
 
-## Running things inside the environment
+## Running tests
 
-**Dependencies are installed in containers, not on the host.** `pytest`, `npm`,
-and `go` on the host will fail or use the wrong versions. Use:
+**Dependencies are installed in containers, not on the host** — `pytest`,
+`npm`, and `go` on the host will fail or use the wrong versions. To run a
+repo's test suite, use `devctl test`, which knows each repo's runner:
 
 ```bash
-devctl exec api pipenv run pytest
+devctl test               # every suite: api, inference, ingex, frontend
+devctl test api           # just one repo
+devctl test ingex         # Go tests; needs nothing running
+```
+
+`api`, `inference` and `frontend` tests run in the live containers, so the
+stack must be up (`devctl test` says so if it isn't). `ingex` runs in a
+throwaway Go container and needs no running stack. `devctl test` exits nonzero
+if any suite fails and names which.
+
+For finer control — a single file, a `-k` filter, `-v`, a linter, a one-off
+script — drop to `devctl exec <service> <command>`, which runs anything inside
+a service:
+
+```bash
 devctl exec api pipenv run pytest src/app/lib/firestore_test.py -v
+devctl exec api pipenv run pytest -k firestore
 devctl exec frontend npm run typecheck
-devctl exec frontend npm run test:unit
-devctl exec inference pipenv run pytest
+devctl exec inference pipenv run pytest -x
 ```
 
 Service names: `api`, `frontend`, `inference`, `elasticsearch`, `firebase`.
