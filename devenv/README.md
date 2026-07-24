@@ -67,9 +67,156 @@ never posts, likes, or writes anything. `--no-pipeline` skips the snapshot
 lookup and shows the feed as a plain client would.
 
 Other commands: `devctl status`, `devctl logs [service]` (add `-t` to
-follow), `devctl down`
-(stop, keep data), `devctl nuke` (delete everything). Data is disposable by
-design — when in doubt, `nuke` and re-`seed`.
+follow), `devctl es <path>` (query Elasticsearch), `devctl exec <service>
+<cmd>` (run something inside a container), `devctl restart <service>`,
+`devctl down` (stop, keep data), `devctl nuke` (delete everything). Data is
+disposable by design — when in doubt, `nuke` and re-`seed`.
+
+## Running commands inside the environment
+
+Dependencies are installed in containers, not on your host — there is no
+`node_modules`, no `.venv` and no Go toolchain in your checkouts. `devctl exec`
+runs anything inside a service, with the right interpreter, dependencies and
+environment already in place:
+
+```bash
+./devctl exec api pipenv run pytest
+./devctl exec api pipenv run pytest src/app/lib/firestore_test.py -v
+./devctl exec api pipenv run ruff check .
+./devctl exec frontend npm run typecheck
+./devctl exec inference pipenv run pytest
+./devctl es /posts/_count
+```
+
+This is also the point of having one wrapper: a coding agent's sandbox can
+allow `devctl` and get all of the above, rather than being granted `docker`,
+`pipenv`, `npm` and `go` separately.
+
+### Pointing a coding agent at this
+
+There's a skill at `internal-tools/.claude/skills/devenv/` covering what an
+agent needs: check before starting, run tests through `devctl exec` rather than
+on the host, restart instead of expecting reload, use `--name` to work in
+parallel, and the handful of things that reliably waste time (a feed before
+seeding, a model change without a re-seed).
+
+Claude Code finds it automatically when the session starts in this repo, or in
+the directory that holds all the sibling checkouts — nested `.claude/skills/`
+directories below the working directory are discovered on demand, where it
+appears as `internal-tools:devenv`. For a session started inside one of the
+other repos, add this one:
+
+```bash
+claude --add-dir ../internal-tools
+```
+
+`--add-dir` loads `.claude/skills/` from the added directory (an explicit
+exception to it otherwise granting only file access), which also gives the
+agent read access to `devctl` and this README.
+
+### Editing code
+
+Source is bind-mounted, so edits are visible inside the containers
+immediately. What isn't automatic is restarting the process:
+
+```bash
+./devctl restart api        # after an api change
+./devctl up --watch         # or run api + inference under --reload instead
+```
+
+Reload is off by default. Under `--watch` a save mid-request restarts the
+service underneath it, and for inference each reload re-loads the TorchScript
+towers and fails readiness while it does — which is disruptive when an agent is
+editing and running requests in the same loop. The frontend always hot-reloads
+(Vite). The Go ingest services run under `go run`, so they recompile whenever
+they're restarted.
+
+`devctl restart` recreates the container rather than just restarting the
+process, so it picks up changed configuration too — a re-minted ES key, a
+different `--live` target.
+
+## Running more than one environment
+
+`--name` gives you a second environment: its own containers, volumes, minted
+keys and published ports. Two agents (or two branches) can run at once without
+either noticing the other.
+
+```bash
+./devctl up --name featurework      # first use allocates a free port block
+./devctl --name featurework exec api pipenv run pytest
+./devctl ports --name featurework   # what it got
+./devctl ls                         # every instance, and whether it's running
+./devctl nuke --name featurework    # destroys only this one
+```
+
+`--name` works on every command and defaults to `dev`, which is the environment
+the rest of this README describes — on the documented ports, with no offset.
+Named instances take the next free block of ports: the first gets `+10` (api
+8310, frontend 3010, Elasticsearch 9211), the second `+20`, and so on. The
+allocation is made once and remembered in the instance's runtime directory, so
+an instance's ports don't move between restarts.
+
+### A named instance shares `dev`'s Elasticsearch
+
+Elasticsearch is the expensive part — ~1.9GB of an instance's ~3GB, and an hour
+to seed. So a named instance doesn't run one. It reads the `dev` instance's
+cluster, which makes it cost about a gigabyte, start in ~90 seconds with no
+seed, and immediately see the same data. `devctl status`, `devctl es` and
+`devctl feed` on the named instance all report against `dev`'s cluster; it even
+borrows `dev`'s seeded persona, since it's serving `dev`'s data.
+
+The catch is that a sharer is **read-only** against that data — enforced, the
+same way live mode is. `devctl seed`, `devctl up --with-ingest`, and anything
+else that would write refuse from a named instance and point you at `dev`:
+
+```bash
+./devctl up --name featurework      # ~90s, no ES, reads dev's data
+./devctl --name featurework feed    # works immediately
+./devctl seed                       # (re)seed the shared data on dev
+```
+
+This requires `dev` to be up and seeded — it owns the cluster. `devctl nuke`
+and `devctl down` on `dev` warn (nuke refuses) while any sharer still exists,
+so you don't pull the data out from under them.
+
+### When you need your own cluster
+
+`--dedicated-es` gives a named instance its own Elasticsearch, which is the
+point only when you're changing seeding or the index setup itself — a sharer
+can't exercise that. It then behaves like a fully independent environment: its
+own empty cluster to seed.
+
+```bash
+./devctl up --name schematest --dedicated-es
+./devctl --name schematest seed     # ~an hour; its own data, isolated
+```
+
+Now you're paying for a second Elasticsearch. Measured with `docker stats`, a
+dedicated instance holds ~3GB (ES ~1.9GB of it), so two want ~6GB steady and
+more during a seed. Docker's default allocation on macOS (~8GB) isn't enough:
+the symptom is one instance's ES being OOM-killed (exit 137) mid-seed, which
+looks like the environment breaking rather than a memory limit. `devctl up`
+warns when the number of *cluster-bearing* instances outruns the memory Docker
+reports (sharers don't count), and `devctl status` names any container the
+kernel killed. To actually run two clusters, give Docker ~12GB (Docker Desktop
+→ Settings → Resources) or set `GE_DEV_ES_HEAP=512m` in `devenv.local.env`.
+
+### What's shared, and why
+
+- **The `dev` cluster**, by default (above).
+- **Fixtures and models** — downloaded once, read-only, identical for everyone.
+- **The Go module and build caches** (`ge-dev-gomod`, `ge-dev-gocache`, ~2GB
+  together). Content-addressed and safe for concurrent use, so sharing them
+  saves a dedicated instance a full module download before it can seed. They're
+  declared external, which means `devctl nuke --name x` leaves them alone.
+- **The frontend checkout**, unavoidably: `functions/lib` is compiled into it
+  by whichever instance starts. `node_modules` is a per-instance volume, and
+  the derived Firebase config is named per instance
+  (`firebase.devenv.<name>.json`) so one instance's `down` can't delete
+  another's.
+
+Everything else — data volumes, minted keys, seeded personas, ports — is per
+instance.
 
 ## Fixtures
 
@@ -230,7 +377,7 @@ you don't have to. Each service needs its key in `devenv.local.env`
 
 | `--live` | Key | Notes |
 | --- | --- | --- |
-| `es` | `GE_DEV_ES_API_KEY` | read-only is right — the api only reads |
+| `es` | `GE_DEV_ES_API_KEY` | must be read-only; this is enforced |
 | `inference` | `GE_DEV_INFERENCE_API_KEY` | |
 | `perspective` | `GE_PERSPECTIVE_API_KEY` | real quota, be careful |
 
@@ -239,6 +386,26 @@ anything, so a bad key fails immediately instead of becoming a 500 in a
 container log. Set `GE_DEV_LIVE=inference` in `devenv.local.env` to make a
 choice stick without passing `--live` every time; otherwise a bare `devctl up`
 always returns to all-local.
+
+### What live mode will not do
+
+Nothing here writes to a deployed backend, and a few things enforce that
+rather than relying on it:
+
+- **The live ES key has to be read-only.** `devctl` asks the cluster what the
+  key can do (`_has_privileges`) and refuses to start if it can write. Prod
+  publishes a read-only key for exactly this — the same one the deployed api
+  reads with — and pasting the read-write one instead is an easy mistake with
+  no symptom, since reading works identically either way. Override with
+  `GE_DEV_ALLOW_ES_WRITE_KEY=1` if you genuinely mean it.
+- **Seeding and ingestion are always local.** `devctl seed`,
+  `megastream-ingest` and `jetstream-ingest` address the local cluster by
+  container name and never read `GE_DEV_ES_URL`, so there's no combination of
+  flags that points them at a deployed one. With `--live es`, `seed` says so
+  out loud: the data it loads won't appear in feeds, because the api is
+  reading somewhere else.
+- **Firestore is always the emulator.** The api writes user state there, and
+  there is no flag that changes it.
 
 ### Elasticsearch needs a tunnel
 
@@ -454,11 +621,15 @@ run `devctl feed` and reload.
 | megastream-ingest | internal only | `--with-ingest`; live posts from the archives |
 | jetstream-ingest | internal only | `--with-ingest`; live likes from the public firehose |
 
-Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
+These are the default instance's ports; a named instance's are these plus its
+offset (`devctl ports --name <n>`).
+
+Override the bases in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 `GE_DEV_PORT_ES`, `GE_DEV_PORT_FIRESTORE`, `GE_DEV_PORT_FRONTEND`,
-`GE_DEV_PORT_FIREBASE_AUTH`, `GE_DEV_PORT_FUNCTIONS`, `GE_DEV_PORT_FIREBASE_UI`,
-`GE_DEV_ES_HEAP`, `GE_DEV_NAME`
-(compose project name), `GE_DEV_API_RELOAD=1` (uvicorn --reload watch mode),
+`GE_DEV_PORT_FIREBASE_AUTH`, `GE_DEV_PORT_FUNCTIONS`, `GE_DEV_PORT_FIREBASE_UI`.
+Other settings in the same file: `GE_DEV_ES_HEAP`, `GE_DEV_INSTANCE` (default
+instance name, same as passing `--name`), `GE_DEV_API_RELOAD=1` /
+`GE_DEV_INFERENCE_RELOAD=1` (what `--watch` sets),
 `GE_DEV_MODELS_TAG` (use a model release other than the pinned one),
 `GE_DEV_LIVE` / `GE_DEV_LIVE_ENV` (see [Live services](#live-services)).
 
@@ -492,5 +663,14 @@ Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
   `network-likes` feed is normally the sample, not a fault. The api says which
   in its logs ("No liked posts found for followed users of ..."). `random`,
   `popularity`, and `post_similarity` have no such dependency.
-- Multi-instance (`--name`), `devctl exec`, and local/live backend switching
-  are milestone 3 ([api#283](https://github.com/greenearth-social/api/issues/283)).
+- **Instances share the frontend checkout.** `functions/lib` is compiled into
+  it by whichever instance starts, so two instances on two different frontend
+  branches will overwrite each other's build. Everything that can be per
+  instance is.
+- **A named instance shares `dev`'s Elasticsearch** (see [Running more than one
+  environment](#running-more-than-one-environment)), so it's read-only against
+  that data and depends on `dev` being up. `--dedicated-es` opts out at the
+  cost of a second cluster.
+- **`--name` is not remembered between commands.** Each invocation needs it
+  (`devctl --name x exec ...`); without it you act on the default instance. Set
+  `GE_DEV_INSTANCE` in your shell if you're staying in one for a while.

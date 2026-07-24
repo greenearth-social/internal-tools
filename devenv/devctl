@@ -12,6 +12,11 @@ set -euo pipefail
 
 DEVENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+die() {
+  echo "devctl: $*" >&2
+  exit 1
+}
+
 # Optional local overrides (ports, ES heap, ...). Gitignored.
 if [[ -f "$DEVENV_DIR/devenv.local.env" ]]; then
   set -a
@@ -19,6 +24,156 @@ if [[ -f "$DEVENV_DIR/devenv.local.env" ]]; then
   source "$DEVENV_DIR/devenv.local.env"
   set +a
 fi
+
+command -v python3 >/dev/null || {
+  echo "devctl: python3 is required" >&2
+  exit 1
+}
+
+# --- instances (issue api#283) -----------------------------------------------
+# `--name <n>` runs a second, fully independent environment: its own compose
+# project (so its own containers, network and volumes), its own runtime
+# directory, and its own block of published ports. Two agents can then work on
+# two branches at once without either noticing the other.
+#
+# The flag is global rather than per-command — every command has to act on the
+# same instance — so it's stripped here, from anywhere in the argument list.
+# The exception is `exec`, whose trailing arguments belong to the command being
+# run inside the container and must reach it untouched.
+INSTANCE="${GE_DEV_INSTANCE:-dev}"
+_args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --name)
+    [[ -n "${2:-}" ]] || {
+      echo "devctl: --name needs an instance name" >&2
+      exit 1
+    }
+    INSTANCE="$2"
+    shift 2
+    ;;
+  exec)
+    _args+=("$@")
+    break
+    ;;
+  *)
+    _args+=("$1")
+    shift
+    ;;
+  esac
+done
+set -- ${_args[@]+"${_args[@]}"}
+
+# Compose project names accept lowercase alphanumerics, dashes and underscores;
+# ours also becomes part of a runtime directory name and a config filename.
+set_instance() {
+  INSTANCE="$1"
+  [[ "$INSTANCE" =~ ^[a-z0-9][a-z0-9_-]*$ ]] ||
+    die "invalid instance name: '$INSTANCE' (lowercase letters, digits, - and _)"
+  export GE_DEV_NAME="ge-$INSTANCE"
+  if [[ "$INSTANCE" == "dev" ]]; then
+    export GE_DEV_RUNTIME="./.runtime"
+    export GE_DEV_FIREBASE_CONFIG="firebase.devenv.json"
+  else
+    export GE_DEV_RUNTIME="./.runtime.$INSTANCE"
+    export GE_DEV_FIREBASE_CONFIG="firebase.devenv.$INSTANCE.json"
+  fi
+  # GE_DEV_RUNTIME is relative because compose resolves it against
+  # --project-directory; the shell needs the absolute form.
+  RUNTIME="$DEVENV_DIR/${GE_DEV_RUNTIME#./}"
+}
+
+# Each instance costs roughly this much resident memory, measured with
+# `docker stats` on a seeded environment: Elasticsearch ~1.9G (1g heap plus JVM
+# overhead), the Firebase emulators ~350M, inference ~250M, and ~200M across
+# the api, frontend and the two small stand-ins. A seed transiently adds more.
+INSTANCE_MEMORY_GB=3
+# On top of the per-instance figure: a seed runs an extra Go build and the
+# rebase alongside everything else, and the machine needs room that isn't
+# ours. Without this the arithmetic said two instances fit in 7.7GB, on the
+# very machine where that combination got an Elasticsearch OOM-killed.
+MEMORY_HEADROOM_GB=2
+
+# Starting an instance on a machine that can't hold its Elasticsearch doesn't
+# fail here — it gets *another* instance's ES OOM-killed some minutes later,
+# which reads as "the environment broke" with nothing pointing at the cause.
+# Only clusters count: a sharing instance adds ~1GB, not a JVM, so the real
+# danger is two or more Elasticsearch-bearing instances at once. Warn rather
+# than refuse — the estimate is approximate, and a smaller heap makes it wrong
+# in the safe direction.
+#
+# Runs after the share decision, so share_es reflects this instance.
+check_memory_budget() {
+  local total_gb running dir name bearers=0
+  total_gb="$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0)"
+  total_gb=$((total_gb / 1024 / 1024 / 1024))
+  [[ "$total_gb" -gt 0 ]] || return 0
+
+  running="$(docker compose ls --format json 2>/dev/null |
+    python3 -c "
+import json, sys
+try:
+    print(' '.join(p['Name'] for p in json.load(sys.stdin)))
+except Exception:
+    pass" 2>/dev/null || true)"
+
+  # Running instances that carry their own cluster (i.e. aren't sharers).
+  for dir in "$DEVENV_DIR"/.runtime "$DEVENV_DIR"/.runtime.*; do
+    [[ -d "$dir" ]] || continue
+    name="$(python3 -c "import ports,sys;from pathlib import Path;print(ports.instance_name(Path(sys.argv[1])))" "$dir")"
+    [[ " $running " == *" ge-$name "* ]] || continue
+    grep -q '^GE_DEV_SHARE_ES=1' "$dir/share.env" 2>/dev/null && continue
+    bearers=$((bearers + 1))
+  done
+  # Plus this instance if it bears a cluster and isn't already counted above.
+  if ! share_es && [[ " $running " != *" ge-$INSTANCE "* ]]; then
+    bearers=$((bearers + 1))
+  fi
+  [[ "$bearers" -gt 1 ]] || return 0
+
+  local needed=$((bearers * INSTANCE_MEMORY_GB + MEMORY_HEADROOM_GB))
+  [[ "$needed" -gt "$total_gb" ]] || return 0
+  cat >&2 <<EOF
+devctl: WARNING — $bearers instances run their own Elasticsearch, needing roughly
+        ${needed}GB, and Docker has ${total_gb}GB. The usual symptom is one of
+        them being OOM-killed mid-run (exit 137), not a failure here. Give
+        Docker more memory, set GE_DEV_ES_HEAP=512m in devenv.local.env, share
+        a cluster (named instances do by default — drop --dedicated-es), or
+        stop one: devctl ls
+EOF
+}
+
+# Published ports for this instance. `allocate` claims a free block on first
+# use and remembers it; `read` refuses to invent one, so a mistyped --name is
+# an error rather than a second empty environment.
+resolve_ports() {
+  # Once per run: the values it exports are the same GE_DEV_PORT_* names it
+  # reads as bases, so calling it twice for a named instance would add the
+  # offset to an already-offset port.
+  [[ -z "${GE_DEV_PORT_OFFSET:-}" ]] || return 0
+  local assignments
+  assignments="$(python3 "$DEVENV_DIR/ports.py" "$DEVENV_DIR" "$INSTANCE" "${1:-read}")" || exit 1
+  set -a
+  eval "$assignments"
+  set +a
+  API_PORT="$GE_DEV_PORT_API"
+  ES_PORT="$GE_DEV_PORT_ES"
+  FIRESTORE_PORT="$GE_DEV_PORT_FIRESTORE"
+  AUTH_PORT="$GE_DEV_PORT_FIREBASE_AUTH"
+  FUNCTIONS_PORT="$GE_DEV_PORT_FUNCTIONS"
+  FIREBASE_UI_PORT="$GE_DEV_PORT_FIREBASE_UI"
+  FRONTEND_PORT="$GE_DEV_PORT_FRONTEND"
+}
+
+# Only shown for named instances: on the default one it's noise, since those
+# are the numbers in the README and in everybody's bookmarks.
+instance_label() {
+  [[ "$INSTANCE" == "dev" ]] || echo " [$INSTANCE]"
+}
+
+# Everything below — the live-mode state file, the minted keys, the compose
+# project — is per instance, so this has to settle before any of it is read.
+set_instance "$INSTANCE"
 
 export GE_DEV_REPO_ROOT="${GE_DEV_REPO_ROOT:-$(cd "$DEVENV_DIR/../.." && pwd)}"
 FIXTURE_REPO="${GE_DEV_FIXTURE_REPO:-greenearth-social/internal-tools}"
@@ -31,21 +186,9 @@ MODELS_ASSET="ge-dev-models.tar"
 # runs in the bundle (two-tower, ranker); models/publish_models.sh derives it
 # from the artifacts and prints what to set here.
 MODELS_TAG="${GE_DEV_MODELS_TAG:-models-1bf1ea3c-177899dd}"
-API_PORT="${GE_DEV_PORT_API:-8300}"
-ES_PORT="${GE_DEV_PORT_ES:-9201}"
-FIRESTORE_PORT="${GE_DEV_PORT_FIRESTORE:-8080}"
-AUTH_PORT="${GE_DEV_PORT_FIREBASE_AUTH:-9099}"
-FUNCTIONS_PORT="${GE_DEV_PORT_FUNCTIONS:-5001}"
-FIREBASE_UI_PORT="${GE_DEV_PORT_FIREBASE_UI:-4000}"
-FRONTEND_PORT="${GE_DEV_PORT_FRONTEND:-3000}"
 
 compose() {
   docker compose -f "$DEVENV_DIR/docker-compose.yml" --project-directory "$DEVENV_DIR" "$@"
-}
-
-die() {
-  echo "devctl: $*" >&2
-  exit 1
 }
 
 # ---------------------------------------------------------------------------
@@ -73,11 +216,19 @@ check_repos() {
 }
 
 ensure_runtime() {
-  mkdir -p "$DEVENV_DIR/.runtime/seed" "$DEVENV_DIR/models/data"
+  # The Go module and build caches are declared external so that they survive
+  # one instance's `nuke` and are shared by all of them; compose won't create
+  # an external volume, so we do.
+  local volume
+  for volume in ge-dev-gomod ge-dev-gocache; do
+    docker volume inspect "$volume" >/dev/null 2>&1 ||
+      docker volume create "$volume" >/dev/null
+  done
+  mkdir -p "$RUNTIME/seed" "$DEVENV_DIR/models/data"
   # compose env_file entries must exist before any `compose` invocation.
-  touch "$DEVENV_DIR/.runtime/es_key_ro.env" \
-    "$DEVENV_DIR/.runtime/es_key_rw.env" \
-    "$DEVENV_DIR/.runtime/probe.env" \
+  touch "$RUNTIME/es_key_ro.env" \
+    "$RUNTIME/es_key_rw.env" \
+    "$RUNTIME/probe.env" \
     "$DEVENV_DIR/models/data/models.env"
 }
 
@@ -95,7 +246,7 @@ ensure_runtime() {
 # actually running. Deciding this way means a bare `devctl up` always returns
 # to all-local, instead of quietly inheriting a live service from hours ago.
 
-LIVE_STATE="$DEVENV_DIR/.runtime/live.env"
+LIVE_STATE="$RUNTIME/live.env"
 LIVE_CONFIGURED="${GE_DEV_LIVE:-}"
 LIVE_ENV_CONFIGURED="${GE_DEV_LIVE_ENV:-stage}"
 if [[ -f "$LIVE_STATE" ]]; then
@@ -106,6 +257,92 @@ if [[ -f "$LIVE_STATE" ]]; then
 fi
 GE_DEV_LIVE="${GE_DEV_LIVE:-}"
 GE_DEV_LIVE_ENV="${GE_DEV_LIVE_ENV:-stage}"
+
+# --- shared Elasticsearch (issue api#283) ------------------------------------
+# Elasticsearch is ~1.9GB of an instance's ~3GB, so by default a *named*
+# instance doesn't run one — it reads the default instance's cluster. A second
+# environment then costs about a gigabyte instead of three, which is the
+# difference between "two fit" and "the first one's ES gets OOM-killed".
+#
+# The default instance ("dev") always owns a cluster. A named instance shares
+# it unless `--dedicated-es` asks for its own — the one case that needs it is
+# working on seeding or the index setup itself, since a sharer is read-only.
+#
+# Read-only is enforced the way live mode is: seed, nuke-of-data and live
+# ingest refuse from a sharing instance, naming the owner. The api only reads,
+# so it gets the owner's read-only key and reaches the cluster the same way
+# `--live es` reaches a deployed one — through the host, at the owner's port.
+ES_OWNER="dev"
+ES_OWNER_RUNTIME="$DEVENV_DIR/.runtime"
+SHARE_STATE="$RUNTIME/share.env"
+if [[ -f "$SHARE_STATE" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$SHARE_STATE"
+  set +a
+fi
+
+# True when this instance reads the owner's cluster instead of its own. The
+# owner never shares, whatever a stray GE_DEV_SHARE_ES in the environment says.
+share_es() { [[ "$INSTANCE" != "$ES_OWNER" && "${GE_DEV_SHARE_ES:-}" == "1" ]]; }
+
+# The owner's published ES port. Every instance's ES_PORT is base+offset, so
+# subtracting this instance's own offset lands on the base — the owner's port.
+owner_es_port() { echo "$((ES_PORT - GE_DEV_PORT_OFFSET))"; }
+
+owner_ro_key() {
+  sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$ES_OWNER_RUNTIME/es_key_ro.env"
+}
+
+record_share_choice() {
+  printf 'GE_DEV_SHARE_ES=%s\n' "${GE_DEV_SHARE_ES:-}" >"$SHARE_STATE"
+}
+
+# Point the api at the owner's cluster and serve the owner's persona (since it's
+# the owner's data). Reachable via host.docker.internal, exactly as a deployed
+# cluster is under `--live es`.
+resolve_shared_es() {
+  share_es || return 0
+  local key
+  key="$(owner_ro_key)"
+  [[ -n "$key" ]] || die "shared Elasticsearch needs the '$ES_OWNER' instance up first:
+        devctl up
+    Or give this instance its own cluster:
+        devctl up --name $INSTANCE --dedicated-es"
+  export GE_DEV_ES_API_KEY="$key"
+  export GE_DEV_ES_URL="http://host.docker.internal:$(owner_es_port)"
+  cp "$ES_OWNER_RUNTIME/probe.env" "$RUNTIME/probe.env" 2>/dev/null || true
+}
+
+# Reached from the host before the api depends on it, so an owner that isn't
+# running is a clear message here rather than a feed that 500s later.
+preflight_shared_es() {
+  share_es || return 0
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+    -H "Authorization: ApiKey ${GE_DEV_ES_API_KEY}" \
+    "http://127.0.0.1:$(owner_es_port)/_cluster/health" 2>/dev/null || true)"
+  case "$code" in
+  200) echo "devctl: sharing the '$ES_OWNER' instance's Elasticsearch (127.0.0.1:$(owner_es_port), read-only)" ;;
+  000) die "the '$ES_OWNER' instance's Elasticsearch isn't reachable on port $(owner_es_port).
+        Start it:              devctl up
+        Or run standalone:     devctl up --name $INSTANCE --dedicated-es" ;;
+  *) die "shared Elasticsearch returned HTTP $code from the '$ES_OWNER' instance" ;;
+  esac
+}
+
+# Named instances that read this instance's cluster — checked before nuking or
+# stopping the owner, whose volumes hold data they're serving.
+sharers_of_owner() {
+  local dir name out=""
+  for dir in "$DEVENV_DIR"/.runtime.*; do
+    [[ -d "$dir" ]] || continue
+    grep -q '^GE_DEV_SHARE_ES=1' "$dir/share.env" 2>/dev/null || continue
+    name="${dir##*/.runtime.}"
+    out+="$name "
+  done
+  echo "${out% }"
+}
 
 LIVE_SERVICES="es inference perspective"
 
@@ -217,9 +454,62 @@ preflight_live() {
         devctl tunnel $GE_DEV_LIVE_ENV" ;;
     *) die "live Elasticsearch returned HTTP $code" ;;
     esac
+    check_es_key_readonly
   fi
   # Perspective isn't probed: every call costs quota, and a bad key surfaces
   # immediately as a failed feed rather than something subtle.
+}
+
+# `--live es` points a *development* environment at a deployed cluster, and
+# everything in this environment that writes to Elasticsearch — the seed, both
+# ingest services — addresses the local one by name, so nothing here is
+# supposed to write there. Enforce that at the key: prod publishes a read-only
+# API key precisely for this (elasticsearch-api-key-readonly), and pasting the
+# read-write one instead is an easy mistake with no natural symptom, because
+# reading works identically either way.
+#
+# _has_privileges answers for whichever key authenticated the request, so this
+# asks the cluster rather than trusting the key's name.
+check_es_key_readonly() {
+  [[ -z "${GE_DEV_ALLOW_ES_WRITE_KEY:-}" ]] || {
+    echo "devctl: WARNING — live ES write check skipped (GE_DEV_ALLOW_ES_WRITE_KEY)" >&2
+    return 0
+  }
+  local body
+  body="$(curl -sk --max-time 15 -X POST \
+    -H "Authorization: ApiKey ${GE_DEV_ES_API_KEY}" \
+    -H 'Content-Type: application/json' \
+    -d '{"index":[{"names":["*"],"privileges":["write","index","delete","create_index","delete_index","manage"]}]}' \
+    "$(probe_url "$GE_DEV_ES_URL")/_security/user/_has_privileges" 2>/dev/null || true)"
+
+  local granted
+  granted="$(python3 - "$body" <<'PY' || echo UNKNOWN
+import json, sys
+try:
+    resp = json.loads(sys.argv[1])
+    per_index = resp["index"]
+except (json.JSONDecodeError, KeyError, TypeError):
+    print("UNKNOWN")
+else:
+    print(",".join(sorted(
+        {name for privs in per_index.values() for name, ok in privs.items() if ok}
+    )))
+PY
+  )"
+
+  case "$granted" in
+  "") echo "devctl: live Elasticsearch key is read-only" ;;
+  UNKNOWN)
+    die "couldn't verify that GE_DEV_ES_API_KEY is read-only — the cluster's
+        answer to _has_privileges wasn't readable. Re-run with
+        GE_DEV_ALLOW_ES_WRITE_KEY=1 if you're sure." ;;
+  *)
+    die "GE_DEV_ES_API_KEY can write to live Elasticsearch (grants: $granted).
+        Use the read-only key — in prod that's the secret
+        elasticsearch-api-key-readonly, the same one the deployed api reads
+        with. Nothing in this environment writes to a live cluster, so a
+        write-capable key here only adds risk." ;;
+  esac
 }
 
 # The api reads its ES endpoint from the compose `environment` block rather
@@ -229,9 +519,10 @@ preflight_live() {
 export_api_es_env() {
   if [[ -z "${GE_DEV_ES_API_KEY:-}" ]]; then
     GE_DEV_ES_API_KEY="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' \
-      "$DEVENV_DIR/.runtime/es_key_ro.env")"
+      "$RUNTIME/es_key_ro.env")"
     [[ -n "$GE_DEV_ES_API_KEY" ]] ||
-      die "no Elasticsearch key in .runtime/es_key_ro.env — run: devctl up"
+      die "no Elasticsearch key in $GE_DEV_RUNTIME/es_key_ro.env — run: devctl up$(
+        [[ "$INSTANCE" == dev ]] || echo " --name $INSTANCE")"
   fi
   export GE_DEV_ES_API_KEY
 }
@@ -270,10 +561,18 @@ check_model_fixture_compat() {
 es_curl() {
   local path="$1"
   shift
-  local key
-  key="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$DEVENV_DIR/.runtime/es_key_ro.env")"
-  [[ -n "$key" ]] || die "no ES key yet — run: devctl up"
-  curl -s -H "Authorization: ApiKey $key" "http://127.0.0.1:${ES_PORT}${path}" "$@"
+  local key port
+  if share_es; then
+    # A sharing instance has no cluster of its own; read the owner's.
+    key="$(owner_ro_key)"
+    port="$(owner_es_port)"
+    [[ -n "$key" ]] || die "shared Elasticsearch not available — the '$ES_OWNER' instance owns it: devctl up"
+  else
+    key="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$RUNTIME/es_key_ro.env")"
+    port="$ES_PORT"
+    [[ -n "$key" ]] || die "no ES key yet — run: devctl up$([[ "$INSTANCE" == "dev" ]] || echo " --name $INSTANCE")"
+  fi
+  curl -s -H "Authorization: ApiKey $key" "http://127.0.0.1:${port}${path}" "$@"
 }
 
 have_fixtures() {
@@ -411,7 +710,7 @@ cmd_setup() {
 }
 
 cmd_up() {
-  local jetstream=0 megastream=0
+  local jetstream=0 megastream=0 dedicated_es=0
   # Start from what's configured, not from what the last `up` recorded, so this
   # command fully determines the result.
   GE_DEV_LIVE="$LIVE_CONFIGURED"
@@ -420,6 +719,13 @@ cmd_up() {
     case "$1" in
     --with-jetstream)
       jetstream=1
+      shift
+      ;;
+    # Give this named instance its own Elasticsearch instead of reading the
+    # owner's. The reason to want it is a change to seeding or the index setup,
+    # which a sharer (read-only) can't exercise. Costs ~1.9GB more.
+    --dedicated-es)
+      dedicated_es=1
       shift
       ;;
     --with-megastream)
@@ -441,20 +747,50 @@ cmd_up() {
       GE_DEV_LIVE_ENV="$2"
       shift 2
       ;;
+    # Off by default (issue api#283): a rebuild triggered by an editor autosave
+    # is wasted work at best, and at worst it restarts the api underneath an
+    # agent that's mid-request. Agents rebuild deliberately with
+    # `devctl restart <service>`; people who want a reload loop ask for one.
+    --watch)
+      export GE_DEV_API_RELOAD=1 GE_DEV_INFERENCE_RELOAD=1
+      shift
+      ;;
     *) die "unknown argument to up: $1 (try: devctl help)" ;;
     esac
   done
 
   check_docker
   check_repos
+  resolve_ports allocate
   ensure_runtime
   resolve_live
   record_live_choice
 
+  # A named instance shares the owner's cluster by default; --dedicated-es or
+  # its own --live es opt out. `--live es` points somewhere else entirely, so
+  # there's nothing to share. Decided here and recorded, so seed/status/es on
+  # this instance all agree about where its data lives.
+  if [[ "$INSTANCE" != "$ES_OWNER" && $dedicated_es -eq 0 ]] && ! live_has es; then
+    export GE_DEV_SHARE_ES=1
+  else
+    export GE_DEV_SHARE_ES=""
+  fi
+  record_share_choice
+  check_memory_budget
+  resolve_shared_es
+
+  if share_es && { [[ $megastream -eq 1 || $jetstream -eq 1 ]]; }; then
+    die "live ingestion writes to Elasticsearch, but this instance shares the
+        '$ES_OWNER' instance's cluster (read-only here). Run ingest on the owner,
+        or give this one its own: devctl up --name $INSTANCE --dedicated-es"
+  fi
+
   # One list, built from what's staying local. A live service's container isn't
   # just skipped but stopped: it's still a defined service, so --remove-orphans
-  # leaves it running, and it would go on answering nothing.
-  local local_services=(elasticsearch firebase dev-auth)
+  # leaves it running, and it would go on answering nothing. A sharing instance
+  # runs no Elasticsearch at all — it reads the owner's.
+  local local_services=(firebase dev-auth)
+  share_es || local_services+=(elasticsearch)
   local svc
   for svc in inference perspective-stub; do
     local name="${svc%-stub}"
@@ -488,15 +824,31 @@ cmd_up() {
   # --wait because the api no longer depends_on the swappable ones, so this is
   # what guarantees they're serving before it starts.
   compose up -d --remove-orphans --wait "${local_services[@]}"
-  echo "devctl: initializing Elasticsearch (templates, indexes, API keys)..."
-  compose run --rm es-init
-  export_api_es_env
-  compose up -d api frontend
+  # A sharing instance runs no cluster of its own, so there's nothing to
+  # initialize and the api's key is the owner's (already exported). Its api
+  # also can't `depends_on: elasticsearch` — that service isn't started here —
+  # so start it without deps; the things it truly needs (firebase) are up.
+  local api_up=(compose up -d)
+  if share_es; then
+    preflight_shared_es
+    api_up+=(--no-deps)
+  else
+    echo "devctl: initializing Elasticsearch (templates, indexes, API keys)..."
+    compose run --rm es-init
+    export_api_es_env
+  fi
+  "${api_up[@]}" api frontend
   cat <<EOF
-devctl: environment is up.
+devctl: environment is up$(instance_label).
   frontend      http://127.0.0.1:${FRONTEND_PORT}    (first start installs deps; watch: devctl logs -t frontend)
   api           http://127.0.0.1:${API_PORT}    (first start installs deps; watch: devctl logs -t api)
-  elasticsearch http://127.0.0.1:${ES_PORT}    (user elastic / ${GE_DEV_ES_PASSWORD:-ge-dev-elastic})
+EOF
+  if share_es; then
+    echo "  elasticsearch shared from '$ES_OWNER' (127.0.0.1:$(owner_es_port))    read-only here"
+  else
+    echo "  elasticsearch http://127.0.0.1:${ES_PORT}    (user elastic / ${GE_DEV_ES_PASSWORD:-ge-dev-elastic})"
+  fi
+  cat <<EOF
   firestore     127.0.0.1:${FIRESTORE_PORT}    (emulator, from the frontend checkout)
   firebase auth 127.0.0.1:${AUTH_PORT}
   functions     127.0.0.1:${FUNCTIONS_PORT}
@@ -522,12 +874,19 @@ EOF
   if [[ $jetstream -ne $megastream ]]; then
     echo "  ** only half of live ingestion is on; --with-ingest runs both" >&2
   fi
+  if [[ "$INSTANCE" != "dev" ]]; then
+    echo "  ** instance '$INSTANCE' — every other devctl command needs --name $INSTANCE"
+  fi
   # The posts alias doesn't exist until the first seed (the ingest binary
-  # creates it, as in prod) — treat a missing alias like an empty index.
+  # creates it, as in prod) — treat a missing alias like an empty index. A
+  # sharer can't seed, so an empty owner is the owner's problem, not a prompt
+  # to run something here.
   local post_count
   post_count="$(es_curl /posts/_count | sed -n 's/.*"count":\([0-9]*\).*/\1/p')"
   if [[ -z "$post_count" || "$post_count" == "0" ]]; then
-    if have_fixtures; then
+    if share_es; then
+      echo "The shared '$ES_OWNER' cluster has no posts yet — seed it: devctl seed"
+    elif have_fixtures; then
       echo "Elasticsearch is empty — run: devctl seed"
     else
       fixtures_hint
@@ -538,9 +897,17 @@ EOF
 cmd_seed() {
   check_docker
   ensure_runtime
+  # A sharing instance has no cluster of its own and only a read-only key to
+  # the owner's, so there is nothing here it may seed. Point at the owner
+  # rather than fail obscurely on a missing key.
+  if share_es; then
+    die "this instance shares the '$ES_OWNER' instance's Elasticsearch, which is read-only here.
+        Seed the owner:                 devctl seed$([[ "$ES_OWNER" == "dev" ]] || echo " --name $ES_OWNER")
+        Or give this one its own:       devctl up --name $INSTANCE --dedicated-es, then devctl --name $INSTANCE seed"
+  fi
   have_fixtures || { fixtures_hint; exit 1; }
   local rw_key
-  rw_key="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$DEVENV_DIR/.runtime/es_key_rw.env")"
+  rw_key="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$RUNTIME/es_key_rw.env")"
   [[ -n "$rw_key" ]] || die "no ES key yet — run: devctl up"
   check_model_fixture_compat
 
@@ -575,7 +942,7 @@ cmd_seed() {
   echo "devctl: loading likes and like counts..."
   compose run --rm seed-likes
   local persona api_running=0
-  persona="$(sed -n 's/^GE_PROBE_USER_DID=//p' "$DEVENV_DIR/.runtime/probe.env")"
+  persona="$(sed -n 's/^GE_PROBE_USER_DID=//p' "$RUNTIME/probe.env")"
   # Restart the api so it picks up the new persona from .runtime/probe.env —
   # but only if it was already running, so `seed` never starts a service the
   # developer deliberately stopped.
@@ -653,7 +1020,7 @@ cmd_login() {
   # to the app's own #/auth/finish route — the same entry point the real OAuth
   # callback redirects to. See firebase/mint_token.py.
   local persona token
-  persona="${1:-$(sed -n 's/^GE_PROBE_USER_DID=//p' "$DEVENV_DIR/.runtime/probe.env")}"
+  persona="${1:-$(sed -n 's/^GE_PROBE_USER_DID=//p' "$RUNTIME/probe.env")}"
   [[ -n "$persona" ]] ||
     die "no seeded persona found — run: devctl seed (or pass a did:plc:... explicitly)"
 
@@ -704,8 +1071,27 @@ cmd_logs() {
 
 cmd_status() {
   compose ps
+  # 137 is SIGKILL, which here almost always means the kernel reclaimed memory
+  # rather than anything about the service. `compose ps` shows the exit code
+  # but not what it implies, and a stopped Elasticsearch is the version of
+  # this environment failing that looks least like a memory problem.
+  # `|| true`: with no killed container grep exits 1, which under `set -e`
+  # would abort status before it prints the doc counts below.
+  local killed
+  killed="$(compose ps -a --format '{{.Service}} {{.Status}}' 2>/dev/null |
+    { grep "Exited (137)" || true; } | awk '{print $1}' | tr '\n' ' ')"
+  if [[ -n "$killed" ]]; then
+    echo
+    local restart="devctl up"
+    [[ "$INSTANCE" == "dev" ]] || restart="devctl up --name $INSTANCE"
+    echo "** killed by the kernel, almost certainly out of memory: $killed" >&2
+    echo "   restart with: $restart   (running instances: devctl ls)" >&2
+  fi
   echo
-  if [[ -s "$DEVENV_DIR/.runtime/es_key_ro.env" ]]; then
+  if share_es; then
+    echo "elasticsearch shared from '$ES_OWNER':"
+  fi
+  if share_es || [[ -s "$RUNTIME/es_key_ro.env" ]]; then
     local alias
     for alias in posts likes inferences; do
       printf "%-12s %s docs\n" "$alias" \
@@ -715,10 +1101,158 @@ cmd_status() {
 }
 
 cmd_nuke() {
+  # The owner's cluster holds the data every sharer is serving, so destroying
+  # it out from under them would look like several environments breaking at
+  # once. Refuse while any sharer's runtime is still on disk; GE_DEV_FORCE_NUKE
+  # is the escape hatch for when that's genuinely the intent.
+  if [[ "$INSTANCE" == "$ES_OWNER" && -z "${GE_DEV_FORCE_NUKE:-}" ]]; then
+    local sharers
+    sharers="$(sharers_of_owner)"
+    [[ -z "$sharers" ]] || die "these instances share this one's Elasticsearch: $sharers
+        Nuking it takes their data with it. Either nuke them first
+        (devctl nuke --name <name>), give each its own cluster
+        (devctl up --name <name> --dedicated-es), or force it:
+        GE_DEV_FORCE_NUKE=1 devctl nuke"
+  fi
   compose down -v --remove-orphans
-  rm -rf "$DEVENV_DIR/.runtime"
-  rm -f "$GE_DEV_REPO_ROOT/frontend/firebase.devenv.json"
-  echo "devctl: all containers, data volumes, and runtime state removed."
+  # Volumes are namespaced by compose project, and the runtime directory and
+  # derived Firebase config are named after the instance — so this destroys
+  # only this instance's data, whatever else is running.
+  rm -rf "$RUNTIME"
+  rm -f "$GE_DEV_REPO_ROOT/frontend/$GE_DEV_FIREBASE_CONFIG"
+  echo "devctl: all containers, data volumes, and runtime state removed$(instance_label)."
+}
+
+cmd_es() {
+  # Query this instance's Elasticsearch without having to find its port or its
+  # key first — both move per instance, and the cluster has security on, so
+  # the obvious `curl localhost:9200/...` just returns a 401.
+  #
+  #   devctl es /posts/_count
+  #   devctl es '/posts/_search?size=1&pretty'
+  #   devctl es /posts/_search -X POST -H 'Content-Type: application/json' -d '{...}'
+  #
+  # Read-only: this is the same key the api reads with.
+  [[ $# -gt 0 ]] || die "usage: devctl es <path> [curl args...]
+        e.g. devctl es /posts/_count"
+  local path="$1"
+  shift
+  es_curl "$path" "$@"
+  echo
+}
+
+cmd_ports() {
+  # With a service name, print just the number, so it can be substituted
+  # straight into a command:
+  #   curl http://127.0.0.1:$(devctl ports api --name alpha)/health
+  if [[ $# -gt 0 ]]; then
+    local name="$1"
+    # The service is called elasticsearch everywhere else in this tool; the
+    # port variable has always been the shorter GE_DEV_PORT_ES.
+    case "$name" in
+    elasticsearch) name=es ;;
+    auth) name=firebase_auth ;;
+    ui) name=firebase_ui ;;
+    esac
+    local var="GE_DEV_PORT_$(echo "$name" | tr '[:lower:]-' '[:upper:]_')"
+    [[ -n "${!var:-}" ]] || die "no published port for '$1' (try: devctl ports)"
+    echo "${!var}"
+    return
+  fi
+  cat <<EOF
+instance      $INSTANCE (compose project $GE_DEV_NAME, offset $GE_DEV_PORT_OFFSET)
+api           $API_PORT
+elasticsearch $ES_PORT
+frontend      $FRONTEND_PORT
+firestore     $FIRESTORE_PORT
+firebase_auth $AUTH_PORT
+functions     $FUNCTIONS_PORT
+firebase_ui   $FIREBASE_UI_PORT
+EOF
+}
+
+cmd_ls() {
+  # Every instance that exists on disk, whether or not it's running — a
+  # stopped instance still owns its ports and its volumes, which is exactly
+  # what someone asking "what's here?" needs to know.
+  local running=""
+  if docker info >/dev/null 2>&1; then
+    running="$(docker compose ls --format json 2>/dev/null |
+      python3 -c "
+import json, sys
+try:
+    print(' '.join(p['Name'] for p in json.load(sys.stdin)))
+except Exception:
+    pass" || true)"
+  fi
+
+  printf "%-14s %-9s %-7s %-7s %s\n" NAME STATE OFFSET API FRONTEND
+  local name offset api frontend found=0
+  while read -r name offset api frontend; do
+    [[ -n "$name" ]] || continue
+    found=1
+    local state="stopped"
+    [[ " $running " == *" ge-$name "* ]] && state="running"
+    printf "%-14s %-9s %-7s %-7s %s\n" "$name" "$state" "$offset" "$api" "$frontend"
+  done < <(python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '$DEVENV_DIR')
+import ports
+devenv = Path('$DEVENV_DIR')
+import os
+bases = ports.resolve_bases(dict(os.environ))
+for name, offset in ports.list_instances(devenv):
+    p = ports.ports_for(offset, bases)
+    print(name, offset, p['API'], p['FRONTEND'])")
+  [[ $found -eq 1 ]] || echo "(no instances yet — devctl up)"
+}
+
+cmd_exec() {
+  # One entrypoint for running things inside the environment (issue api#283),
+  # so a coding agent's sandbox can allow `devctl exec` instead of every
+  # command that might ever need to run in a container:
+  #
+  #   devctl exec api pipenv run pytest
+  #   devctl exec --name alpha api pipenv run ruff check .
+  #
+  # --name is parsed here rather than globally because everything after the
+  # service name belongs to the command being run and must pass through
+  # untouched — including flags that happen to be spelled like ours.
+  while [[ "${1:-}" == "--name" ]]; do
+    [[ -n "${2:-}" ]] || die "--name needs an instance name"
+    set_instance "$2"
+    shift 2
+  done
+  resolve_ports read
+  local service="${1:-}"
+  shift || true
+  [[ -n "$service" && $# -gt 0 ]] ||
+    die "usage: devctl exec [--name <instance>] <service> <command>...
+        e.g. devctl exec api pipenv run pytest"
+
+  compose ps --status running "$service" 2>/dev/null | grep -q "$service" ||
+    die "service '$service' isn't running$(instance_label) — start it with: devctl up"
+
+  # A TTY when stdout is one (so pytest colorizes and ^C reaches the process),
+  # and -T when piped, where allocation would fail. PIPENV_VERBOSITY silences
+  # pipenv's "existing virtualenv" warning on every single call.
+  local tty=()
+  [[ -t 1 ]] || tty=(-T)
+  compose exec ${tty[@]+"${tty[@]}"} -e PIPENV_VERBOSITY=-1 "$service" "$@"
+}
+
+cmd_restart() {
+  # Recreate rather than `compose restart`, so a service picks up changed
+  # environment (a new ES key, a different live target) and not just changed
+  # code. --no-deps keeps it to the named services: restarting the api should
+  # not bounce Elasticsearch underneath everything else.
+  [[ $# -gt 0 ]] || die "usage: devctl restart <service>... (whole stack: devctl up)"
+  check_docker
+  resolve_live
+  export_api_es_env
+  compose up -d --no-deps --force-recreate "$@"
+  echo "devctl: restarted$(instance_label): $*"
 }
 
 usage() {
@@ -736,6 +1270,8 @@ Usage: devctl <command> [args]
                  --live-env stage|prod            which deployment (default stage)
                  --with-ingest                    also ingest live posts+likes
                  (--with-megastream / --with-jetstream for one half)
+                 --watch                          reload api/inference on edit
+                 --dedicated-es                   own Elasticsearch, not shared
   tunnel [env]   port-forward a deployed Elasticsearch, for --live es
   seed           load fixtures: rebase timestamps, ingest posts, load likes
   feed [feed]    view a hydrated feed in the terminal (default: your-feed;
@@ -743,9 +1279,21 @@ Usage: devctl <command> [args]
   login [did]    print a sign-in URL for the frontend as the seeded persona
   status         container status + index doc counts
   logs [svc...]  print recent logs and exit (-t follows instead)
+  exec <svc> ... run a command inside a service (e.g. exec api pipenv run pytest)
+  es <path>      query this instance's Elasticsearch (read-only key, e.g.
+                 devctl es /posts/_count)
+  restart <svc>  recreate one service, picking up code and config changes
+  ports [svc]    this instance's published ports (one number with a service)
+  ls             every instance on this machine, and whether it's running
   down           stop containers (data volumes survive)
   nuke           stop and delete everything (volumes, minted keys, seed state)
 
+Instances: --name <n> runs a second environment — its own containers, volumes
+and ports. It works on every command (devctl --name alpha up, then
+devctl --name alpha seed) and defaults to "dev". A named instance reads the
+default instance's Elasticsearch by default (it's the memory-hungry part), so
+it's read-only against that data — seed the owner, or pass --dedicated-es to
+give the instance its own cluster to seed.
 Fixtures: fetch-fixture downloads a published set; fixtures/generate_sample.py
 generates your own (two modes), fixtures/publish_fixture.sh publishes one.
 Models: fetch-models downloads the pinned release; models/publish_models.sh
@@ -761,6 +1309,17 @@ EOF
 
 cmd="${1:-}"
 [[ -n "$cmd" ]] && shift || true
+
+# Ports have to be known before most commands run, and `up` is the only one
+# allowed to claim a block: everywhere else, an instance that has no ports
+# recorded doesn't exist, and saying so beats acting on the wrong one.
+# `exec` resolves its own, after parsing the --name that may follow it.
+case "$cmd" in
+setup | fetch-fixture | fetch-models | ls | exec | "" | help | -h | --help) ;;
+up) ;; # allocates inside cmd_up, after its flags are parsed
+*) resolve_ports read ;;
+esac
+
 case "$cmd" in
 setup) cmd_setup "$@" ;;
 fetch-fixture) cmd_fetch_fixture "$@" ;;
@@ -772,9 +1331,21 @@ feed) cmd_feed "$@" ;;
 login) cmd_login "$@" ;;
 status | ps) cmd_status "$@" ;;
 logs) cmd_logs "$@" ;;
+exec) cmd_exec "$@" ;;
+es) cmd_es "$@" ;;
+restart) cmd_restart "$@" ;;
+ports) cmd_ports "$@" ;;
+ls | instances) cmd_ls "$@" ;;
 down)
+  # Stopping the owner leaves any sharer's api reading a cluster that's no
+  # longer there. Data survives (down keeps volumes), but say so.
+  if [[ "$INSTANCE" == "$ES_OWNER" ]]; then
+    sharers="$(sharers_of_owner)"
+    [[ -z "$sharers" ]] ||
+      echo "devctl: note — these instances read this one's Elasticsearch: $sharers" >&2
+  fi
   compose down
-  rm -f "$GE_DEV_REPO_ROOT/frontend/firebase.devenv.json"
+  rm -f "$GE_DEV_REPO_ROOT/frontend/$GE_DEV_FIREBASE_CONFIG"
   ;;
 nuke) cmd_nuke "$@" ;;
 "" | help | -h | --help) usage ;;

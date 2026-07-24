@@ -30,4 +30,9 @@ if [[ "${1:-}" == "--install-only" ]]; then
   exit 0
 fi
 
-exec pipenv run uvicorn app:app --host 0.0.0.0 --port 8000
+# --reload only under `devctl up --watch`. Off by default because a reload
+# here re-loads the TorchScript towers from disk, which takes seconds and
+# leaves the service failing readiness for the duration — an editor autosave
+# mid-request is a worse failure mode than restarting deliberately.
+exec pipenv run uvicorn app:app --host 0.0.0.0 --port 8000 \
+  ${GE_DEV_INFERENCE_RELOAD:+--reload}
