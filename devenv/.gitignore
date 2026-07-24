@@ -1,3 +1,5 @@
 .runtime/
 fixtures/data/
 devenv.local.env
+models/data/
+models/data.staging/

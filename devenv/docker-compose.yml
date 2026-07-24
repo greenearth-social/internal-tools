@@ -179,28 +179,62 @@ services:
       timeout: 5s
       retries: 24
 
-  # Milestone-1 stand-in for inference-service: answers the post-tower predict
-  # endpoint megastream_ingest requires, with deterministic pseudo-embeddings.
-  # Replaced by the real inference-service + published models in milestone 2
-  # (api#269).
-  inference-stub:
-    image: python:3.13-slim
-    command: ["python", "/stub/inference_stub.py"]
+  # The real inference-service, serving the real trained towers (issue api#269).
+  #
+  # Model artifacts come from `devctl fetch-models`, which downloads a published
+  # release into models/data/. The serving manifests in that bundle name local
+  # paths under /models, so this loads plain files — no GCS credentials, no
+  # ClearML account, no network.
+  #
+  # `devctl up --live inference` points the api at a deployed service instead
+  # and doesn't start this at all.
+  inference:
+    build:
+      context: ./images/pydev
+      args:
+        PYTHON_VERSION: "3.11"
+    working_dir: /srv
+    # See inference/start.sh — `devctl setup` runs the same script with
+    # --install-only to pre-warm the venv volume.
+    command: ["bash", "/inference/start.sh"]
     environment:
       - PYTHONUNBUFFERED=1
+      - GE_DEV_TORCH_VERSION=${GE_DEV_TORCH_VERSION:-2.5.1}
+      - PIPENV_VENV_IN_PROJECT=1
+      # As with the api: the checkout may carry a developer's own .env pointing
+      # at GCS artifacts and real projects. The compose environment wins.
+      - PIPENV_DONT_LOAD_ENV=1
       - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
+      # CPU only. The models run acceptably on CPU, and a CUDA torch build
+      # would be a multi-GB download for a laptop that can't use it.
+      - GE_INFERENCE_PREFER_CUDA=0
+      - GE_INFERENCE_WARMUP=0
+    env_file:
+      # Shipped inside the model bundle and generated from the artifacts
+      # themselves (see models/publish_models.sh), so the served dimensions
+      # can't drift from the weights. devctl guarantees this file exists.
+      - ./models/data/models.env
     volumes:
-      - ./inference-stub:/stub:ro
+      - ./inference:/inference:ro
+      - ${GE_DEV_REPO_ROOT:-../..}/inference-service:/srv
+      - ./models/data:/models:ro
+      - inference_venv:/srv/.venv
     healthcheck:
+      # /ready, not /health: /health answers before the towers are loaded, and
+      # starting the seed against a service that hasn't loaded them yet means
+      # posts get indexed with no embedding at all.
       test:
         [
           "CMD-SHELL",
-          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\"",
+          "python -c \"import urllib.request; urllib.request.urlopen(urllib.request.Request('http://localhost:8000/ready', headers={'X-API-Key': '${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}'}))\"",
         ]
       interval: 60s
-      start_period: 60s
-      start_interval: 1s
-      timeout: 5s
+      # Generous ceiling, not an expected wait: `devctl setup` normally has the
+      # venv volume warm, so this starts in seconds. It only matters when
+      # someone skips setup and the container installs torch itself.
+      start_period: 900s
+      start_interval: 2s
+      timeout: 10s
       retries: 24
 
   # Stands in for Google's Perspective API so the `perspective` ranker — and
@@ -235,12 +269,14 @@ services:
         set -e
         pipenv install --dev
         exec pipenv run uvicorn src.app.main:app --host 0.0.0.0 --port 8000 ${GE_DEV_API_RELOAD:+--reload}
+    # perspective-stub and inference are deliberately absent: either can be
+    # replaced by a deployed service (`devctl up --live`), and naming one here
+    # would start the local container anyway. devctl brings up whichever are
+    # local, waits for them to be healthy, and only then starts the api.
     depends_on:
       elasticsearch:
         condition: service_healthy
       firebase:
-        condition: service_healthy
-      perspective-stub:
         condition: service_healthy
     environment:
       - ENVIRONMENT=local
@@ -250,7 +286,15 @@ services:
       # real keys); pipenv would auto-load it and override this container
       # environment. The compose environment is authoritative here.
       - PIPENV_DONT_LOAD_ENV=1
-      - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
+      # Both overridable so the api can read a deployed cluster instead of the
+      # local one — see "Running against real services" in the README. devctl
+      # fills GE_DEV_ES_API_KEY from the key es-init minted unless
+      # devenv.local.env already set one, so these two always move together.
+      # (They have to live here rather than in env_file: an `environment` entry
+      # always wins over env_file, so there's no way to make the file the
+      # fallback.)
+      - GE_ELASTICSEARCH_URL=${GE_DEV_ES_URL:-http://elasticsearch:9200}
+      - GE_ELASTICSEARCH_API_KEY=${GE_DEV_ES_API_KEY:-}
       # Ports are the socat-bridged ones (see the firebase service). The
       # project id must match what the emulator runs as, or the api and the
       # frontend read and write different namespaces and the environment
@@ -267,28 +311,126 @@ services:
       # the AT Protocol JWT the real path needs. The api refuses to start with
       # this set in a deployed environment.
       - GE_DEV_SESSION_SECRET=${GE_DEV_SESSION_SECRET:-ge-dev-session}
-      - GE_INFERENCE_BASE_URL=http://inference-stub:8000
+      # devctl exports this; it differs from the default only in `external`
+      # mode, where it points somewhere this environment doesn't run.
+      - GE_INFERENCE_BASE_URL=${GE_DEV_INFERENCE_URL:-http://inference:8000}
       - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
       - GE_METRICS_EXPORT_INTERVAL_SEC=86400
       # The "your-feed" pipeline runs the `perspective` ranker, which calls
       # Google's Perspective API and hard-fails without a key. Default to the
       # local stub so the feed works out of the box; the key is then just a
-      # non-empty placeholder the client requires. To score against the real
-      # API instead, set both of these in devenv.local.env:
-      #   GE_DEV_PERSPECTIVE_HOST=https://commentanalyzer.googleapis.com
-      #   GE_PERSPECTIVE_API_KEY=<your real key>
+      # non-empty placeholder the client requires. `devctl up --live
+      # perspective` swaps in the real API (and needs a real key).
       - GE_PERSPECTIVE_HOST=${GE_DEV_PERSPECTIVE_HOST:-http://perspective-stub:8000}
       - GE_PERSPECTIVE_API_KEY=${GE_PERSPECTIVE_API_KEY:-ge-dev-perspective}
       - GE_TIMING_LOGS=${GE_DEV_TIMING_LOGS:-1}
     env_file:
-      # Written by es-init / seed; devctl guarantees they exist before `up`.
-      - ./.runtime/es_key_ro.env
+      # Written by seed; devctl guarantees it exists before `up`. The ES key
+      # deliberately isn't here — see GE_ELASTICSEARCH_API_KEY above.
       - ./.runtime/probe.env
     ports:
       - "127.0.0.1:${GE_DEV_PORT_API:-8300}:8000"
     volumes:
       - ${GE_DEV_REPO_ROOT:-../..}/api:/app
       - api_venv:/app/.venv
+
+  # Optional: real-time posts from the Megastream archives (issue api#269).
+  #
+  # The other half of live ingestion — jetstream-ingest below brings in likes,
+  # and likes for posts that never arrive aren't much use on their own.
+  # `devctl up --with-ingest` starts both.
+  #
+  # Unlike Jetstream, this isn't a public firehose: the archives live in an S3
+  # bucket that needs credentials, so devctl refuses to start it without them.
+  # Everything except the keys is defaulted to what prod reads.
+  megastream-ingest:
+    image: golang:1.25
+    profiles: ["megastream"]
+    working_dir: /src
+    # spool, not once: `once` drains what's there and exits, which is what the
+    # seed does. spool keeps polling for newly published archives.
+    command:
+      - "go"
+      - "run"
+      - "./cmd/megastream_ingest"
+      - "--source"
+      - "s3"
+      - "--mode"
+      - "spool"
+      - "--max-rewind"
+      - "${GE_DEV_MEGASTREAM_MAX_REWIND:-60}"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
+      # Each post gets embedded on the way in, exactly as at seed time, so
+      # posts arriving live are searchable by the same two_tower kNN query.
+      - GE_INFERENCE_BASE_URL=${GE_DEV_INFERENCE_URL:-http://inference:8000}
+      - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
+      - GE_AWS_REGION=${GE_DEV_AWS_REGION:-us-east-1}
+      - GE_AWS_S3_BUCKET=${GE_DEV_AWS_S3_BUCKET:-graze-mega-02}
+      - GE_AWS_S3_PREFIX=${GE_DEV_AWS_S3_PREFIX:-mega/}
+      - GE_AWS_S3_ACCESS_KEY=${GE_AWS_S3_ACCESS_KEY:-}
+      - GE_AWS_S3_SECRET_KEY=${GE_AWS_S3_SECRET_KEY:-}
+      # A *different* cursor file from seed-megastream's. Sharing one would mean
+      # a re-seed rewinds live ingestion, and live ingestion makes the next
+      # re-seed skip the fixture as already-processed.
+      - GE_MEGASTREAM_STATE_FILE=/runtime/seed/.megastream_live_state.json
+      - GE_INDEX_PERIOD=week
+    env_file:
+      - ./.runtime/es_key_rw.env
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/ingex/ingest:/src
+      - gomod:/go/pkg/mod
+      - gocache:/root/.cache/go-build
+      - ./.runtime:/runtime
+
+  # Optional: real-time likes from the public Jetstream firehose (issue api#269).
+  #
+  # Off by default and gated behind a profile, because it's the one service
+  # here that needs the internet and never finishes — everything else in this
+  # environment runs offline against the fixture. Useful when you're working on
+  # ingestion itself, or want the like graph to keep moving.
+  #
+  #   devctl up --with-jetstream
+  #   devctl logs -t jetstream-ingest
+  #
+  # It writes into the same `likes` index the seed loads, so it adds to the
+  # fixture rather than replacing it. Note that the posts those likes point at
+  # are mostly *not* in the local index: the firehose covers all of Bluesky,
+  # the fixture is a sample of it.
+  jetstream-ingest:
+    image: golang:1.25
+    profiles: ["jetstream"]
+    working_dir: /src
+    # --max-rewind caps how far back the cursor rewinds after downtime. Without
+    # it a container that sat stopped overnight tries to replay every like
+    # since, which is a lot of firehose for a laptop.
+    command:
+      - "go"
+      - "run"
+      - "./cmd/jetstream_ingest"
+      - "--max-rewind"
+      - "${GE_DEV_JETSTREAM_MAX_REWIND:-15}"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
+      - GE_JETSTREAM_URL=${GE_DEV_JETSTREAM_URL:-wss://jetstream2.us-east.bsky.network/subscribe}
+      - GE_JETSTREAM_STATE_FILE=/runtime/seed/.jetstream_state.json
+      # Matches seed-megastream. The binary's default is 10min, which is right
+      # for prod's ILM but would leave a dev container that ran overnight
+      # holding ~144 near-empty indices.
+      - GE_INDEX_PERIOD=week
+    env_file:
+      - ./.runtime/es_key_rw.env
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/ingex/ingest:/src
+      - gomod:/go/pkg/mod
+      - gocache:/root/.cache/go-build
+      - ./.runtime:/runtime
 
   # --- seed pipeline (one-shot, `docker compose run --rm <svc>`; devctl seed) ---
 
@@ -312,16 +454,17 @@ services:
     working_dir: /src
     command:
       ["go", "run", "./cmd/megastream_ingest", "--source", "local", "--mode", "once"]
+    # No depends_on for inference: in `external` mode there's no local service
+    # to depend on, and naming it here would start one anyway. devctl waits for
+    # the right service to report healthy before running the seed.
     depends_on:
       elasticsearch:
-        condition: service_healthy
-      inference-stub:
         condition: service_healthy
     environment:
       - GE_LOCAL_SQLITE_DB_PATH=/runtime/seed
       - GE_MEGASTREAM_STATE_FILE=/runtime/seed/.megastream_state.json
       - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
-      - GE_INFERENCE_BASE_URL=http://inference-stub:8000
+      - GE_INFERENCE_BASE_URL=${GE_DEV_INFERENCE_URL:-http://inference:8000}
       - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
       - GE_INDEX_PERIOD=week
     env_file:
@@ -368,6 +511,7 @@ services:
 volumes:
   esdata:
   api_venv:
+  inference_venv:
   gomod:
   gocache:
   # Kept out of the bind-mounted checkout so container installs (Linux
