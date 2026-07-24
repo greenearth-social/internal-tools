@@ -137,13 +137,12 @@ different `--live` target.
 
 ## Running more than one environment
 
-`--name` gives you a second, fully independent environment: its own containers,
-volumes, seeded Elasticsearch, minted keys and published ports. Two agents (or
-two branches) can then run at once without either noticing the other.
+`--name` gives you a second environment: its own containers, volumes, minted
+keys and published ports. Two agents (or two branches) can run at once without
+either noticing the other.
 
 ```bash
 ./devctl up --name featurework      # first use allocates a free port block
-./devctl --name featurework seed
 ./devctl --name featurework exec api pipenv run pytest
 ./devctl ports --name featurework   # what it got
 ./devctl ls                         # every instance, and whether it's running
@@ -157,36 +156,58 @@ Named instances take the next free block of ports: the first gets `+10` (api
 allocation is made once and remembered in the instance's runtime directory, so
 an instance's ports don't move between restarts.
 
-A named instance starts with an empty Elasticsearch, so it needs its own
-`devctl seed`. Budget real time for that: rebasing the fixture and embedding
-every post through that instance's inference service took **68 minutes** on a
-laptop that was already running the first instance. Start it and go do
-something else.
+### A named instance shares `dev`'s Elasticsearch
 
-**Memory is the real constraint.** Measured with `docker stats`, one seeded
-instance holds ~3GB — Elasticsearch ~1.9GB of it (a 1GB heap plus JVM
-overhead), then ~350MB for the Firebase emulators, ~250MB for inference, and
-~200MB across the api, frontend and stand-ins. Two instances therefore want
-~6GB steady and more during a seed.
+Elasticsearch is the expensive part — ~1.9GB of an instance's ~3GB, and an hour
+to seed. So a named instance doesn't run one. It reads the `dev` instance's
+cluster, which makes it cost about a gigabyte, start in ~90 seconds with no
+seed, and immediately see the same data. `devctl status`, `devctl es` and
+`devctl feed` on the named instance all report against `dev`'s cluster; it even
+borrows `dev`'s seeded persona, since it's serving `dev`'s data.
 
-Docker's default allocation on macOS is around 8GB, which is not enough: the
-symptom is the *first* instance's Elasticsearch being OOM-killed (exit 137)
-partway through the second one's seed, which looks like the environment
-breaking rather than like a memory limit. `devctl up` warns when the instance
-count outruns the memory Docker reports, and `devctl status` names any
-container the kernel killed. To actually run two:
+The catch is that a sharer is **read-only** against that data — enforced, the
+same way live mode is. `devctl seed`, `devctl up --with-ingest`, and anything
+else that would write refuse from a named instance and point you at `dev`:
 
-- give Docker ~12GB (Docker Desktop → Settings → Resources), or
-- put `GE_DEV_ES_HEAP=512m` in `devenv.local.env` before starting them.
+```bash
+./devctl up --name featurework      # ~90s, no ES, reads dev's data
+./devctl --name featurework feed    # works immediately
+./devctl seed                       # (re)seed the shared data on dev
+```
 
-`devctl ls` shows what's still running.
+This requires `dev` to be up and seeded — it owns the cluster. `devctl nuke`
+and `devctl down` on `dev` warn (nuke refuses) while any sharer still exists,
+so you don't pull the data out from under them.
 
-What's shared, and why:
+### When you need your own cluster
 
+`--dedicated-es` gives a named instance its own Elasticsearch, which is the
+point only when you're changing seeding or the index setup itself — a sharer
+can't exercise that. It then behaves like a fully independent environment: its
+own empty cluster to seed.
+
+```bash
+./devctl up --name schematest --dedicated-es
+./devctl --name schematest seed     # ~an hour; its own data, isolated
+```
+
+Now you're paying for a second Elasticsearch. Measured with `docker stats`, a
+dedicated instance holds ~3GB (ES ~1.9GB of it), so two want ~6GB steady and
+more during a seed. Docker's default allocation on macOS (~8GB) isn't enough:
+the symptom is one instance's ES being OOM-killed (exit 137) mid-seed, which
+looks like the environment breaking rather than a memory limit. `devctl up`
+warns when the number of *cluster-bearing* instances outruns the memory Docker
+reports (sharers don't count), and `devctl status` names any container the
+kernel killed. To actually run two clusters, give Docker ~12GB (Docker Desktop
+→ Settings → Resources) or set `GE_DEV_ES_HEAP=512m` in `devenv.local.env`.
+
+### What's shared, and why
+
+- **The `dev` cluster**, by default (above).
 - **Fixtures and models** — downloaded once, read-only, identical for everyone.
 - **The Go module and build caches** (`ge-dev-gomod`, `ge-dev-gocache`, ~2GB
   together). Content-addressed and safe for concurrent use, so sharing them
-  saves each new instance a full module download before it can seed. They're
+  saves a dedicated instance a full module download before it can seed. They're
   declared external, which means `devctl nuke --name x` leaves them alone.
 - **The frontend checkout**, unavoidably: `functions/lib` is compiled into it
   by whichever instance starts. `node_modules` is a per-instance volume, and
@@ -646,6 +667,10 @@ instance name, same as passing `--name`), `GE_DEV_API_RELOAD=1` /
   it by whichever instance starts, so two instances on two different frontend
   branches will overwrite each other's build. Everything that can be per
   instance is.
+- **A named instance shares `dev`'s Elasticsearch** (see [Running more than one
+  environment](#running-more-than-one-environment)), so it's read-only against
+  that data and depends on `dev` being up. `--dedicated-es` opts out at the
+  cost of a second cluster.
 - **`--name` is not remembered between commands.** Each invocation needs it
-  (`devctl --name x seed`); without it you act on the default instance. Set
+  (`devctl --name x exec ...`); without it you act on the default instance. Set
   `GE_DEV_INSTANCE` in your shell if you're staying in one for a while.

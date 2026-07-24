@@ -67,12 +67,10 @@ recompile on `devctl restart`.
 
 ## Working in parallel
 
-Two tasks at once get two instances. Each has its own containers, volumes,
-seeded data and ports, so neither can disturb the other:
+Two tasks at once get two instances, with their own containers and ports:
 
 ```bash
-devctl up --name featurework     # a second, independent environment
-devctl --name featurework seed
+devctl up --name featurework     # a second environment, ~90s
 devctl --name featurework exec api pipenv run pytest
 devctl ports --name featurework  # which ports this one got
 devctl nuke --name featurework   # destroys only this instance
@@ -80,16 +78,21 @@ devctl nuke --name featurework   # destroys only this instance
 
 `--name` applies to every command and defaults to `dev`. Forgetting it acts on
 the default instance, so prefer `devctl --name X <cmd>` consistently once you
-have one. A named instance is a fresh Elasticsearch: it needs its own `seed`,
-which takes upwards of an hour — start it and work on something else.
+have one.
 
-**Check memory before starting a second instance.** Each seeded instance holds
-~3GB, so two want ~6GB and Docker's default allocation is ~8GB. If it's tight,
-the first instance's Elasticsearch gets OOM-killed partway through the second's
-seed, which looks like the environment breaking. `devctl up` warns, and
-`devctl status` names any container the kernel killed. Don't leave unused
-instances running, and prefer one shared instance when the tasks don't actually
-conflict.
+A named instance **shares `dev`'s Elasticsearch** — that's the expensive part
+(~1.9GB and an hour to seed), so it isn't duplicated. This means:
+
+- It comes up fast and already sees `dev`'s data — no per-instance seed.
+- It is **read-only** against that data. `devctl seed` and `--with-ingest`
+  refuse from a named instance; seed `dev` instead.
+- `dev` must be up and seeded first. Don't `nuke` `dev` while named instances
+  exist (devctl refuses, but still).
+
+Only pass `devctl up --name X --dedicated-es` when the task is *about* seeding
+or the index setup and needs its own cluster to write to. That costs a second
+~3GB Elasticsearch; two clusters need ~12GB of Docker memory or a smaller
+`GE_DEV_ES_HEAP`, and `devctl up` warns when they won't fit. Otherwise share.
 
 ## Reading the data directly
 

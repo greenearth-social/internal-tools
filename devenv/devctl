@@ -94,13 +94,17 @@ INSTANCE_MEMORY_GB=3
 # very machine where that combination got an Elasticsearch OOM-killed.
 MEMORY_HEADROOM_GB=2
 
-# Starting a second instance on a machine that can't hold both doesn't fail
-# here — it gets the *first* instance's Elasticsearch OOM-killed some minutes
-# later, which reads as "the environment broke" with nothing pointing at the
-# cause. Warn rather than refuse: the estimate is approximate, and a smaller
-# heap or a machine with room makes it wrong in the safe direction.
+# Starting an instance on a machine that can't hold its Elasticsearch doesn't
+# fail here — it gets *another* instance's ES OOM-killed some minutes later,
+# which reads as "the environment broke" with nothing pointing at the cause.
+# Only clusters count: a sharing instance adds ~1GB, not a JVM, so the real
+# danger is two or more Elasticsearch-bearing instances at once. Warn rather
+# than refuse — the estimate is approximate, and a smaller heap makes it wrong
+# in the safe direction.
+#
+# Runs after the share decision, so share_es reflects this instance.
 check_memory_budget() {
-  local total_gb running
+  local total_gb running dir name bearers=0
   total_gb="$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0)"
   total_gb=$((total_gb / 1024 / 1024 / 1024))
   [[ "$total_gb" -gt 0 ]] || return 0
@@ -109,21 +113,32 @@ check_memory_budget() {
     python3 -c "
 import json, sys
 try:
-    print(sum(1 for p in json.load(sys.stdin) if p['Name'].startswith('ge-')))
+    print(' '.join(p['Name'] for p in json.load(sys.stdin)))
 except Exception:
-    print(0)" || echo 0)"
-  # This instance counts whether or not it's already up.
-  local instances=$((running + 1))
-  compose ps --status running -q 2>/dev/null | grep -q . && instances=$running
-  [[ "$instances" -gt 1 ]] || return 0
+    pass" 2>/dev/null || true)"
 
-  local needed=$((instances * INSTANCE_MEMORY_GB + MEMORY_HEADROOM_GB))
+  # Running instances that carry their own cluster (i.e. aren't sharers).
+  for dir in "$DEVENV_DIR"/.runtime "$DEVENV_DIR"/.runtime.*; do
+    [[ -d "$dir" ]] || continue
+    name="$(python3 -c "import ports,sys;from pathlib import Path;print(ports.instance_name(Path(sys.argv[1])))" "$dir")"
+    [[ " $running " == *" ge-$name "* ]] || continue
+    grep -q '^GE_DEV_SHARE_ES=1' "$dir/share.env" 2>/dev/null && continue
+    bearers=$((bearers + 1))
+  done
+  # Plus this instance if it bears a cluster and isn't already counted above.
+  if ! share_es && [[ " $running " != *" ge-$INSTANCE "* ]]; then
+    bearers=$((bearers + 1))
+  fi
+  [[ "$bearers" -gt 1 ]] || return 0
+
+  local needed=$((bearers * INSTANCE_MEMORY_GB + MEMORY_HEADROOM_GB))
   [[ "$needed" -gt "$total_gb" ]] || return 0
   cat >&2 <<EOF
-devctl: WARNING — $instances instances need roughly ${needed}GB, and Docker has
-        ${total_gb}GB. The usual symptom is another instance's Elasticsearch
-        being OOM-killed mid-run (exit 137), not a failure here. Either give
-        Docker more memory, put GE_DEV_ES_HEAP=512m in devenv.local.env, or
+devctl: WARNING — $bearers instances run their own Elasticsearch, needing roughly
+        ${needed}GB, and Docker has ${total_gb}GB. The usual symptom is one of
+        them being OOM-killed mid-run (exit 137), not a failure here. Give
+        Docker more memory, set GE_DEV_ES_HEAP=512m in devenv.local.env, share
+        a cluster (named instances do by default — drop --dedicated-es), or
         stop one: devctl ls
 EOF
 }
@@ -242,6 +257,92 @@ if [[ -f "$LIVE_STATE" ]]; then
 fi
 GE_DEV_LIVE="${GE_DEV_LIVE:-}"
 GE_DEV_LIVE_ENV="${GE_DEV_LIVE_ENV:-stage}"
+
+# --- shared Elasticsearch (issue api#283) ------------------------------------
+# Elasticsearch is ~1.9GB of an instance's ~3GB, so by default a *named*
+# instance doesn't run one — it reads the default instance's cluster. A second
+# environment then costs about a gigabyte instead of three, which is the
+# difference between "two fit" and "the first one's ES gets OOM-killed".
+#
+# The default instance ("dev") always owns a cluster. A named instance shares
+# it unless `--dedicated-es` asks for its own — the one case that needs it is
+# working on seeding or the index setup itself, since a sharer is read-only.
+#
+# Read-only is enforced the way live mode is: seed, nuke-of-data and live
+# ingest refuse from a sharing instance, naming the owner. The api only reads,
+# so it gets the owner's read-only key and reaches the cluster the same way
+# `--live es` reaches a deployed one — through the host, at the owner's port.
+ES_OWNER="dev"
+ES_OWNER_RUNTIME="$DEVENV_DIR/.runtime"
+SHARE_STATE="$RUNTIME/share.env"
+if [[ -f "$SHARE_STATE" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$SHARE_STATE"
+  set +a
+fi
+
+# True when this instance reads the owner's cluster instead of its own. The
+# owner never shares, whatever a stray GE_DEV_SHARE_ES in the environment says.
+share_es() { [[ "$INSTANCE" != "$ES_OWNER" && "${GE_DEV_SHARE_ES:-}" == "1" ]]; }
+
+# The owner's published ES port. Every instance's ES_PORT is base+offset, so
+# subtracting this instance's own offset lands on the base — the owner's port.
+owner_es_port() { echo "$((ES_PORT - GE_DEV_PORT_OFFSET))"; }
+
+owner_ro_key() {
+  sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$ES_OWNER_RUNTIME/es_key_ro.env"
+}
+
+record_share_choice() {
+  printf 'GE_DEV_SHARE_ES=%s\n' "${GE_DEV_SHARE_ES:-}" >"$SHARE_STATE"
+}
+
+# Point the api at the owner's cluster and serve the owner's persona (since it's
+# the owner's data). Reachable via host.docker.internal, exactly as a deployed
+# cluster is under `--live es`.
+resolve_shared_es() {
+  share_es || return 0
+  local key
+  key="$(owner_ro_key)"
+  [[ -n "$key" ]] || die "shared Elasticsearch needs the '$ES_OWNER' instance up first:
+        devctl up
+    Or give this instance its own cluster:
+        devctl up --name $INSTANCE --dedicated-es"
+  export GE_DEV_ES_API_KEY="$key"
+  export GE_DEV_ES_URL="http://host.docker.internal:$(owner_es_port)"
+  cp "$ES_OWNER_RUNTIME/probe.env" "$RUNTIME/probe.env" 2>/dev/null || true
+}
+
+# Reached from the host before the api depends on it, so an owner that isn't
+# running is a clear message here rather than a feed that 500s later.
+preflight_shared_es() {
+  share_es || return 0
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+    -H "Authorization: ApiKey ${GE_DEV_ES_API_KEY}" \
+    "http://127.0.0.1:$(owner_es_port)/_cluster/health" 2>/dev/null || true)"
+  case "$code" in
+  200) echo "devctl: sharing the '$ES_OWNER' instance's Elasticsearch (127.0.0.1:$(owner_es_port), read-only)" ;;
+  000) die "the '$ES_OWNER' instance's Elasticsearch isn't reachable on port $(owner_es_port).
+        Start it:              devctl up
+        Or run standalone:     devctl up --name $INSTANCE --dedicated-es" ;;
+  *) die "shared Elasticsearch returned HTTP $code from the '$ES_OWNER' instance" ;;
+  esac
+}
+
+# Named instances that read this instance's cluster — checked before nuking or
+# stopping the owner, whose volumes hold data they're serving.
+sharers_of_owner() {
+  local dir name out=""
+  for dir in "$DEVENV_DIR"/.runtime.*; do
+    [[ -d "$dir" ]] || continue
+    grep -q '^GE_DEV_SHARE_ES=1' "$dir/share.env" 2>/dev/null || continue
+    name="${dir##*/.runtime.}"
+    out+="$name "
+  done
+  echo "${out% }"
+}
 
 LIVE_SERVICES="es inference perspective"
 
@@ -460,10 +561,18 @@ check_model_fixture_compat() {
 es_curl() {
   local path="$1"
   shift
-  local key
-  key="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$RUNTIME/es_key_ro.env")"
-  [[ -n "$key" ]] || die "no ES key yet — run: devctl up"
-  curl -s -H "Authorization: ApiKey $key" "http://127.0.0.1:${ES_PORT}${path}" "$@"
+  local key port
+  if share_es; then
+    # A sharing instance has no cluster of its own; read the owner's.
+    key="$(owner_ro_key)"
+    port="$(owner_es_port)"
+    [[ -n "$key" ]] || die "shared Elasticsearch not available — the '$ES_OWNER' instance owns it: devctl up"
+  else
+    key="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$RUNTIME/es_key_ro.env")"
+    port="$ES_PORT"
+    [[ -n "$key" ]] || die "no ES key yet — run: devctl up$([[ "$INSTANCE" == "dev" ]] || echo " --name $INSTANCE")"
+  fi
+  curl -s -H "Authorization: ApiKey $key" "http://127.0.0.1:${port}${path}" "$@"
 }
 
 have_fixtures() {
@@ -601,7 +710,7 @@ cmd_setup() {
 }
 
 cmd_up() {
-  local jetstream=0 megastream=0
+  local jetstream=0 megastream=0 dedicated_es=0
   # Start from what's configured, not from what the last `up` recorded, so this
   # command fully determines the result.
   GE_DEV_LIVE="$LIVE_CONFIGURED"
@@ -610,6 +719,13 @@ cmd_up() {
     case "$1" in
     --with-jetstream)
       jetstream=1
+      shift
+      ;;
+    # Give this named instance its own Elasticsearch instead of reading the
+    # owner's. The reason to want it is a change to seeding or the index setup,
+    # which a sharer (read-only) can't exercise. Costs ~1.9GB more.
+    --dedicated-es)
+      dedicated_es=1
       shift
       ;;
     --with-megastream)
@@ -645,16 +761,36 @@ cmd_up() {
 
   check_docker
   check_repos
-  check_memory_budget
   resolve_ports allocate
   ensure_runtime
   resolve_live
   record_live_choice
 
+  # A named instance shares the owner's cluster by default; --dedicated-es or
+  # its own --live es opt out. `--live es` points somewhere else entirely, so
+  # there's nothing to share. Decided here and recorded, so seed/status/es on
+  # this instance all agree about where its data lives.
+  if [[ "$INSTANCE" != "$ES_OWNER" && $dedicated_es -eq 0 ]] && ! live_has es; then
+    export GE_DEV_SHARE_ES=1
+  else
+    export GE_DEV_SHARE_ES=""
+  fi
+  record_share_choice
+  check_memory_budget
+  resolve_shared_es
+
+  if share_es && { [[ $megastream -eq 1 || $jetstream -eq 1 ]]; }; then
+    die "live ingestion writes to Elasticsearch, but this instance shares the
+        '$ES_OWNER' instance's cluster (read-only here). Run ingest on the owner,
+        or give this one its own: devctl up --name $INSTANCE --dedicated-es"
+  fi
+
   # One list, built from what's staying local. A live service's container isn't
   # just skipped but stopped: it's still a defined service, so --remove-orphans
-  # leaves it running, and it would go on answering nothing.
-  local local_services=(elasticsearch firebase dev-auth)
+  # leaves it running, and it would go on answering nothing. A sharing instance
+  # runs no Elasticsearch at all — it reads the owner's.
+  local local_services=(firebase dev-auth)
+  share_es || local_services+=(elasticsearch)
   local svc
   for svc in inference perspective-stub; do
     local name="${svc%-stub}"
@@ -688,15 +824,31 @@ cmd_up() {
   # --wait because the api no longer depends_on the swappable ones, so this is
   # what guarantees they're serving before it starts.
   compose up -d --remove-orphans --wait "${local_services[@]}"
-  echo "devctl: initializing Elasticsearch (templates, indexes, API keys)..."
-  compose run --rm es-init
-  export_api_es_env
-  compose up -d api frontend
+  # A sharing instance runs no cluster of its own, so there's nothing to
+  # initialize and the api's key is the owner's (already exported). Its api
+  # also can't `depends_on: elasticsearch` — that service isn't started here —
+  # so start it without deps; the things it truly needs (firebase) are up.
+  local api_up=(compose up -d)
+  if share_es; then
+    preflight_shared_es
+    api_up+=(--no-deps)
+  else
+    echo "devctl: initializing Elasticsearch (templates, indexes, API keys)..."
+    compose run --rm es-init
+    export_api_es_env
+  fi
+  "${api_up[@]}" api frontend
   cat <<EOF
 devctl: environment is up$(instance_label).
   frontend      http://127.0.0.1:${FRONTEND_PORT}    (first start installs deps; watch: devctl logs -t frontend)
   api           http://127.0.0.1:${API_PORT}    (first start installs deps; watch: devctl logs -t api)
-  elasticsearch http://127.0.0.1:${ES_PORT}    (user elastic / ${GE_DEV_ES_PASSWORD:-ge-dev-elastic})
+EOF
+  if share_es; then
+    echo "  elasticsearch shared from '$ES_OWNER' (127.0.0.1:$(owner_es_port))    read-only here"
+  else
+    echo "  elasticsearch http://127.0.0.1:${ES_PORT}    (user elastic / ${GE_DEV_ES_PASSWORD:-ge-dev-elastic})"
+  fi
+  cat <<EOF
   firestore     127.0.0.1:${FIRESTORE_PORT}    (emulator, from the frontend checkout)
   firebase auth 127.0.0.1:${AUTH_PORT}
   functions     127.0.0.1:${FUNCTIONS_PORT}
@@ -726,11 +878,15 @@ EOF
     echo "  ** instance '$INSTANCE' — every other devctl command needs --name $INSTANCE"
   fi
   # The posts alias doesn't exist until the first seed (the ingest binary
-  # creates it, as in prod) — treat a missing alias like an empty index.
+  # creates it, as in prod) — treat a missing alias like an empty index. A
+  # sharer can't seed, so an empty owner is the owner's problem, not a prompt
+  # to run something here.
   local post_count
   post_count="$(es_curl /posts/_count | sed -n 's/.*"count":\([0-9]*\).*/\1/p')"
   if [[ -z "$post_count" || "$post_count" == "0" ]]; then
-    if have_fixtures; then
+    if share_es; then
+      echo "The shared '$ES_OWNER' cluster has no posts yet — seed it: devctl seed"
+    elif have_fixtures; then
       echo "Elasticsearch is empty — run: devctl seed"
     else
       fixtures_hint
@@ -741,6 +897,14 @@ EOF
 cmd_seed() {
   check_docker
   ensure_runtime
+  # A sharing instance has no cluster of its own and only a read-only key to
+  # the owner's, so there is nothing here it may seed. Point at the owner
+  # rather than fail obscurely on a missing key.
+  if share_es; then
+    die "this instance shares the '$ES_OWNER' instance's Elasticsearch, which is read-only here.
+        Seed the owner:                 devctl seed$([[ "$ES_OWNER" == "dev" ]] || echo " --name $ES_OWNER")
+        Or give this one its own:       devctl up --name $INSTANCE --dedicated-es, then devctl --name $INSTANCE seed"
+  fi
   have_fixtures || { fixtures_hint; exit 1; }
   local rw_key
   rw_key="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$RUNTIME/es_key_rw.env")"
@@ -911,9 +1075,11 @@ cmd_status() {
   # rather than anything about the service. `compose ps` shows the exit code
   # but not what it implies, and a stopped Elasticsearch is the version of
   # this environment failing that looks least like a memory problem.
+  # `|| true`: with no killed container grep exits 1, which under `set -e`
+  # would abort status before it prints the doc counts below.
   local killed
   killed="$(compose ps -a --format '{{.Service}} {{.Status}}' 2>/dev/null |
-    grep "Exited (137)" | awk '{print $1}' | tr '\n' ' ')"
+    { grep "Exited (137)" || true; } | awk '{print $1}' | tr '\n' ' ')"
   if [[ -n "$killed" ]]; then
     echo
     local restart="devctl up"
@@ -922,7 +1088,10 @@ cmd_status() {
     echo "   restart with: $restart   (running instances: devctl ls)" >&2
   fi
   echo
-  if [[ -s "$RUNTIME/es_key_ro.env" ]]; then
+  if share_es; then
+    echo "elasticsearch shared from '$ES_OWNER':"
+  fi
+  if share_es || [[ -s "$RUNTIME/es_key_ro.env" ]]; then
     local alias
     for alias in posts likes inferences; do
       printf "%-12s %s docs\n" "$alias" \
@@ -932,6 +1101,19 @@ cmd_status() {
 }
 
 cmd_nuke() {
+  # The owner's cluster holds the data every sharer is serving, so destroying
+  # it out from under them would look like several environments breaking at
+  # once. Refuse while any sharer's runtime is still on disk; GE_DEV_FORCE_NUKE
+  # is the escape hatch for when that's genuinely the intent.
+  if [[ "$INSTANCE" == "$ES_OWNER" && -z "${GE_DEV_FORCE_NUKE:-}" ]]; then
+    local sharers
+    sharers="$(sharers_of_owner)"
+    [[ -z "$sharers" ]] || die "these instances share this one's Elasticsearch: $sharers
+        Nuking it takes their data with it. Either nuke them first
+        (devctl nuke --name <name>), give each its own cluster
+        (devctl up --name <name> --dedicated-es), or force it:
+        GE_DEV_FORCE_NUKE=1 devctl nuke"
+  fi
   compose down -v --remove-orphans
   # Volumes are namespaced by compose project, and the runtime directory and
   # derived Firebase config are named after the instance — so this destroys
@@ -1089,6 +1271,7 @@ Usage: devctl <command> [args]
                  --with-ingest                    also ingest live posts+likes
                  (--with-megastream / --with-jetstream for one half)
                  --watch                          reload api/inference on edit
+                 --dedicated-es                   own Elasticsearch, not shared
   tunnel [env]   port-forward a deployed Elasticsearch, for --live es
   seed           load fixtures: rebase timestamps, ingest posts, load likes
   feed [feed]    view a hydrated feed in the terminal (default: your-feed;
@@ -1105,9 +1288,12 @@ Usage: devctl <command> [args]
   down           stop containers (data volumes survive)
   nuke           stop and delete everything (volumes, minted keys, seed state)
 
-Instances: --name <n> runs a second, independent environment — its own
-containers, volumes, seeded data and ports. It works on every command
-(devctl --name alpha up, then devctl --name alpha seed) and defaults to "dev".
+Instances: --name <n> runs a second environment — its own containers, volumes
+and ports. It works on every command (devctl --name alpha up, then
+devctl --name alpha seed) and defaults to "dev". A named instance reads the
+default instance's Elasticsearch by default (it's the memory-hungry part), so
+it's read-only against that data — seed the owner, or pass --dedicated-es to
+give the instance its own cluster to seed.
 Fixtures: fetch-fixture downloads a published set; fixtures/generate_sample.py
 generates your own (two modes), fixtures/publish_fixture.sh publishes one.
 Models: fetch-models downloads the pinned release; models/publish_models.sh
@@ -1151,6 +1337,13 @@ restart) cmd_restart "$@" ;;
 ports) cmd_ports "$@" ;;
 ls | instances) cmd_ls "$@" ;;
 down)
+  # Stopping the owner leaves any sharer's api reading a cluster that's no
+  # longer there. Data survives (down keeps volumes), but say so.
+  if [[ "$INSTANCE" == "$ES_OWNER" ]]; then
+    sharers="$(sharers_of_owner)"
+    [[ -z "$sharers" ]] ||
+      echo "devctl: note — these instances read this one's Elasticsearch: $sharers" >&2
+  fi
   compose down
   rm -f "$GE_DEV_REPO_ROOT/frontend/$GE_DEV_FIREBASE_CONFIG"
   ;;
