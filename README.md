@@ -1,86 +1,50 @@
 # internal-tools
 
-Internal tools for GreenEarth.
+Internal tooling for GreenEarth. Two self-contained subprojects live here, each
+with its own README:
 
-## Velocity & backlog projection
+## [`devenv/`](devenv/README.md) — local dev environment
 
-Pivotal-Tracker-style velocity tracking and backlog projection for GitHub
-Project [#2](https://github.com/orgs/greenearth-social/projects/2/views/3). See
-issue [#1](https://github.com/greenearth-social/internal-tools/issues/1).
-
-- `velocity/` — tested library. All computation lives here:
-  - `points.py` — point/type normalization (blank type → feature, bugs → 0
-    points, unpointed → 2 points).
-  - `velocity.py` — weekly completed points and the 3-week velocity average.
-  - `burndown.py` — completion history, forward burndown projection, and which
-    week each backlog task is projected to finish.
-  - `github_project.py` — the only I/O: fetches project items via `gh api
-    graphql`.
-- `notebooks/velocity.ipynb` — presentation only (charts + projection table).
-
-### Setup
+The whole Green Earth stack on your laptop (or a remote host): Elasticsearch
+seeded with a real Bluesky sample, the api, inference-service serving the
+trained towers, the Firebase emulators, and the frontend — no credentials
+needed. Everything runs through one wrapper, `devctl`.
 
 ```bash
-pipenv install --dev
-
-# One-time: the gh CLI needs the project scope to read Projects v2 data.
-gh auth refresh -s read:project
+cd devenv
+./devctl bootstrap     # first time: images, models, sample data, start, seed
+./devctl feed          # render a ranked feed in the terminal
 ```
 
-The library shells out to the `gh` CLI, so `gh` must be installed and
-authenticated.
+- [`devenv/README.md`](devenv/README.md) — how it works: fixtures, models,
+  seeding, auth, live services, tunnels.
+- [`devenv/docs/`](devenv/docs/) — task guides: `onboarding.md` (fresh-machine
+  walkthrough), `troubleshooting.md`, `agents.md` (using it as a coding-agent
+  sandbox), `remote.md` (running it on another host), `runbooks.md`
+  (regenerating fixtures/models).
 
-### Run the tests
+## [`velocity/`](velocity/README.md) — velocity & backlog projection
 
-```bash
-pipenv run pytest
-```
-
-Tests are co-located with the source (`*_test.py`) and run entirely on fixture
-data — no network access required.
-
-### Run the notebook
+Pivotal-Tracker-style velocity tracking and backlog projection for our GitHub
+Project: a tested library plus a presentation notebook.
 
 ```bash
+cd velocity
+pipenv run pytest velocity              # the library's tests
 pipenv run jupyter notebook notebooks/velocity.ipynb
 ```
 
-The notebook has `%autoreload 2` at the top, so edits to the `velocity` library
-are picked up on the next cell run without restarting the kernel.
+See [`velocity/README.md`](velocity/README.md) for setup, assumptions, and how
+the projection is computed.
 
-### Editing the notebook
+## Shared Python setup
 
-Keep logic in the `velocity/` library (it's unit-tested); the notebook should
-stay presentation-only. To verify a change headlessly without a running kernel:
+Both subprojects share one `pipenv` environment defined at the repo root
+(`Pipfile`, `pyproject.toml`). Install it once, from anywhere in the repo:
 
 ```bash
-pipenv run jupyter nbconvert --to notebook --execute \
-  --output /tmp/velocity-check.ipynb notebooks/velocity.ipynb
+pipenv install --dev
 ```
 
-Note that `gh` colorizes JSON when it detects a color-forcing environment (some
-Jupyter kernels set `CLICOLOR_FORCE`), which would break parsing — the fetcher
-in `github_project.py` forces color off to avoid this.
-
-### Assumptions
-
-- A task is completed when its Status is `Done`; the week it counts toward is
-  taken from the underlying issue's `closedAt` timestamp. Tasks closed as "not
-  planned" (wontfix) or "duplicate" are excluded — they delivered no work, so
-  their points don't count toward velocity.
-- Points come from the project's single-select `Points` field (Fibonacci
-  options). A task's type is GitHub's native issue type (e.g. `Bug`); items with
-  no issue type are treated as features.
-- Velocity is the average completed points over the last 3 completed weeks (the
-  current partial week is excluded).
-- The backlog matches the **Backlog - Unified** view (project view #13): every
-  item whose Status is `Backlog`, `In Progress`, `In Review`, or `On Hold`,
-  across all repos.
-- Backlog items are read in the GraphQL API's board order, which is treated as
-  priority order. Per-view (view #13) custom sorting is not exposed by the API.
-- Titles containing a release-marker emoji (🚀 rocket, ✅/✔/☑ check, or 🚢/🛳
-  ship) are **release markers**, not tasks: they carry 0 points and are excluded
-  from the task list. Each marker's projected release date comes from its
-  position in the backlog (when all higher-priority work is projected to finish)
-  and is shown as a vertical line on the burndown plus a row in the release
-  table.
+`pyproject.toml` also holds the shared ruff and pyright config; `pipenv run
+pytest` from the root runs both subprojects' test suites.
