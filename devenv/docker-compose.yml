@@ -24,7 +24,7 @@ services:
       - cluster.routing.allocation.disk.watermark.high=97%
       - cluster.routing.allocation.disk.watermark.flood_stage=98%
     ports:
-      - "127.0.0.1:${GE_DEV_PORT_ES:-9201}:9200"
+      - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_ES:-9201}:9200"
     volumes:
       - esdata:/usr/share/elasticsearch/data
     healthcheck:
@@ -92,13 +92,13 @@ services:
       - BLUESKY_OAUTH_PUBLIC_JWKS=${BLUESKY_OAUTH_PUBLIC_JWKS:-}
       - OAUTH_STATE_ENCRYPTION_KEY=${OAUTH_STATE_ENCRYPTION_KEY:-}
     ports:
-      - "127.0.0.1:${GE_DEV_PORT_FIRESTORE:-8080}:18080"
-      - "127.0.0.1:${GE_DEV_PORT_FIREBASE_AUTH:-9099}:19099"
-      - "127.0.0.1:${GE_DEV_PORT_FUNCTIONS:-5001}:15001"
-      - "127.0.0.1:${GE_DEV_PORT_FIREBASE_UI:-4000}:14000"
+      - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_FIRESTORE:-8080}:18080"
+      - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_FIREBASE_AUTH:-9099}:19099"
+      - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_FUNCTIONS:-5001}:15001"
+      - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_FIREBASE_UI:-4000}:14000"
       # The UI loads from 4000 but its Firestore viewer opens a
       # websocket straight to 9150, so that has to be reachable too.
-      - "127.0.0.1:${GE_DEV_PORT_FIREBASE_UI_WS:-9150}:19150"
+      - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_FIREBASE_UI_WS:-9150}:19150"
     volumes:
       - ./firebase:/firebase:ro
       - ${GE_DEV_REPO_ROOT:-../..}/frontend:/frontend
@@ -161,7 +161,7 @@ services:
       - VITE_FIREBASE_MESSAGING_SENDER_ID=${GE_DEV_FIREBASE_SENDER_ID:-0}
       - VITE_ALLOWED_HOSTS=${GE_DEV_FRONTEND_ALLOWED_HOSTS:-localhost}
     ports:
-      - "127.0.0.1:${GE_DEV_PORT_FRONTEND:-3000}:3000"
+      - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_FRONTEND:-3000}:3000"
     volumes:
       - ${GE_DEV_REPO_ROOT:-../..}/frontend:/frontend
       - frontend_node_modules:/frontend/node_modules
@@ -345,8 +345,15 @@ services:
       # Written by seed; devctl guarantees it exists before `up`. The ES key
       # deliberately isn't here — see GE_ELASTICSEARCH_API_KEY above.
       - ${GE_DEV_RUNTIME:-./.runtime}/probe.env
+    # host.docker.internal is how the api reaches an Elasticsearch outside its
+    # own project — the owner's cluster when this instance shares one, or the
+    # `devctl tunnel` listener under --live es. Docker Desktop provides the
+    # name; native Linux (a remote host, say) only gets it from this mapping,
+    # which is a no-op where the name already resolves.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - "127.0.0.1:${GE_DEV_PORT_API:-8300}:8000"
+      - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_API:-8300}:8000"
     volumes:
       - ${GE_DEV_REPO_ROOT:-../..}/api:/app
       - api_venv:/app/.venv

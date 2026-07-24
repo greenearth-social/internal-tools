@@ -109,18 +109,12 @@ check_memory_budget() {
   total_gb=$((total_gb / 1024 / 1024 / 1024))
   [[ "$total_gb" -gt 0 ]] || return 0
 
-  running="$(docker compose ls --format json 2>/dev/null |
-    python3 -c "
-import json, sys
-try:
-    print(' '.join(p['Name'] for p in json.load(sys.stdin)))
-except Exception:
-    pass" 2>/dev/null || true)"
+  running="$(running_projects)"
 
   # Running instances that carry their own cluster (i.e. aren't sharers).
   for dir in "$DEVENV_DIR"/.runtime "$DEVENV_DIR"/.runtime.*; do
     [[ -d "$dir" ]] || continue
-    name="$(python3 -c "import ports,sys;from pathlib import Path;print(ports.instance_name(Path(sys.argv[1])))" "$dir")"
+    name="$(runtime_instance "$dir")"
     [[ " $running " == *" ge-$name "* ]] || continue
     grep -q '^GE_DEV_SHARE_ES=1' "$dir/share.env" 2>/dev/null && continue
     bearers=$((bearers + 1))
@@ -189,6 +183,58 @@ MODELS_TAG="${GE_DEV_MODELS_TAG:-models-1bf1ea3c-177899dd}"
 
 compose() {
   docker compose -f "$DEVENV_DIR/docker-compose.yml" --project-directory "$DEVENV_DIR" "$@"
+}
+
+# --- helpers shared across commands ----------------------------------------
+
+# The value of one KEY=value line in a runtime env file, or nothing.
+env_file_value() {
+  sed -n "s/^$2=//p" "$1" 2>/dev/null
+}
+
+# " --name <n>" when a hint needs the flag spelled out; empty on the default
+# instance, whose commands work bare.
+name_flag() {
+  [[ "$INSTANCE" == "dev" ]] || echo " --name $INSTANCE"
+}
+
+service_running() {
+  compose ps --status running "$1" 2>/dev/null | grep -q "$1"
+}
+
+# compose exec with a TTY when stdout is one (so pytest and rich colorize and
+# ^C reaches the process) and -T when piped, where allocation would fail.
+# PIPENV_VERBOSITY silences pipenv's "existing virtualenv" warning per call.
+# The "${arr[@]+...}" guard keeps an empty array from tripping `set -u` on
+# macOS's bash 3.2.
+compose_exec() {
+  local tty=()
+  [[ -t 1 ]] || tty=(-T)
+  compose exec ${tty[@]+"${tty[@]}"} -e PIPENV_VERBOSITY=-1 "$@"
+}
+
+# The compose projects docker reports as running ("ge-dev ge-alpha ...").
+running_projects() {
+  docker compose ls --format json 2>/dev/null |
+    python3 -c "
+import json, sys
+try:
+    print(' '.join(p['Name'] for p in json.load(sys.stdin)))
+except Exception:
+    pass" 2>/dev/null || true
+}
+
+# Instance name from a runtime directory path (.runtime -> dev). The inverse
+# lives in ports.py as instance_name; this saves a python startup per call.
+runtime_instance() {
+  local base="${1##*/}"
+  if [[ "$base" == ".runtime" ]]; then echo "dev"; else echo "${base#.runtime.}"; fi
+}
+
+# "Next: ..." guidance, suppressed inside bootstrap, where the next step is
+# about to run anyway and a printed suggestion mid-stream reads as a request.
+hint() {
+  [[ -n "${IN_BOOTSTRAP:-}" ]] || echo "$*"
 }
 
 # ---------------------------------------------------------------------------
@@ -298,7 +344,7 @@ share_es() { [[ "$INSTANCE" != "$ES_OWNER" && "${GE_DEV_SHARE_ES:-}" == "1" ]]; 
 owner_es_port() { echo "$((ES_PORT - GE_DEV_PORT_OFFSET))"; }
 
 owner_ro_key() {
-  sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$ES_OWNER_RUNTIME/es_key_ro.env"
+  env_file_value "$ES_OWNER_RUNTIME/es_key_ro.env" GE_ELASTICSEARCH_API_KEY
 }
 
 record_share_choice() {
@@ -349,6 +395,45 @@ sharers_of_owner() {
     out+="$name "
   done
   echo "${out% }"
+}
+
+# --- seed staleness ---------------------------------------------------------
+# The rebase leaves the fixture window ending an hour before seed time, and
+# the api's popularity generator only looks back 24h (RECENCY_WINDOW) — so
+# from ~23 hours after a seed, recency-anchored feeds (popularity, your-feed)
+# come back thin or empty with nothing visibly wrong. That's the single most
+# misleading failure this environment has, so it's warned about wherever the
+# symptom would otherwise surface.
+STALE_SEED_HOURS=23
+
+# Where this instance's data was seeded: a sharer serves the owner's data, so
+# its staleness is the owner's.
+seed_runtime() {
+  if share_es; then echo "$ES_OWNER_RUNTIME"; else echo "$RUNTIME"; fi
+}
+
+# Hours since the last seed; nothing if never seeded (or seeded before this
+# was recorded).
+seed_age_hours() {
+  local seeded
+  seeded="$(env_file_value "$(seed_runtime)/seed.env" GE_DEV_SEEDED_AT)"
+  [[ -n "$seeded" ]] || return 0
+  echo $((($(date +%s) - seeded) / 3600))
+}
+
+warn_stale_seed() {
+  local age
+  age="$(seed_age_hours)"
+  [[ -n "$age" && "$age" -ge "$STALE_SEED_HOURS" ]] || return 0
+  local target="devctl seed"
+  if share_es; then
+    target="devctl seed   (on the '$ES_OWNER' instance, which owns the data)"
+  fi
+  cat >&2 <<EOF
+devctl: the data was seeded ${age}h ago and has drifted out of the api's 24h
+        recency window — recency-anchored feeds come back thin or empty from
+        here. Re-seed: $target
+EOF
 }
 
 LIVE_SERVICES="es inference perspective"
@@ -525,11 +610,9 @@ PY
 # fallback). That makes supplying the local key devctl's job.
 export_api_es_env() {
   if [[ -z "${GE_DEV_ES_API_KEY:-}" ]]; then
-    GE_DEV_ES_API_KEY="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' \
-      "$RUNTIME/es_key_ro.env")"
+    GE_DEV_ES_API_KEY="$(env_file_value "$RUNTIME/es_key_ro.env" GE_ELASTICSEARCH_API_KEY)"
     [[ -n "$GE_DEV_ES_API_KEY" ]] ||
-      die "no Elasticsearch key in $GE_DEV_RUNTIME/es_key_ro.env — run: devctl up$(
-        [[ "$INSTANCE" == dev ]] || echo " --name $INSTANCE")"
+      die "no Elasticsearch key in $GE_DEV_RUNTIME/es_key_ro.env — run: devctl up$(name_flag)"
   fi
   export GE_DEV_ES_API_KEY
 }
@@ -575,9 +658,9 @@ es_curl() {
     port="$(owner_es_port)"
     [[ -n "$key" ]] || die "shared Elasticsearch not available — the '$ES_OWNER' instance owns it: devctl up"
   else
-    key="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$RUNTIME/es_key_ro.env")"
+    key="$(env_file_value "$RUNTIME/es_key_ro.env" GE_ELASTICSEARCH_API_KEY)"
     port="$ES_PORT"
-    [[ -n "$key" ]] || die "no ES key yet — run: devctl up$([[ "$INSTANCE" == "dev" ]] || echo " --name $INSTANCE")"
+    [[ -n "$key" ]] || die "no ES key yet — run: devctl up$(name_flag)"
   fi
   curl -s -H "Authorization: ApiKey $key" "http://127.0.0.1:${port}${path}" "$@"
 }
@@ -669,7 +752,7 @@ c = m["counts"]
 print(f"devctl: fetched {c['posts']:,} posts / {c['likes']:,} likes "
       f"(window ends {m['window_end']}, source {m['source']})")
 PY
-  echo "Next: devctl up && devctl seed"
+  hint "Next: devctl up && devctl seed"
 }
 
 cmd_fetch_models() {
@@ -688,7 +771,7 @@ print(f"devctl: fetched models {m['tag']} — {m['content_embedding_model']} "
       f"({m['content_embedding_dims']}d) in, {m['output_embedding_dim']}d out")
 PY
   check_model_fixture_compat
-  echo "Next: devctl up && devctl seed"
+  hint "Next: devctl up && devctl seed"
 }
 
 # ---------------------------------------------------------------------------
@@ -712,8 +795,33 @@ cmd_setup() {
     die "failed to install inference-service dependencies"
 
   echo "devctl: setup complete."
-  have_fixtures || fixtures_hint
-  echo "Next: devctl up && devctl seed"
+  [[ -n "${IN_BOOTSTRAP:-}" ]] || have_fixtures || fixtures_hint
+  hint "Next: devctl up && devctl seed"
+}
+
+cmd_bootstrap() {
+  # Fresh clone to working, seeded environment in one command (issue api#284):
+  # setup, fetch the fixture, start the stack, seed it. Each step skips work
+  # that's already done, so an interrupted bootstrap resumes where it left off
+  # rather than starting over. Extra flags pass through to `up`.
+  IN_BOOTSTRAP=1
+  cmd_setup
+  have_fixtures || cmd_fetch_fixture
+  cmd_up "$@"
+  if share_es; then
+    echo "devctl: bootstrap complete$(instance_label) — serving the '$ES_OWNER' instance's data."
+  else
+    local posts
+    posts="$(es_curl /posts/_count | sed -n 's/.*"count":\([0-9]*\).*/\1/p')"
+    if [[ -z "$posts" || "$posts" == "0" ]]; then
+      cmd_seed
+    else
+      echo "devctl: already seeded ($posts posts) — a fresh load is: devctl seed"
+    fi
+    echo "devctl: bootstrap complete$(instance_label)."
+  fi
+  echo "Try it:  devctl feed$(name_flag)     (a ranked feed, in the terminal)"
+  echo "         open http://127.0.0.1:${FRONTEND_PORT}"
 }
 
 cmd_up() {
@@ -914,7 +1022,7 @@ cmd_seed() {
   fi
   have_fixtures || { fixtures_hint; exit 1; }
   local rw_key
-  rw_key="$(sed -n 's/^GE_ELASTICSEARCH_API_KEY=//p' "$RUNTIME/es_key_rw.env")"
+  rw_key="$(env_file_value "$RUNTIME/es_key_rw.env" GE_ELASTICSEARCH_API_KEY)"
   [[ -n "$rw_key" ]] || die "no ES key yet — run: devctl up"
   check_model_fixture_compat
 
@@ -948,12 +1056,15 @@ cmd_seed() {
   compose run --rm seed-megastream
   echo "devctl: loading likes and like counts..."
   compose run --rm seed-likes
+  # status/feed/doctor compare against this to warn when the window drifts
+  # out of the api's recency windows.
+  printf 'GE_DEV_SEEDED_AT=%s\n' "$(date +%s)" >"$RUNTIME/seed.env"
   local persona api_running=0
-  persona="$(sed -n 's/^GE_PROBE_USER_DID=//p' "$RUNTIME/probe.env")"
+  persona="$(env_file_value "$RUNTIME/probe.env" GE_PROBE_USER_DID)"
   # Restart the api so it picks up the new persona from .runtime/probe.env —
   # but only if it was already running, so `seed` never starts a service the
   # developer deliberately stopped.
-  if compose ps --status running api | grep -q api; then
+  if service_running api; then
     export_api_es_env
     compose up -d --force-recreate api
     api_running=1
@@ -983,16 +1094,11 @@ cmd_feed() {
   #
   # All arguments pass through to scripts/feed_view.py (feed defaults to
   # your-feed). See feed_view.py --help for the full flag set.
-  compose ps --status running api | grep -q api ||
-    die "the api isn't running — start it with: devctl up"
-  # Give the viewer a TTY when stdout is a terminal so rich colorizes; drop it
-  # (-T) when piped or redirected, where TTY allocation would fail. The
-  # "${arr[@]+...}" guard keeps an empty array from tripping `set -u` on
-  # macOS's bash 3.2.
-  local tty=()
-  [[ -t 1 ]] || tty=(-T)
-  compose exec ${tty[@]+"${tty[@]}"} -e PIPENV_VERBOSITY=-1 api \
-    pipenv run python scripts/feed_view.py "$@"
+  service_running api ||
+    die "the api isn't running — start it with: devctl up$(name_flag)"
+  # The symptom of a stale seed is exactly this command coming back empty.
+  warn_stale_seed
+  compose_exec api pipenv run python scripts/feed_view.py "$@"
 }
 
 cmd_tunnel() {
@@ -1013,8 +1119,13 @@ cmd_tunnel() {
 
   echo "devctl: tunneling $ns/$svc to localhost:$port (ctrl-c to stop)"
   echo "        then, in another shell: devctl up --live es --live-env $env"
+  # The listener must be reachable from containers, which name the host as
+  # host.docker.internal. Docker Desktop routes that to loopback, so the
+  # default is fine there; on native Linux it's the bridge gateway, so the
+  # tunnel has to listen wider: GE_DEV_ES_TUNNEL_BIND=0.0.0.0 (docs/remote.md).
   while true; do
-    kubectl port-forward "$svc" "${port}:9200" -n "$ns" || true
+    kubectl port-forward "$svc" "${port}:9200" -n "$ns" \
+      --address "${GE_DEV_ES_TUNNEL_BIND:-127.0.0.1}" || true
     echo "devctl: tunnel dropped, reconnecting..." >&2
     sleep 2
   done
@@ -1027,7 +1138,7 @@ cmd_login() {
   # to the app's own #/auth/finish route — the same entry point the real OAuth
   # callback redirects to. See firebase/mint_token.py.
   local persona token
-  persona="${1:-$(sed -n 's/^GE_PROBE_USER_DID=//p' "$RUNTIME/probe.env")}"
+  persona="${1:-$(env_file_value "$RUNTIME/probe.env" GE_PROBE_USER_DID)}"
   [[ -n "$persona" ]] ||
     die "no seeded persona found — run: devctl seed (or pass a did:plc:... explicitly)"
 
@@ -1089,8 +1200,7 @@ cmd_status() {
     { grep "Exited (137)" || true; } | awk '{print $1}' | tr '\n' ' ')"
   if [[ -n "$killed" ]]; then
     echo
-    local restart="devctl up"
-    [[ "$INSTANCE" == "dev" ]] || restart="devctl up --name $INSTANCE"
+    local restart="devctl up$(name_flag)"
     echo "** killed by the kernel, almost certainly out of memory: $killed" >&2
     echo "   restart with: $restart   (running instances: devctl ls)" >&2
   fi
@@ -1104,6 +1214,182 @@ cmd_status() {
       printf "%-12s %s docs\n" "$alias" \
         "$(es_curl "/${alias}/_count" | sed -n 's/.*"count":\([0-9]*\).*/\1/p')"
     done
+  fi
+  local age
+  age="$(seed_age_hours)"
+  [[ -z "$age" ]] || echo "seeded       ${age}h ago"
+  warn_stale_seed
+}
+
+# --- doctor -----------------------------------------------------------------
+# One command that checks everything this environment needs and names the fix
+# for whatever it finds — the first thing to run (human or agent) when the
+# environment misbehaves, and the thing the troubleshooting doc points at
+# before its symptom list.
+
+DOCTOR_FAILS=0
+DOCTOR_WARNS=0
+
+d_ok() { printf '  ok    %s\n' "$1"; }
+d_warn() {
+  printf '  warn  %s\n' "$1"
+  [[ -z "${2:-}" ]] || printf '        fix: %s\n' "$2"
+  DOCTOR_WARNS=$((DOCTOR_WARNS + 1))
+}
+d_fail() {
+  printf '  FAIL  %s\n' "$1"
+  [[ -z "${2:-}" ]] || printf '        fix: %s\n' "$2"
+  DOCTOR_FAILS=$((DOCTOR_FAILS + 1))
+}
+
+cmd_doctor() {
+  echo "devctl doctor$(instance_label)"
+
+  local docker_up=0
+  if ! command -v docker >/dev/null; then
+    d_fail "docker isn't installed" "https://docs.docker.com/get-docker/"
+  elif ! docker info >/dev/null 2>&1; then
+    d_fail "the docker daemon isn't running" "start Docker Desktop (or dockerd)"
+  elif ! docker compose version >/dev/null 2>&1; then
+    d_fail "docker compose v2 is missing" "install the compose plugin"
+  else
+    docker_up=1
+    d_ok "docker $(docker info --format '{{.ServerVersion}}' 2>/dev/null), compose $(docker compose version --short 2>/dev/null)"
+  fi
+
+  local repo missing=""
+  for repo in api ingex frontend inference-service; do
+    [[ -e "$GE_DEV_REPO_ROOT/$repo/.git" ]] || missing+="$repo "
+  done
+  if [[ -n "$missing" ]]; then
+    d_fail "sibling repos missing from $GE_DEV_REPO_ROOT: ${missing% }" \
+      "clone them next to internal-tools (or set GE_DEV_REPO_ROOT) — see docs/onboarding.md"
+  else
+    d_ok "sibling repos present (api, ingex, frontend, inference-service)"
+  fi
+
+  if have_models; then
+    d_ok "models $(models_tag)"
+  else
+    d_fail "no model artifacts in models/data/" "devctl fetch-models (or devctl setup)"
+  fi
+  if have_fixtures; then
+    d_ok "fixture: $(python3 -c 'import json, sys
+c = json.load(open(sys.argv[1]))["counts"]
+print("%s posts / %s likes" % (format(c["posts"], ","), format(c["likes"], ",")))' \
+      "$DEVENV_DIR/fixtures/data/manifest.json")"
+  else
+    d_fail "no fixture set in fixtures/data/" "devctl fetch-fixture"
+  fi
+  if have_models && have_fixtures; then
+    if python3 "$DEVENV_DIR/models/check_compat.py" \
+      "$DEVENV_DIR/models/data/manifest.json" \
+      "$DEVENV_DIR/fixtures/data/manifest.json" >/dev/null 2>&1; then
+      d_ok "models and fixture agree on the content encoder"
+    else
+      d_fail "models and fixture disagree on the content encoder" \
+        "devctl fetch-models && devctl fetch-fixture, then devctl seed"
+    fi
+  fi
+
+  if [[ $docker_up -eq 0 ]]; then
+    doctor_summary
+    return
+  fi
+
+  # --- the running stack, if any ---
+  local running_svcs
+  running_svcs="$(compose ps --status running --format '{{.Service}}' 2>/dev/null | sort | tr '\n' ' ')"
+  if [[ -z "${running_svcs// /}" ]]; then
+    d_warn "no containers running$(instance_label)" "devctl up$(name_flag)"
+    doctor_summary
+    return
+  fi
+  d_ok "running: ${running_svcs% }"
+
+  local killed
+  killed="$(compose ps -a --format '{{.Service}} {{.Status}}' 2>/dev/null |
+    { grep "Exited (137)" || true; } | awk '{print $1}' | tr '\n' ' ')"
+  [[ -z "${killed// /}" ]] ||
+    d_fail "killed by the kernel, almost certainly out of memory: ${killed% }" \
+      "devctl up$(name_flag) to restart; give Docker more memory or stop an instance (devctl ls)"
+  check_memory_budget 2>&1 | sed 's/^/        /' || true
+
+  if [[ "$GE_DEV_LIVE" == *es* ]]; then
+    d_ok "the api reads LIVE Elasticsearch ($GE_DEV_LIVE_ENV) — local data checks skipped"
+    doctor_summary
+    return
+  fi
+
+  # Elasticsearch: reachable, keys minted, holding data.
+  if share_es; then
+    local code
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+      -H "Authorization: ApiKey $(owner_ro_key)" \
+      "http://127.0.0.1:$(owner_es_port)/_cluster/health" 2>/dev/null || true)"
+    if [[ "$code" == "200" ]]; then
+      d_ok "shared Elasticsearch (the '$ES_OWNER' instance's, port $(owner_es_port)) is answering"
+    else
+      d_fail "the '$ES_OWNER' instance's Elasticsearch isn't answering (HTTP ${code:-000})" \
+        "start the owner: devctl up   (or run standalone: devctl up$(name_flag) --dedicated-es)"
+    fi
+  elif [[ ! -s "$RUNTIME/es_key_ro.env" ]]; then
+    d_warn "no minted Elasticsearch keys yet" "devctl up$(name_flag)"
+  else
+    local health
+    health="$(es_curl /_cluster/health 2>/dev/null | sed -n 's/.*"status":"\([a-z]*\)".*/\1/p')"
+    case "$health" in
+    green | yellow) d_ok "elasticsearch is $health" ;;
+    *) d_fail "elasticsearch isn't answering on port $ES_PORT" \
+      "devctl logs elasticsearch — if it exited 137, that's memory" ;;
+    esac
+  fi
+  if service_running api; then
+    local seed_fix="devctl seed"
+    if share_es; then
+      seed_fix="devctl seed   (on the '$ES_OWNER' instance, which owns the data)"
+    fi
+
+    local posts
+    posts="$(es_curl /posts/_count 2>/dev/null | sed -n 's/.*"count":\([0-9]*\).*/\1/p')"
+    if [[ -z "$posts" || "$posts" == "0" ]]; then
+      d_warn "no posts indexed — feeds come back empty, not as errors" "$seed_fix"
+    else
+      d_ok "$posts posts indexed"
+    fi
+
+    local age
+    age="$(seed_age_hours)"
+    if [[ -n "$age" && "$age" -ge "$STALE_SEED_HOURS" ]]; then
+      d_warn "seeded ${age}h ago — outside the api's 24h recency window, so recency feeds are empty" \
+        "$seed_fix"
+    elif [[ -n "$age" ]]; then
+      d_ok "seeded ${age}h ago"
+    fi
+
+    local code
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:${API_PORT}/health" 2>/dev/null || true)"
+    if [[ "$code" == "200" ]]; then
+      d_ok "api answering on port $API_PORT"
+    else
+      d_warn "api isn't answering on port $API_PORT (HTTP ${code:-000})" \
+        "first start installs dependencies — watch: devctl logs -t api"
+    fi
+  fi
+
+  doctor_summary
+}
+
+doctor_summary() {
+  echo
+  if [[ $DOCTOR_FAILS -gt 0 ]]; then
+    local warns=""
+    [[ $DOCTOR_WARNS -eq 0 ]] || warns=" and $DOCTOR_WARNS warning(s)"
+    die "$DOCTOR_FAILS problem(s)$warns found"
+  elif [[ $DOCTOR_WARNS -gt 0 ]]; then
+    echo "devctl: $DOCTOR_WARNS warning(s), nothing fatal"
+  else
+    echo "devctl: everything checks out"
   fi
 }
 
@@ -1149,6 +1435,19 @@ cmd_es() {
 }
 
 cmd_ports() {
+  # --ssh prints ready-made port-forwarding flags for reaching this instance
+  # from another machine, one -L per published port, same number both ends:
+  #   ssh -N $(devctl ports --ssh) devbox        # run where devctl runs
+  # See docs/remote.md.
+  if [[ "${1:-}" == "--ssh" ]]; then
+    local flags="" port
+    for port in "$FRONTEND_PORT" "$API_PORT" "$ES_PORT" "$FIRESTORE_PORT" \
+      "$AUTH_PORT" "$FUNCTIONS_PORT" "$FIREBASE_UI_PORT" "$GE_DEV_PORT_FIREBASE_UI_WS"; do
+      flags+="-L ${port}:127.0.0.1:${port} "
+    done
+    echo "${flags% }"
+    return
+  fi
   # With a service name, print just the number, so it can be substituted
   # straight into a command:
   #   curl http://127.0.0.1:$(devctl ports api --name alpha)/health
@@ -1184,13 +1483,7 @@ cmd_ls() {
   # what someone asking "what's here?" needs to know.
   local running=""
   if docker info >/dev/null 2>&1; then
-    running="$(docker compose ls --format json 2>/dev/null |
-      python3 -c "
-import json, sys
-try:
-    print(' '.join(p['Name'] for p in json.load(sys.stdin)))
-except Exception:
-    pass" || true)"
+    running="$(running_projects)"
   fi
 
   printf "%-14s %-9s %-7s %-7s %s\n" NAME STATE OFFSET API FRONTEND
@@ -1238,15 +1531,10 @@ cmd_exec() {
     die "usage: devctl exec [--name <instance>] <service> <command>...
         e.g. devctl exec api pipenv run pytest"
 
-  compose ps --status running "$service" 2>/dev/null | grep -q "$service" ||
-    die "service '$service' isn't running$(instance_label) — start it with: devctl up"
+  service_running "$service" ||
+    die "service '$service' isn't running$(instance_label) — start it with: devctl up$(name_flag)"
 
-  # A TTY when stdout is one (so pytest colorizes and ^C reaches the process),
-  # and -T when piped, where allocation would fail. PIPENV_VERBOSITY silences
-  # pipenv's "existing virtualenv" warning on every single call.
-  local tty=()
-  [[ -t 1 ]] || tty=(-T)
-  compose exec ${tty[@]+"${tty[@]}"} -e PIPENV_VERBOSITY=-1 "$service" "$@"
+  compose_exec "$service" "$@"
 }
 
 cmd_restart() {
@@ -1271,9 +1559,9 @@ TEST_SUITES="api inference ingex frontend"
 
 run_test_suite() {
   case "$1" in
-  api) exec_test api pipenv run pytest ;;
-  inference) exec_test inference pipenv run pytest ;;
-  frontend) exec_test frontend npm run test:unit ;;
+  api) compose_exec api pipenv run pytest ;;
+  inference) compose_exec inference pipenv run pytest ;;
+  frontend) compose_exec frontend npm run test:unit ;;
   ingex)
     local t=""
     [[ -t 1 ]] && t="-t" || true
@@ -1283,14 +1571,6 @@ run_test_suite() {
       "$GO_IMAGE" go test -race ./...
     ;;
   esac
-}
-
-exec_test() {
-  local svc="$1"
-  shift
-  local tty=()
-  [[ -t 1 ]] || tty=(-T)
-  compose exec ${tty[@]+"${tty[@]}"} -e PIPENV_VERBOSITY=-1 "$svc" "$@"
 }
 
 cmd_test() {
@@ -1322,13 +1602,13 @@ cmd_test() {
   for s in "${suites[@]}"; do
     case "$s" in
     api | inference | frontend)
-      compose ps --status running "$s" 2>/dev/null | grep -q "$s" || need_up+=("$s")
+      service_running "$s" || need_up+=("$s")
       ;;
     esac
   done
   if [[ ${#need_up[@]} -gt 0 ]]; then
     die "these need the stack running: ${need_up[*]}
-        start it:  devctl up$([[ "$INSTANCE" == "dev" ]] || echo " --name $INSTANCE")
+        start it:  devctl up$(name_flag)
         (ingex tests need nothing running: devctl test ingex)"
   fi
 
@@ -1351,6 +1631,8 @@ devctl — Green Earth local dev environment
 Usage: devctl [--name <instance>] <command> [args]
 
 Setup (first run):
+  bootstrap        fresh clone to a working, seeded environment in one command
+                   (setup + fetch-fixture + up + seed; resumes if interrupted)
   setup            check prerequisites, build/pull images, download models,
                    install inference-service's dependencies
   fetch-fixture    download the published fixture set (no account or auth needed)
@@ -1378,12 +1660,15 @@ Work with it:
   es <path>        query this instance's Elasticsearch (read-only key, e.g.
                    devctl es /posts/_count)
   login [did]      print a sign-in URL for the frontend as the seeded persona
-  status           container status + index doc counts
+  status           container status + index doc counts + seed age
+  doctor           check everything and name the fix — run this first when
+                   the environment misbehaves
   logs [svc...]    print recent logs and exit (-t follows instead)
 
 Instances & ports:
   ls               every instance on this machine, and whether it's running
-  ports [svc]      this instance's published ports (one number with a service)
+  ports [svc]      this instance's published ports (one number with a service;
+                   --ssh prints port-forwarding flags for remote use)
   tunnel [env]     port-forward a deployed Elasticsearch, for --live es
 
 Instances
@@ -1418,12 +1703,13 @@ cmd="${1:-}"
 # `exec` resolves its own, after parsing the --name that may follow it.
 case "$cmd" in
 setup | fetch-fixture | fetch-models | ls | exec | "" | help | -h | --help) ;;
-up) ;; # allocates inside cmd_up, after its flags are parsed
+up | bootstrap) ;; # allocate inside cmd_up, after its flags are parsed
 *) resolve_ports read ;;
 esac
 
 case "$cmd" in
 setup) cmd_setup "$@" ;;
+bootstrap) cmd_bootstrap "$@" ;;
 fetch-fixture) cmd_fetch_fixture "$@" ;;
 fetch-models) cmd_fetch_models "$@" ;;
 up) cmd_up "$@" ;;
@@ -1432,6 +1718,7 @@ seed) cmd_seed "$@" ;;
 feed) cmd_feed "$@" ;;
 login) cmd_login "$@" ;;
 status | ps) cmd_status "$@" ;;
+doctor) cmd_doctor "$@" ;;
 logs) cmd_logs "$@" ;;
 exec) cmd_exec "$@" ;;
 test) cmd_test "$@" ;;
