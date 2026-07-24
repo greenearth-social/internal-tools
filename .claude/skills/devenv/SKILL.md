@@ -80,10 +80,16 @@ devctl nuke --name featurework   # destroys only this instance
 
 `--name` applies to every command and defaults to `dev`. Forgetting it acts on
 the default instance, so prefer `devctl --name X <cmd>` consistently once you
-have one. A named instance is a fresh Elasticsearch: it needs its own `seed`.
+have one. A named instance is a fresh Elasticsearch: it needs its own `seed`,
+which takes upwards of an hour — start it and work on something else.
 
-Each extra instance costs ~1GB for Elasticsearch's heap plus container
-overhead. Two is comfortable on a laptop; don't leave unused ones running.
+**Check memory before starting a second instance.** Each seeded instance holds
+~3GB, so two want ~6GB and Docker's default allocation is ~8GB. If it's tight,
+the first instance's Elasticsearch gets OOM-killed partway through the second's
+seed, which looks like the environment breaking. `devctl up` warns, and
+`devctl status` names any container the kernel killed. Don't leave unused
+instances running, and prefer one shared instance when the tasks don't actually
+conflict.
 
 ## Reading the data directly
 

@@ -158,12 +158,27 @@ allocation is made once and remembered in the instance's runtime directory, so
 an instance's ports don't move between restarts.
 
 A named instance starts with an empty Elasticsearch, so it needs its own
-`devctl seed` — a few minutes, mostly spent embedding each post through that
-instance's inference service.
+`devctl seed`. Budget real time for that: rebasing the fixture and embedding
+every post through that instance's inference service took **68 minutes** on a
+laptop that was already running the first instance. Start it and go do
+something else.
 
-Cost is the thing to watch: each instance runs its own Elasticsearch, so budget
-~1GB of heap plus container overhead per instance. Two is comfortable on a
-laptop; drop `GE_DEV_ES_HEAP=512m` into `devenv.local.env` if you want more.
+**Memory is the real constraint.** Measured with `docker stats`, one seeded
+instance holds ~3GB — Elasticsearch ~1.9GB of it (a 1GB heap plus JVM
+overhead), then ~350MB for the Firebase emulators, ~250MB for inference, and
+~200MB across the api, frontend and stand-ins. Two instances therefore want
+~6GB steady and more during a seed.
+
+Docker's default allocation on macOS is around 8GB, which is not enough: the
+symptom is the *first* instance's Elasticsearch being OOM-killed (exit 137)
+partway through the second one's seed, which looks like the environment
+breaking rather than like a memory limit. `devctl up` warns when the instance
+count outruns the memory Docker reports, and `devctl status` names any
+container the kernel killed. To actually run two:
+
+- give Docker ~12GB (Docker Desktop → Settings → Resources), or
+- put `GE_DEV_ES_HEAP=512m` in `devenv.local.env` before starting them.
+
 `devctl ls` shows what's still running.
 
 What's shared, and why:
