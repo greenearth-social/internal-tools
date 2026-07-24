@@ -3,13 +3,10 @@
 A cohesive, agent-friendly local development environment for the Green Earth
 serving stack ([api#268](https://github.com/greenearth-social/api/issues/268)).
 One Docker Compose project runs Elasticsearch, the Firebase emulators, the api,
-the frontend, and an inference service, seeded with representative Bluesky data
-— no GCP, Firebase, or production credentials required.
-
-Inference comes in two flavours. The default is a deterministic stub that needs
-no download and makes every feed *run*; `devctl up --real-models` swaps in the
-real inference-service over the actual trained towers, so feeds come back in
-the order the model would really put them ([Models](#models)).
+the frontend, and the real inference-service over the real trained models,
+seeded with representative Bluesky data — no GCP, Firebase, or production
+credentials required. Feeds come back in the order the model would actually put
+them ([Models](#models)).
 
 Code stays on your host filesystem: the sibling `api` and `ingex` checkouts are
 bind-mounted into containers, so you edit with your normal editor and commit
@@ -24,9 +21,9 @@ with your normal git, while everything executes inside containers.
 <parent>/
   api/               required
   ingex/             required (index templates + megastream_ingest)
+  inference-service/ required (serves the trained models)
   internal-tools/    this repo
-  inference-service/ required for --real-models
-  frontend/          optional
+  frontend/          required
 ```
 
 If your layout differs, set `GE_DEV_REPO_ROOT=<parent>` in
@@ -37,21 +34,17 @@ If your layout differs, set `GE_DEV_REPO_ROOT=<parent>` in
 ```bash
 cd internal-tools/devenv
 
-./devctl setup           # checks prerequisites, builds/pulls images
+./devctl setup           # prerequisites, images, models, inference deps
 ./devctl fetch-fixture   # downloads the published sample (~170MB)
-./devctl up              # ES + Firebase emulators + inference stub + api + frontend
+./devctl up              # ES + Firebase emulators + inference + api + frontend
 ./devctl seed            # rebase timestamps, ingest posts, load likes
 ./devctl feed
 ```
 
-To run the real trained models instead of the stub, add one download and one
-flag — see [Models](#models):
-
-```bash
-./devctl fetch-models    # downloads the pinned model release (~33MB)
-./devctl up --real-models
-./devctl seed            # re-seed: post embeddings come from the real tower
-```
+`setup` is the slow one — it builds images, downloads the pinned models
+(~33MB), and installs inference-service's dependencies including torch.
+Budget a few minutes on a cold cache. Everything after it is quick, and
+works offline.
 
 `devctl feed <feed>` shows a feed in the terminal: it requests
 `getFeedSkeleton` from the local api as the seeded dev persona, hydrates each
@@ -131,60 +124,61 @@ one for the team with `fixtures/publish_fixture.sh`.
 
 ## Models
 
-Two interchangeable implementations of the same endpoints. Exactly one runs;
-`devctl` records which in `.runtime/`, so `seed`, `feed`, and `status` all talk
-to the one `up` started.
+The environment runs the real `inference-service` from your checkout, serving
+the same trained towers prod serves, on CPU. There's no separate mode to turn
+on and nothing to opt into: `devctl setup` downloads the models and `devctl up`
+starts the service.
 
-| | `inference-stub` (default) | `inference` (`--real-models`) |
-| --- | --- | --- |
-| Download | none | ~33MB model release |
-| Startup | instant | ~5 min first time (installs torch), seconds after |
-| Needs | nothing | the `inference-service` checkout |
-| Ordering | "similar to what you liked" | what the trained model predicts |
+It costs about 465MB of RAM and an 893MB venv volume. It does not cost you
+speed — the post tower embeds ~6,000 posts/sec, so seeding is no slower than
+with a fake, and ranking adds ~90ms to a ~700ms feed request.
 
-The stub exists so the environment works out of the box and offline: it answers
-post-tower, user-tower, and ranker by projecting MiniLM embeddings and scoring
-candidates by cosine similarity to your like history. Every feed *runs*, but the
-ranking isn't a model's — it's a plausible-looking stand-in. Use it for
-plumbing work; use real models when the order itself matters.
+An earlier version shipped a stub that reimplemented these endpoints with
+deterministic pseudo-scores. It's gone: keeping a second implementation of
+someone else's API in sync turned out to cost more than it saved, and it
+drifted at least once — a wrong `/ready` shape broke the `two_tower` generator
+in a way that looked like a model problem.
 
-```bash
-./devctl fetch-models         # pinned release, no account or credentials
-./devctl up --real-models
-./devctl seed                 # required: see below
-```
+### Model and fixture have to agree
 
-Switching to real models **requires a re-seed**. `megastream_ingest` computes
-each post's `ge_post_embedding` by calling whichever inference service is
-running, and the api's `two_tower` generator runs kNN over that field filtered
-by the model UUID that produced it. Posts embedded by the stub simply won't
-match a real-model query — the feed comes back thin rather than wrong, which is
-the safe failure but an easy one to misread. `devctl up --stub-models` switches
-back, and also needs a re-seed.
+`megastream_ingest` computes each post's `ge_post_embedding` by calling the
+inference service at seed time, and the api's `two_tower` generator runs kNN
+over that field *filtered by the model UUID that produced it*. Change the
+models and the seeded embeddings no longer match: the feed comes back thin
+rather than wrong, which is the safe failure but an easy one to misread. **Any
+model change needs a re-seed.**
+
+`devctl` also compares the model bundle's `manifest.json` against the fixture's
+before `up` and `seed`, and refuses to run if the content encoder or its
+dimensions differ. Embeddings of the same width from different encoders
+multiply together perfectly well and produce confident nonsense, so that one is
+worth failing loudly over.
 
 ### Where the models come from
 
-`devctl fetch-models` downloads a GitHub release — the same public channel the
-fixtures use, for the same reason: a fresh clone should need no Google account.
-The bundle lands in `models/data/` (gitignored) and holds both TorchScript
-towers, the ranker, the author-index maps, and serving manifests rewritten to
-local paths. inference-service then loads plain files: no GCS, no ClearML, no
-network.
+`devctl fetch-models` (run for you by `devctl setup`) downloads a GitHub
+release — the same public channel the fixtures use, for the same reason: a
+fresh clone should need no Google account. The bundle lands in `models/data/`
+(gitignored) and holds both TorchScript towers, the ranker, the author-index
+maps, and serving manifests rewritten to local paths. inference-service then
+loads plain files: no GCS, no ClearML, no network.
 
 Unlike the fixture, the model release is **pinned** — `MODELS_TAG` in `devctl`,
-overridable with `GE_DEV_MODELS_TAG`. Towers and seeded embeddings have to
-agree, so everyone gets the same models until someone deliberately moves the
-pin.
-
-`devctl` also checks the model bundle's `manifest.json` against the fixture's
-before `up` and `seed`, and refuses to run if the content encoder or its
-dimensions differ. Mismatched embeddings still multiply cleanly and produce
-confident nonsense, so this is worth failing loudly over.
+overridable with `GE_DEV_MODELS_TAG`. The tag names the two training runs it
+holds (`models-<two-tower>-<ranker>`), so it says what's in it and re-publishing
+the same artifacts is idempotent.
 
 Maintainers publish a new set with `models/publish_models.sh`, which mirrors
 the newest artifacts out of the prod model bucket (needs `gcloud` with read
 access), rewrites the manifests, and cuts a release. Use `--dry-run` to stage
-and inspect the bundle without uploading. Then bump `MODELS_TAG`.
+and inspect the bundle without uploading. Then set `MODELS_TAG` to the tag it
+prints.
+
+One value in that bundle isn't derivable from the artifacts: `max_history_len`,
+how far back the user tower and ranker look. It isn't in the serving manifest,
+so it's mirrored from how prod deploys the same models, and getting it wrong
+degrades embeddings silently rather than failing. `publish_models.sh` carries
+the command to re-check it.
 
 ## Live ingestion (optional)
 
@@ -423,8 +417,7 @@ run `devctl feed` and reload.
 | Firebase Auth emulator | `127.0.0.1:9099` | |
 | Functions emulator | `127.0.0.1:5001` | |
 | Firebase Emulator UI | `http://127.0.0.1:4000` | browse Firestore data, auth users, function logs |
-| inference-stub | internal only | default; post-tower / user-tower / ranker, deterministic |
-| inference | internal only | `--real-models`; real inference-service over the trained towers |
+| inference | internal only | real inference-service over the trained towers |
 | perspective-stub | internal only | stands in for Google's Perspective API |
 | jetstream-ingest | internal only | `--with-jetstream`; live likes from the public firehose |
 
@@ -433,18 +426,16 @@ Override ports/heap/etc. in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 `GE_DEV_PORT_FIREBASE_AUTH`, `GE_DEV_PORT_FUNCTIONS`, `GE_DEV_PORT_FIREBASE_UI`,
 `GE_DEV_ES_HEAP`, `GE_DEV_NAME`
 (compose project name), `GE_DEV_API_RELOAD=1` (uvicorn --reload watch mode),
-`GE_DEV_INFERENCE=real` (make `--real-models` the default),
-`GE_DEV_MODELS_TAG` (use a model release other than the pinned one).
+`GE_DEV_MODELS_TAG` (use a model release other than the pinned one),
+`GE_DEV_INFERENCE=external` + `GE_DEV_INFERENCE_URL` (use a remote inference
+service instead of the local one).
 
 ## Current limitations (by milestone)
 
-- **Ranking is stubbed by default, but no longer has to be.** Out of the box
-  `inference-stub` answers post-tower, user-tower, and ranker by projecting
-  MiniLM embeddings and scoring candidates by cosine similarity to the user's
-  like history — "similar to what you liked", not predicted engagement. Every
-  feed runs; the ordering just isn't a model's. `devctl up --real-models` gives
-  you the trained ones ([Models](#models)).
-- **Perspective is stubbed too.** The `perspective` ranker (used by
+- **The model release is a hard dependency.** `devctl setup` needs to reach
+  GitHub Releases to download it; there's no offline fallback any more now that
+  the stub is gone. Once fetched, everything runs offline.
+- **Perspective is still stubbed.** The `perspective` ranker (used by
   `your-feed`) calls Google's Perspective API and hard-fails without a key, so
   `perspective-stub` answers it locally with deterministic hash-derived
   scores — stable per post, but not content analysis. To score against the
