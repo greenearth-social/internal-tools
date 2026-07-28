@@ -511,24 +511,28 @@ query needing a composite index can still pass locally and fail deployed.
 
 ### Signing in
 
-Just click **Sign in with Bluesky**. It works with no credentials and logs you
-in as the seeded persona. (The feed list starts empty — see "Seeing real data
-in the transparency UI" below.)
+Enter a Bluesky handle and click **Continue**. It works with no credentials:
+the `dev-auth` service resolves the handle through Bluesky's public AppView and
+logs the frontend in as the resulting `did:plc` identity. Accounts that resolve
+to another DID method are not supported by the local api.
 
 Real sign-in starts a Bluesky OAuth handshake in the `authBluesky` Cloud
 Function, which needs private keys this environment deliberately doesn't
 carry — so the button would otherwise fail, which is the first thing a new
 engineer is likely to try. The `dev-auth` service sits where the Functions
-emulator does, answers that one call with a redirect to the app's own
+emulator does and answers that one call with the app's own
 `#/auth/finish?token=...` route (the same place the real OAuth callback sends
-the browser), and passes every other function through untouched.
+the browser). Fetch-based sign-in receives the route as a JSON `redirectUrl`;
+ordinary browser navigation receives a redirect. Every other function passes
+through untouched.
 
-`devctl login` prints the same URL if you'd rather paste it, or want to sign
-in as a different persona: `devctl login did:plc:...`.
+`devctl login` remains available if you'd rather paste a URL or already know
+the persona DID: `devctl login did:plc:...`. Without an explicit DID, it logs
+in as the seeded persona.
 
-Both mint an unsigned custom token, which only an emulator will accept — the
-Auth emulator ignores the signature, real Firebase would reject it outright.
-Tokens last an hour.
+Both paths mint an unsigned custom token, which only an emulator will accept —
+the Auth emulator ignores the signature, while real Firebase would reject it
+outright. Tokens last an hour.
 
 ### Working on real Bluesky auth
 
@@ -593,10 +597,19 @@ specific variable.
 ### Seeing real data in the transparency UI
 
 The frontend is a feed-*transparency* UI: it reports on feeds the api has
-already served to you. To put something in it, generate a feed:
+already served to the signed-in DID. To put something in it for the seeded
+persona, generate a feed:
 
 ```bash
 devctl feed                # then reload the frontend
+```
+
+If you signed in by entering another handle, generate the feed as that
+identity instead:
+
+```bash
+devctl logs dev-auth                          # find the resolved did:plc
+devctl feed your-feed --user did:plc:…        # then reload the frontend
 ```
 
 Two things make that work, both of which are otherwise dead ends locally:
