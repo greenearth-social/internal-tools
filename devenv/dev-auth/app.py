@@ -37,9 +37,7 @@ from mint_token import mint  # noqa: E402  (path set above)
 
 FUNCTIONS_UPSTREAM = os.environ.get("GE_DEV_FUNCTIONS_UPSTREAM", "http://firebase:15001")
 PROBE_ENV = "/runtime/probe.env"
-HANDLE_RESOLVER_URL = (
-    "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle"
-)
+HANDLE_RESOLVER_URL = "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle"
 HANDLE_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
     r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$"
@@ -69,9 +67,7 @@ def resolve_handle(raw_handle: str) -> str:
     except urllib.error.HTTPError as exc:
         if exc.code == 400:
             raise HandleResolutionError(f"Could not find Bluesky account '{handle}'") from exc
-        raise HandleResolutionError(
-            f"Bluesky handle resolver returned HTTP {exc.code}"
-        ) from exc
+        raise HandleResolutionError(f"Bluesky handle resolver returned HTTP {exc.code}") from exc
     except (TimeoutError, urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
         raise HandleResolutionError("Could not reach the Bluesky handle resolver") from exc
 

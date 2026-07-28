@@ -89,9 +89,7 @@ def test_handle_resolution_error_is_returned_to_frontend(auth_server, monkeypatc
 
     monkeypatch.setattr(app, "resolve_handle", fail)
     request = urllib.request.Request(
-        auth_server
-        + "/greenearth-471522/us-central1/authBluesky"
-        + "?handle=missing.example",
+        auth_server + "/greenearth-471522/us-central1/authBluesky" + "?handle=missing.example",
         headers={"Accept": "application/json"},
     )
 
