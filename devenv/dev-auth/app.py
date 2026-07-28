@@ -8,9 +8,10 @@ likely to try first.
 
 This service sits where the Functions emulator would and:
 
-- answers the authBluesky call with a redirect straight to the app's own
-  `#/auth/finish?token=...` route — the same place the real OAuth callback
-  sends the browser, carrying a token for the seeded persona;
+- answers the authBluesky call with the app's own
+  `#/auth/finish?token=...` route — as JSON for the frontend's fetch-based
+  sign-in flow, or as a redirect for ordinary browser navigation — carrying a
+  token for the seeded persona;
 - reverse-proxies every other request to the real Functions emulator, so
   oauthJwks, oauthClientMetadata and friends behave normally.
 
@@ -22,6 +23,7 @@ This exists only to make local sign-in possible. The token it mints is
 unsigned and only an emulator will accept it (see firebase/mint_token.py).
 """
 
+import json
 import os
 import re
 import sys
@@ -35,9 +37,50 @@ from mint_token import mint  # noqa: E402  (path set above)
 
 FUNCTIONS_UPSTREAM = os.environ.get("GE_DEV_FUNCTIONS_UPSTREAM", "http://firebase:15001")
 PROBE_ENV = "/runtime/probe.env"
+HANDLE_RESOLVER_URL = (
+    "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle"
+)
+HANDLE_RE = re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+)
 
 # Both the prod and stage entry points land here; either should log you in.
 AUTH_FUNCTION_RE = re.compile(r"/authBluesky(Stage)?(\?|$)", re.IGNORECASE)
+
+
+class HandleResolutionError(Exception):
+    pass
+
+
+def resolve_handle(raw_handle: str) -> str:
+    handle = raw_handle.strip().removeprefix("@").lower()
+    if not HANDLE_RE.fullmatch(handle):
+        raise HandleResolutionError("Enter a valid account handle, such as alice.bsky.social")
+
+    query = urllib.parse.urlencode({"handle": handle})
+    request = urllib.request.Request(
+        f"{HANDLE_RESOLVER_URL}?{query}",
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 400:
+            raise HandleResolutionError(f"Could not find Bluesky account '{handle}'") from exc
+        raise HandleResolutionError(
+            f"Bluesky handle resolver returned HTTP {exc.code}"
+        ) from exc
+    except (TimeoutError, urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        raise HandleResolutionError("Could not reach the Bluesky handle resolver") from exc
+
+    did = payload.get("did") if isinstance(payload, dict) else None
+    if not isinstance(did, str) or not did.startswith("did:plc:"):
+        raise HandleResolutionError(
+            "The account did not resolve to a did:plc identity supported by the local API"
+        )
+    return did
 
 
 def seeded_persona() -> str | None:
@@ -54,7 +97,19 @@ def seeded_persona() -> str | None:
 
 class Handler(BaseHTTPRequestHandler):
     def _redirect_to_auth_finish(self) -> None:
-        persona = seeded_persona()
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        raw_handle = query.get("handle", [None])[0]
+        try:
+            persona = resolve_handle(raw_handle) if raw_handle else seeded_persona()
+        except HandleResolutionError as exc:
+            payload = str(exc).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
         if not persona:
             self.send_error(
                 503,
@@ -62,14 +117,23 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        # Vite's functionProxy rewrites the path to a fixed value, dropping the
-        # original query string, so return_url never reaches us. The app
-        # defaults to /feed, which is where sign-in should land anyway.
-        params = urllib.parse.urlencode({"token": mint(persona), "return_url": "/feed"})
-        self.send_response(302)
-        self.send_header("Location", f"/#/auth/finish?{params}")
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+        return_url = query.get("return_url", ["/feed"])[0]
+        params = urllib.parse.urlencode({"token": mint(persona), "return_url": return_url})
+        redirect_url = f"/#/auth/finish?{params}"
+
+        if "application/json" in self.headers.get("Accept", ""):
+            payload = json.dumps({"redirectUrl": redirect_url}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        else:
+            self.send_response(302)
+            self.send_header("Location", redirect_url)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
         print(f"dev-auth: signed in as {persona}")
 
     def _proxy(self) -> None:
