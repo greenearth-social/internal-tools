@@ -31,6 +31,11 @@ If your layout differs, set `GE_DEV_REPO_ROOT=<parent>` in
 working copy with `up --repo-root <dir>` — see
 [Running more than one environment](#running-more-than-one-environment).
 
+`devenv.local.env` is the gitignored file for all local overrides (ports, live
+services, bsky serving, …); copy
+[`devenv.local.env.example`](devenv.local.env.example) to start, or run
+`./devctl help` for the shortlist.
+
 **New here?** [docs/onboarding.md](docs/onboarding.md) is the full
 walkthrough, from clone to a ranked feed. The rest of the docs directory:
 [troubleshooting](docs/troubleshooting.md) (symptoms → fixes),
@@ -146,6 +151,23 @@ they're restarted.
 `devctl restart` recreates the container rather than just restarting the
 process, so it picks up changed configuration too — a re-minted ES key, a
 different `--live` target.
+
+### Pulling the latest across every repo
+
+At the start of a task you usually want all the sibling checkouts current.
+`devctl pull` fetches and fast-forwards each of them in one go:
+
+```bash
+./devctl pull                       # the repos under the default root
+./devctl pull --repo-root ../wt-x   # a different working copy (e.g. a worktree)
+```
+
+It only ever fast-forwards — a repo it can't (uncommitted changes, a diverged
+branch, no upstream) is reported and skipped, never merged or rebased, so one
+repo's state can't block the rest. After the table it calls out every repo
+sitting on a branch other than `main`, which is the usual "oh, that's why" at
+the start of a task. `--repo-root` (or `GE_DEV_REPO_ROOT`) points it at any
+checkout, so it works the same for a worktree a named instance mounts.
 
 ## Running more than one environment
 
@@ -536,6 +558,12 @@ outright. Tokens last an hour.
 
 ### Working on real Bluesky auth
 
+> If you just want real sign-in working against a running feed, `devctl bsky up`
+> (see [Serving a local feed on real Bluesky](#serving-a-local-feed-on-real-bluesky))
+> does everything below for you — tunnel, `APP_ORIGIN`, allowed hosts, and a
+> generated dev keypair. This section is the manual version, for working on the
+> OAuth flow itself.
+
 The shim above is for *using* the app. To work on the OAuth flow itself, take
 `dev-auth` out of the path so `/auth/bluesky` reaches the real function again:
 
@@ -551,7 +579,7 @@ The functions read six variables, all passed straight through from
 | --- | --- |
 | `APP_ORIGIN` | Derives `client_id` (`$APP_ORIGIN/.well-known/oauth-client-metadata`) and `redirect_uri` (`$APP_ORIGIN/oauth/callback`) |
 | `BLUESKY_OAUTH_CLIENT_KID` | Key id in the client assertion |
-| `BLUESKY_OAUTH_CLIENT_PRIVATE_KEY` | Signs the client assertion (prod key) |
+| `BLUESKY_OAUTH_CLIENT_PRIVATE_KEY` | Signs the client assertion (a dev keypair `bsky up` generates, or your own) |
 | `BLUESKY_OAUTH_CLIENT_PRIVATE_KEY_STAGE` | Same, for the `*Stage` function variants |
 | `BLUESKY_OAUTH_PUBLIC_JWKS` | Served by `oauthJwks` for Bluesky to verify the assertion |
 | `OAUTH_STATE_ENCRYPTION_KEY` | Encrypts the OAuth state parameter |
@@ -631,6 +659,68 @@ Two things make that work, both of which are otherwise dead ends locally:
 
 Snapshots are only kept for 15 minutes, so an untouched tab goes empty again;
 run `devctl feed` and reload.
+
+## Serving a local feed on real Bluesky
+
+`devctl bsky up` points a real Bluesky account at this environment: it opens an
+ngrok tunnel to the api, publishes this env's feeds as records on your dev
+account, and — via a second tunnel to the frontend — lets you sign in with real
+Bluesky and see the GreenEarth transparency view of the same posts. `devctl bsky
+down` deletes those records and closes the tunnels. It never runs on its own: a
+tunnel to your laptop is on the public internet, so this is an explicit pair you
+tear down when you're finished.
+
+It's for human testing from the primary checkout — not the parallel-instance
+workflow — so it doesn't take `--repo-root`.
+
+### What `bsky up` needs
+
+- [ngrok](https://ngrok.com/download), authenticated once:
+  `ngrok config add-authtoken <token>`.
+- A dedicated dev Bluesky account and an
+  [app password](https://bsky.app/settings/app-passwords), in `devenv.local.env`:
+
+  ```bash
+  GE_DEV_BSKY_HANDLE=caterpie-internal.bsky.social
+  GE_BSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
+  ```
+
+- A running, seeded stack (`devctl up && devctl seed`).
+
+### Running it
+
+```bash
+devctl bsky up        # tunnel, publish feeds, wire the frontend; prints the links
+devctl bsky status    # the tunnels, the sign-in URL and the feed links again
+devctl bsky down      # delete the records and close the tunnels
+```
+
+`bsky up` prints a `bsky.app/profile/<handle>/feed/<rkey>` link per feed and,
+for sign-in, the **frontend tunnel URL** — browse that, not `localhost:3000`.
+Real OAuth redirects the callback to the public origin, so the signed-in session
+lives there; `localhost` stays on the local shim. See [Working on real Bluesky
+auth](#working-on-real-bluesky-auth) for what the origin change means.
+
+**OAuth keys are generated, not borrowed from prod.** An AT Protocol OAuth
+client is identified by its metadata URL, which for you is the tunnel origin —
+so your dev environment is already a *different* client from prod, and prod keys
+wouldn't even match the JWKS your tunnel serves. `bsky up` generates a throwaway
+dev ES256 keypair (cached under the instance's runtime dir) and uses it
+automatically. Set `BLUESKY_OAUTH_*` in `devenv.local.env` only to point at
+externally-managed keys instead.
+
+**Free vs. paid ngrok.** Free ngrok gives a fresh random URL each run (so the
+feed records are re-published every `bsky up`) and may allow only one endpoint
+at a time — in which case the api tunnel comes up and the frontend/OAuth half is
+skipped with a warning. A reserved domain (`GE_DEV_NGROK_DOMAIN`, or the
+`_API` / `_FRONTEND` forms for two) gives stable URLs and lets both tunnels run.
+The api tunnel is scoped by an ngrok traffic policy
+(`ngrok/feedgen-policy.yml`) to just `/.well-known/did.json` and `/xrpc/*` — the
+feed-generator surface; the frontend tunnel serves the app and is open.
+
+**Security.** Both tunnels are public while up. Don't leave a session running —
+`devctl bsky down` (or `devctl bsky status` to check) — and treat the exposure
+the same way as `GE_DEV_BIND=0.0.0.0` in [docs/remote.md](docs/remote.md).
 
 ## Service endpoints (defaults)
 

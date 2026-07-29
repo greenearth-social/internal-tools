@@ -332,6 +332,10 @@ services:
       # mode, where it points somewhere this environment doesn't run.
       - GE_INFERENCE_BASE_URL=${GE_DEV_INFERENCE_URL:-http://inference:8000}
       - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
+      # did:web the api answers as. Local by default; `devctl bsky up` recreates
+      # the api with the ngrok tunnel host so bsky's AppView can resolve
+      # /.well-known/did.json against it. `bsky down` restores the default.
+      - GE_FEED_GENERATOR_DID=${GE_DEV_FEED_GENERATOR_DID:-did:web:localhost}
       - GE_METRICS_EXPORT_INTERVAL_SEC=86400
       # The "your-feed" pipeline runs the `perspective` ranker, which calls
       # Google's Perspective API and hard-fails without a key. Default to the

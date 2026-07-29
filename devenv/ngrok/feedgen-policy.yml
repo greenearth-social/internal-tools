@@ -1,0 +1,26 @@
+# ngrok Traffic Policy for the **api** tunnel opened by `devctl bsky up`.
+#
+# The tunnel is on the public internet, so it exposes exactly the surface
+# Bluesky's AppView needs to drive a feed generator and nothing else — no
+# /docs, no other routers, no admin/observability endpoints. We deliberately
+# allow the whole /xrpc/* namespace rather than individual feed methods: the
+# AppView may call other feed-generator XRPC methods now or later (e.g.
+# app.bsky.feed.sendInteractions), and allowlisting them one by one would
+# create a "works locally, silently 404s over the tunnel" trap that's very hard
+# to find. /xrpc/* IS the feed-generator API surface.
+#
+# There is no published Bluesky relay IP range to source-restrict on, so path
+# scoping is the meaningful control here. `bsky up` references this file for the
+# api endpoint only; the frontend tunnel serves the app UI + OAuth proxy and is
+# left open.
+#
+# If an ngrok tier rejects this policy, `bsky up` retries the tunnel without it
+# and prints a warning rather than failing — see cmd_bsky in ../devctl.
+on_http_request:
+  - name: allow-feedgen-surface-only
+    expressions:
+      - "!(req.url.path == '/.well-known/did.json' || req.url.path.startsWith('/xrpc/'))"
+    actions:
+      - type: deny
+        config:
+          status_code: 404
