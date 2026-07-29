@@ -1372,17 +1372,25 @@ bsky_export_oauth_env() {
 bsky_wire_frontend() {
   local host="$1" oauth_ok="$2"
   echo "devctl: wiring the frontend for https://$host"
-  export GE_DEV_APP_ORIGIN="https://$host"
   export GE_DEV_FRONTEND_ALLOWED_HOSTS="localhost,$host"
+  # Only the frontend (stateless Vite) restarts by default. The firebase
+  # emulator has no import/export configured, so recreating it wipes its data
+  # (feed snapshots, auth sessions) — touch it only when we must: the functions
+  # read APP_ORIGIN and the OAuth keys at container start, so enabling *real*
+  # sign-in needs a firebase restart. Feed-only serving leaves it untouched.
+  local services=(frontend)
   if [[ "$oauth_ok" == "1" ]]; then
+    export GE_DEV_APP_ORIGIN="https://$host"
     bsky_export_oauth_env
     export GE_DEV_FUNCTIONS_TARGET="firebase:15001"
+    services+=(firebase)
+    echo "devctl: restarting the firebase emulator to enable real OAuth (its emulator data resets)" >&2
   else
     echo "devctl: real sign-in disabled (no OAuth keys) — the app is served but /auth uses the local shim" >&2
   fi
-  # --no-deps so recreating the frontend can't bounce the api and revert the
-  # tunnel DID we just set (the frontend depends on it).
-  compose up -d --no-deps --force-recreate frontend firebase >/dev/null
+  # --no-deps so recreating the frontend can't bounce the api (reverting the
+  # tunnel DID) or the firebase emulator we're deliberately leaving alone.
+  compose up -d --no-deps --force-recreate "${services[@]}" >/dev/null
 }
 
 # Write the ngrok agent config for both tunnels. Both are opened wide open — the
@@ -1561,7 +1569,11 @@ bsky_restore_stack() {
   unset GE_DEV_APP_ORIGIN GE_DEV_FRONTEND_ALLOWED_HOSTS GE_DEV_FUNCTIONS_TARGET
   resolve_live || true
   export_api_es_env || true
-  compose up -d --no-deps --force-recreate api frontend firebase >/dev/null 2>&1 || true
+  # Deliberately not firebase: reverting the frontend to the dev-auth shim
+  # already disables real OAuth, and recreating firebase would needlessly wipe
+  # its emulator data. Any stale APP_ORIGIN left in the functions is unused once
+  # the shim is back.
+  compose up -d --no-deps --force-recreate api frontend >/dev/null 2>&1 || true
 }
 
 bsky_down() {
