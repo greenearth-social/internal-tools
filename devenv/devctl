@@ -1015,14 +1015,14 @@ EOF
   [[ "$GE_DEV_REPO_ROOT" == "$DEFAULT_REPO_ROOT" ]] ||
     echo "  code          mounted from $GE_DEV_REPO_ROOT"
   if share_es; then
-    echo "  elasticsearch shared from '$ES_OWNER' (127.0.0.1:$(owner_es_port))    read-only here"
+    echo "  elasticsearch shared from '$ES_OWNER' (http://127.0.0.1:$(owner_es_port))    read-only here"
   else
     echo "  elasticsearch http://127.0.0.1:${ES_PORT}    (user elastic / ${GE_DEV_ES_PASSWORD:-ge-dev-elastic})"
   fi
   cat <<EOF
-  firestore     127.0.0.1:${FIRESTORE_PORT}    (emulator, from the frontend checkout)
-  firebase auth 127.0.0.1:${AUTH_PORT}
-  functions     127.0.0.1:${FUNCTIONS_PORT}
+  firestore     http://127.0.0.1:${FIRESTORE_PORT}    (emulator, from the frontend checkout)
+  firebase auth http://127.0.0.1:${AUTH_PORT}
+  functions     http://127.0.0.1:${FUNCTIONS_PORT}
   emulator UI   http://127.0.0.1:${FIREBASE_UI_PORT}    (browse Firestore data, auth users, function logs)
 EOF
   if live_has inference; then
@@ -1492,10 +1492,13 @@ bsky_published_rkeys() {
     sed -n 's/^  • \(.*\)/\1/p' | tr '\n' ' '
 }
 
+# Aligned "rkey:  https://bsky.app/.../feed/rkey" lines — the feed names pad to a
+# common width so the URLs form a readable column.
 bsky_feed_links() {
-  local handle="$1" rkeys="$2" rkey
+  local handle="$1" rkeys="$2" rkey w=0
+  for rkey in $rkeys; do [[ ${#rkey} -gt $w ]] && w=${#rkey}; done
   for rkey in $rkeys; do
-    echo "  https://bsky.app/profile/$handle/feed/$rkey"
+    printf '  %-*s  https://bsky.app/profile/%s/feed/%s\n' "$((w + 1))" "$rkey:" "$handle" "$rkey"
   done
 }
 
@@ -1512,6 +1515,14 @@ GE_BSKY_NGROK_PID=$NGROK_PID
 EOF
 }
 
+# The external tunnel URLs, aligned. `API:`/`Frontend:` pad to a common width so
+# the URLs line up. Shared by `bsky up` and `bsky status`.
+bsky_print_tunnels() {
+  local api_host="$1" frontend_url="$2"
+  printf '  %-10s https://%s\n' "API:" "$api_host"
+  [[ -z "$frontend_url" ]] || printf '  %-10s %s\n' "Frontend:" "$frontend_url"
+}
+
 bsky_print_summary() {
   local handle="$1" did="$2" frontend_url="$3" oauth_ok="$4" rkeys="$5"
   echo
@@ -1519,14 +1530,13 @@ bsky_print_summary() {
   echo
   echo "Published feeds:"
   bsky_feed_links "$handle" "$rkeys"
+  echo
+  bsky_print_tunnels "${did#did:web:}" "$frontend_url"
   if [[ -n "$frontend_url" ]]; then
-    echo
     if [[ "$oauth_ok" == "1" ]]; then
-      echo "Sign in and see the GreenEarth view at (browse this, not localhost):"
-      echo "  $frontend_url"
+      echo "  (sign in with real Bluesky at the Frontend URL — browse it, not localhost)"
     else
-      echo "Frontend served at (real sign-in disabled until OAuth keys are set):"
-      echo "  $frontend_url"
+      echo "  (Frontend real sign-in disabled until OAuth keys are set)"
     fi
   fi
   echo
@@ -1589,20 +1599,19 @@ bsky_status() {
   # shellcheck source=/dev/null
   source "$BSKY_STATE"
   set +a
-  echo "bsky session active$(instance_label):"
-  echo "  handle:       ${GE_BSKY_HANDLE:-?}"
-  echo "  feed did:     ${GE_BSKY_DID:-?}"
-  echo "  api tunnel:   https://${GE_BSKY_API_HOST:-?}"
-  if [[ -n "${GE_BSKY_FRONTEND_URL:-}" ]]; then
-    if [[ "${GE_BSKY_OAUTH_OK:-0}" == "1" ]]; then
-      echo "  sign-in at:   ${GE_BSKY_FRONTEND_URL} (real OAuth)"
-    else
-      echo "  frontend at:  ${GE_BSKY_FRONTEND_URL} (sign-in disabled)"
-    fi
-  fi
+  echo "bsky session active$(instance_label) as ${GE_BSKY_HANDLE:-?} (${GE_BSKY_DID:-?})."
   echo
   echo "Published feeds:"
   bsky_feed_links "${GE_BSKY_HANDLE:-}" "${GE_BSKY_RKEYS:-}"
+  echo
+  bsky_print_tunnels "${GE_BSKY_API_HOST:-?}" "${GE_BSKY_FRONTEND_URL:-}"
+  if [[ -n "${GE_BSKY_FRONTEND_URL:-}" ]]; then
+    if [[ "${GE_BSKY_OAUTH_OK:-0}" == "1" ]]; then
+      echo "  (sign in with real Bluesky at the Frontend URL — browse it, not localhost)"
+    else
+      echo "  (Frontend real sign-in disabled until OAuth keys are set)"
+    fi
+  fi
   echo
   echo "tear down with: devctl bsky down$(name_flag)"
 }
