@@ -1275,10 +1275,15 @@ bsky_up() {
 
   local did="did:web:$api_host"
 
-  # 3. Recreate the api as the tunnel's feed generator. The DID is exported for
-  #    this one compose call only, so it doesn't leak into later restarts.
+  # 3. Recreate the api as the tunnel's feed generator. Recreating drops the
+  #    environment `up` injected, so re-supply it the way `restart` does (the ES
+  #    key devctl minted, any live targets) — without it the api starts without
+  #    GE_ELASTICSEARCH_API_KEY and crash-loops. The DID is exported for this one
+  #    call so it doesn't leak into later restarts.
   echo "devctl: pointing the api at the tunnel ($did) and restarting it"
-  GE_DEV_FEED_GENERATOR_DID="$did" compose up -d api >/dev/null
+  resolve_live
+  export_api_es_env
+  GE_DEV_FEED_GENERATOR_DID="$did" compose up -d --no-deps --force-recreate api >/dev/null
   bsky_wait_did "$api_host" "$did" ||
     echo "devctl: warning — did.json hasn't confirmed yet at https://$api_host/.well-known/did.json (bsky may need a minute)" >&2
 
@@ -1376,7 +1381,9 @@ bsky_wire_frontend() {
   else
     echo "devctl: real sign-in disabled (no OAuth keys) — the app is served but /auth uses the local shim" >&2
   fi
-  compose up -d frontend firebase >/dev/null
+  # --no-deps so recreating the frontend can't bounce the api and revert the
+  # tunnel DID we just set (the frontend depends on it).
+  compose up -d --no-deps --force-recreate frontend firebase >/dev/null
 }
 
 # Write the ngrok agent config for both tunnels. `nopolicy` re-emits it without
@@ -1533,11 +1540,15 @@ bsky_kill_ngrok() {
 }
 
 # Recreate api + frontend at their local defaults (no tunnel DID, no public
-# origin, dev-auth shim back). Used by `down` and by `up`'s rollback.
+# origin, dev-auth shim back). Used by `down` and by `up`'s rollback. Re-supplies
+# the api's ES key the same way `up`/`restart` do — a bare recreate would drop it
+# and leave the api crash-looping.
 bsky_restore_stack() {
   echo "devctl: restoring the api and frontend to local defaults"
   unset GE_DEV_APP_ORIGIN GE_DEV_FRONTEND_ALLOWED_HOSTS GE_DEV_FUNCTIONS_TARGET
-  compose up -d api frontend firebase >/dev/null 2>&1 || true
+  resolve_live || true
+  export_api_es_env || true
+  compose up -d --no-deps --force-recreate api frontend firebase >/dev/null 2>&1 || true
 }
 
 bsky_down() {
