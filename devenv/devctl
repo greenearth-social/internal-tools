@@ -1306,13 +1306,12 @@ bsky_up() {
     die "publishing feeds failed — the tunnel and api change have been rolled back"
   }
 
-  # 6. Persist the session and print where to find everything. The rkey lookup
-  #    is only for the printed links, so a failure there must not abort after a
-  #    successful publish (pipefail would otherwise make the empty read fatal).
-  local rkeys
-  rkeys="$(bsky_published_rkeys "$handle" "$app_password")" || rkeys=""
-  bsky_write_state "$handle" "$api_host" "$did" "$frontend_host" "$frontend_url" "$oauth_ok" "$rkeys"
-  bsky_print_summary "$handle" "$did" "$frontend_url" "$oauth_ok" "$rkeys"
+  # 6. Persist the session and print where to find everything. Capturing the
+  #    feed names is best-effort (only affects the printed labels), so it never
+  #    aborts after a successful publish.
+  bsky_capture_feeds "$handle" "$app_password"
+  bsky_write_state "$handle" "$api_host" "$did" "$frontend_host" "$frontend_url" "$oauth_ok"
+  bsky_print_summary "$handle" "$did" "$frontend_url" "$oauth_ok"
 }
 
 # Generate (once) and cache a dev ES256 keypair + AES state key, unless the
@@ -1386,10 +1385,11 @@ bsky_wire_frontend() {
   compose up -d --no-deps --force-recreate frontend firebase >/dev/null
 }
 
-# Write the ngrok agent config for both tunnels. `nopolicy` re-emits it without
-# the api traffic policy, for the retry when a policy action isn't supported.
+# Write the ngrok agent config for both tunnels. Both are opened wide open — the
+# api tunnel is also usable for plain api development, and path-scoping it just
+# made the api confusingly unreachable except at the feed-generator endpoints.
 bsky_write_ngrok_config() {
-  local cfg="$1" mode="${2:-}"
+  local cfg="$1"
   local api_domain="${GE_DEV_NGROK_DOMAIN_API:-${GE_DEV_NGROK_DOMAIN:-}}"
   {
     echo 'version: "2"'
@@ -1398,12 +1398,6 @@ bsky_write_ngrok_config() {
     echo '    proto: http'
     echo "    addr: $API_PORT"
     [[ -z "$api_domain" ]] || echo "    domain: $api_domain"
-    if [[ "$mode" != "nopolicy" && -f "$DEVENV_DIR/ngrok/feedgen-policy.yml" ]]; then
-      echo '    traffic_policy:'
-      # Inline the policy under the tunnel (6-space indent), so we don't depend
-      # on a given ngrok build supporting a policy *file* reference in config.
-      sed 's/^/      /' "$DEVENV_DIR/ngrok/feedgen-policy.yml"
-    fi
     echo '  frontend:'
     echo '    proto: http'
     echo "    addr: $FRONTEND_PORT"
@@ -1412,9 +1406,7 @@ bsky_write_ngrok_config() {
 }
 
 # Start both tunnels in one background agent. The authtoken lives in the user's
-# default ngrok config, so we pass ours *and* theirs (ngrok merges configs). If
-# the agent dies on startup — most likely the traffic policy — retry once
-# without it so a working tunnel still comes up, with a warning.
+# default ngrok config, so we pass ours *and* theirs (ngrok merges configs).
 bsky_start_ngrok() {
   local cfg="$RUNTIME/ngrok.yml"
   local -a extra=()
@@ -1423,13 +1415,6 @@ bsky_start_ngrok() {
   [[ -n "$defcfg" && -f "$defcfg" ]] && extra+=(--config "$defcfg")
 
   bsky_write_ngrok_config "$cfg"
-  nohup ngrok start --all --config "$cfg" ${extra[@]+"${extra[@]}"} >"$RUNTIME/ngrok.log" 2>&1 &
-  NGROK_PID=$!
-  sleep 1
-  if kill -0 "$NGROK_PID" 2>/dev/null; then return 0; fi
-
-  echo "devctl: ngrok exited on startup — retrying without the api traffic policy (see $RUNTIME/ngrok.log)" >&2
-  bsky_write_ngrok_config "$cfg" nopolicy
   nohup ngrok start --all --config "$cfg" ${extra[@]+"${extra[@]}"} >"$RUNTIME/ngrok.log" 2>&1 &
   NGROK_PID=$!
   sleep 1
@@ -1482,24 +1467,43 @@ except Exception:
   return 1
 }
 
-# The rkeys actually published under the handle — the record keys the bsky.app
-# feed links are built from (an internal feed's published rkey can differ from
-# its FEEDS key, so read it back rather than guess).
-bsky_published_rkeys() {
+# Capture each published feed's rkey and human-readable display name into a TSV
+# in the runtime dir (rkey<TAB>name per line), read back from the same --list
+# output. The rkey builds the URL; the display name is what we label it with,
+# since the dev rkeys are opaque and already appear in the URL.
+BSKY_FEEDS_TSV_NAME="bsky_feeds.tsv"
+bsky_capture_feeds() {
   local handle="$1" app_password="$2"
   compose_exec api pipenv run python scripts/publish_feed.py --list \
     --handle "$handle" --app-password "$app_password" 2>/dev/null |
-    sed -n 's/^  • \(.*\)/\1/p' | tr '\n' ' '
+    python3 -c '
+import sys
+rkey = None
+for line in sys.stdin:
+    t = line.strip()
+    if t[:1] == "•":            # "  • <rkey>"
+        rkey = t[1:].strip()
+    elif t.startswith("Name:") and rkey:
+        print(rkey + "\t" + t[5:].strip())
+        rkey = None
+' >"$RUNTIME/$BSKY_FEEDS_TSV_NAME" || true
 }
 
-# Aligned "rkey:  https://bsky.app/.../feed/rkey" lines — the feed names pad to a
-# common width so the URLs form a readable column.
+# Aligned "<display name>:  https://bsky.app/.../feed/<rkey>" lines — labels pad
+# to a common width so the URLs form a readable column. Reads the feed TSV
+# captured at `up` time.
 bsky_feed_links() {
-  local handle="$1" rkeys="$2" rkey w=0
-  for rkey in $rkeys; do [[ ${#rkey} -gt $w ]] && w=${#rkey}; done
-  for rkey in $rkeys; do
-    printf '  %-*s  https://bsky.app/profile/%s/feed/%s\n' "$((w + 1))" "$rkey:" "$handle" "$rkey"
-  done
+  local handle="$1" tsv="$RUNTIME/$BSKY_FEEDS_TSV_NAME"
+  [[ -s "$tsv" ]] || return 0
+  local w=0 rkey name
+  while IFS=$'\t' read -r rkey name; do
+    [[ -n "$name" ]] || name="$rkey"
+    [[ ${#name} -gt $w ]] && w=${#name}
+  done <"$tsv"
+  while IFS=$'\t' read -r rkey name; do
+    [[ -n "$name" ]] || name="$rkey"
+    printf '  %-*s  https://bsky.app/profile/%s/feed/%s\n' "$((w + 1))" "$name:" "$handle" "$rkey"
+  done <"$tsv"
 }
 
 bsky_write_state() {
@@ -1510,7 +1514,6 @@ GE_BSKY_DID=$3
 GE_BSKY_FRONTEND_HOST=$4
 GE_BSKY_FRONTEND_URL=$5
 GE_BSKY_OAUTH_OK=$6
-GE_BSKY_RKEYS=$7
 GE_BSKY_NGROK_PID=$NGROK_PID
 EOF
 }
@@ -1524,12 +1527,12 @@ bsky_print_tunnels() {
 }
 
 bsky_print_summary() {
-  local handle="$1" did="$2" frontend_url="$3" oauth_ok="$4" rkeys="$5"
+  local handle="$1" did="$2" frontend_url="$3" oauth_ok="$4"
   echo
   echo "Serving this environment's feed on Bluesky as $handle ($did)."
   echo
   echo "Published feeds:"
-  bsky_feed_links "$handle" "$rkeys"
+  bsky_feed_links "$handle"
   echo
   bsky_print_tunnels "${did#did:web:}" "$frontend_url"
   if [[ -n "$frontend_url" ]]; then
@@ -1565,8 +1568,9 @@ bsky_down() {
   [[ $# -eq 0 ]] || die "usage: devctl bsky down"
   [[ -f "$BSKY_STATE" ]] ||
     die "no active bsky session for this instance$(instance_label) — nothing to tear down"
-  # Read with env_file_value (sed), never `source`: GE_BSKY_RKEYS holds a
-  # space-separated list, which sourcing would try to run as a command.
+  # Read fields with env_file_value (sed), never `source` — sourcing a value
+  # with spaces or shell metacharacters would run it as a command (and abort
+  # under set -e). Feed names live in the TSV, not here, for the same reason.
   local handle app_password ngrok_pid
   handle="$(env_file_value "$BSKY_STATE" GE_BSKY_HANDLE)"
   handle="${handle:-${GE_DEV_BSKY_HANDLE:-}}"
@@ -1583,7 +1587,7 @@ bsky_down() {
   fi
 
   bsky_kill_ngrok "$ngrok_pid"
-  rm -f "$BSKY_STATE"
+  rm -f "$BSKY_STATE" "$RUNTIME/$BSKY_FEEDS_TSV_NAME"
   bsky_restore_stack
   echo "devctl: bsky session torn down — back to a local-only feed."
 }
@@ -1596,17 +1600,16 @@ bsky_status() {
     return
   fi
   # Read with env_file_value (sed), never `source` — see bsky_down.
-  local handle did api_host frontend_url oauth_ok rkeys
+  local handle did api_host frontend_url oauth_ok
   handle="$(env_file_value "$BSKY_STATE" GE_BSKY_HANDLE)"
   did="$(env_file_value "$BSKY_STATE" GE_BSKY_DID)"
   api_host="$(env_file_value "$BSKY_STATE" GE_BSKY_API_HOST)"
   frontend_url="$(env_file_value "$BSKY_STATE" GE_BSKY_FRONTEND_URL)"
   oauth_ok="$(env_file_value "$BSKY_STATE" GE_BSKY_OAUTH_OK)"
-  rkeys="$(env_file_value "$BSKY_STATE" GE_BSKY_RKEYS)"
   echo "bsky session active$(instance_label) as ${handle:-?} (${did:-?})."
   echo
   echo "Published feeds:"
-  bsky_feed_links "${handle:-}" "${rkeys:-}"
+  bsky_feed_links "${handle:-}"
   echo
   bsky_print_tunnels "${api_host:-?}" "${frontend_url:-}"
   if [[ -n "${frontend_url:-}" ]]; then

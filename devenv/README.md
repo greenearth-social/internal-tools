@@ -714,9 +714,8 @@ feed records are re-published every `bsky up`) and may allow only one endpoint
 at a time — in which case the api tunnel comes up and the frontend/OAuth half is
 skipped with a warning. A reserved domain (`GE_DEV_NGROK_DOMAIN`, or the
 `_API` / `_FRONTEND` forms for two) gives stable URLs and lets both tunnels run.
-The api tunnel is scoped by an ngrok traffic policy
-(`ngrok/feedgen-policy.yml`) to just `/.well-known/did.json` and `/xrpc/*` — the
-feed-generator surface; the frontend tunnel serves the app and is open.
+Both tunnels are wide open — the api tunnel reaches the whole api (handy for api
+development too), not just the feed-generator endpoints.
 
 **Security.** Both tunnels are public while up. Don't leave a session running —
 `devctl bsky down` (or `devctl bsky status` to check) — and treat the exposure
