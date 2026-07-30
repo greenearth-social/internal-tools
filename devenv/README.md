@@ -675,17 +675,23 @@ workflow — so it doesn't take `--repo-root`.
 
 ### What `bsky up` needs
 
-- [ngrok](https://ngrok.com/download), authenticated once:
-  `ngrok config add-authtoken <token>`.
+ngrok runs as a container (profile-gated, started only by `bsky up`) — nothing to
+install on the host. In `devenv.local.env`:
+
+- An ngrok **authtoken** — copy it from your
+  [ngrok dashboard](https://dashboard.ngrok.com/get-started/your-authtoken); a
+  free account is enough.
 - A dedicated dev Bluesky account and an
-  [app password](https://bsky.app/settings/app-passwords), in `devenv.local.env`:
+  [app password](https://bsky.app/settings/app-passwords):
 
   ```bash
+  NGROK_AUTHTOKEN=2abc...            # from the ngrok dashboard
   GE_DEV_BSKY_HANDLE=caterpie-internal.bsky.social
   GE_BSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
   ```
 
-- A running, seeded stack (`devctl up && devctl seed`).
+- A running, seeded stack (`devctl up && devctl seed`). The first `bsky up`
+  pulls the ngrok image.
 
 ### Running it
 

@@ -37,6 +37,11 @@ BASE_PORTS = {
     "FUNCTIONS": 5001,
     "FIREBASE_UI": 4000,
     "FIREBASE_UI_WS": 9150,
+    # The ngrok agent's inspection API (container 4040), published only while a
+    # `devctl bsky` session is up. 4041 rather than 4040 so the gap to the
+    # Emulator UI (4000) isn't a multiple of STRIDE — see the collision note above
+    # and test_no_cross_service_collisions.
+    "NGROK": 4041,
 }
 
 STRIDE = 10

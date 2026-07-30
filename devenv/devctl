@@ -157,6 +157,7 @@ resolve_ports() {
   FUNCTIONS_PORT="$GE_DEV_PORT_FUNCTIONS"
   FIREBASE_UI_PORT="$GE_DEV_PORT_FIREBASE_UI"
   FRONTEND_PORT="$GE_DEV_PORT_FRONTEND"
+  NGROK_PORT="$GE_DEV_PORT_NGROK"
 }
 
 # Only shown for named instances: on the default one it's noise, since those
@@ -1243,9 +1244,10 @@ bsky_up() {
   [[ $# -eq 0 ]] || die "usage: devctl bsky up"
   service_running api ||
     die "the api isn't running — start it with: devctl up$(name_flag)"
-  command -v ngrok >/dev/null ||
-    die "ngrok is required: https://ngrok.com/download
-        then authenticate once: ngrok config add-authtoken <token>"
+  # ngrok runs as a container (no host install); it only needs an authtoken.
+  [[ -n "${NGROK_AUTHTOKEN:-}" ]] ||
+    die "set NGROK_AUTHTOKEN in devenv.local.env — copy it from https://dashboard.ngrok.com/get-started/your-authtoken
+        (a free ngrok account is enough)"
 
   local handle="${GE_DEV_BSKY_HANDLE:-}"
   local app_password="${GE_BSKY_APP_PASSWORD:-}"
@@ -1263,15 +1265,15 @@ bsky_up() {
   local oauth_ok=0
   if bsky_ensure_oauth_keys; then oauth_ok=1; fi
 
-  # 2. Tunnels. NGROK_PID is set by bsky_start_ngrok for the abort/teardown path.
-  NGROK_PID=""
-  bsky_start_ngrok || die "ngrok failed to start — see $RUNTIME/ngrok.log"
+  # 2. Tunnels (a compose service). Match tunnels by the container-internal
+  #    upstream port the config dials — api:8000 and frontend:3000.
+  bsky_start_ngrok || die "the ngrok container failed to start — devctl logs ngrok"
   local api_host frontend_host
-  api_host="$(bsky_tunnel_host "$API_PORT")" || {
-    bsky_kill_ngrok "$NGROK_PID"
-    die "timed out waiting for the api tunnel — see $RUNTIME/ngrok.log"
+  api_host="$(bsky_tunnel_host 8000)" || {
+    bsky_stop_ngrok
+    die "timed out waiting for the api tunnel — devctl logs ngrok"
   }
-  frontend_host="$(bsky_tunnel_host "$FRONTEND_PORT")" || frontend_host=""
+  frontend_host="$(bsky_tunnel_host 3000)" || frontend_host=""
 
   local did="did:web:$api_host"
 
@@ -1301,7 +1303,7 @@ bsky_up() {
   echo "devctl: publishing feeds to $handle"
   compose_exec api pipenv run python scripts/publish_feed.py --sync --environment dev \
     --handle "$handle" --app-password "$app_password" --generator-did "$did" || {
-    bsky_kill_ngrok "$NGROK_PID"
+    bsky_stop_ngrok
     bsky_restore_stack
     die "publishing feeds failed — the tunnel and api change have been rolled back"
   }
@@ -1415,40 +1417,50 @@ bsky_wire_frontend() {
   compose up -d --no-deps --force-recreate "${services[@]}" >/dev/null
 }
 
-# Write the ngrok agent config for both tunnels. Both are opened wide open — the
-# api tunnel is also usable for plain api development, and path-scoping it just
-# made the api confusingly unreachable except at the feed-generator endpoints.
+# Write the ngrok agent config the container reads (mounted at /etc/ngrok.yml).
+# The tunnels dial the api and frontend by service name on the compose network,
+# so no host app ports are involved. web_addr binds the agent's inspection API
+# to 0.0.0.0 so the published 4040 is reachable from the host (the emulators need
+# socat for the same reason; the ngrok agent has a config knob for it). The
+# authtoken goes in the config since we always start with --config. Both tunnels
+# are wide open — the api tunnel is usable for plain api development too.
 bsky_write_ngrok_config() {
   local cfg="$1"
   local api_domain="${GE_DEV_NGROK_DOMAIN_API:-${GE_DEV_NGROK_DOMAIN:-}}"
   {
     echo 'version: "2"'
+    echo "authtoken: ${NGROK_AUTHTOKEN}"
+    echo 'web_addr: 0.0.0.0:4040'
     echo 'tunnels:'
     echo '  api:'
     echo '    proto: http'
-    echo "    addr: $API_PORT"
+    echo '    addr: api:8000'
     [[ -z "$api_domain" ]] || echo "    domain: $api_domain"
     echo '  frontend:'
     echo '    proto: http'
-    echo "    addr: $FRONTEND_PORT"
+    echo '    addr: frontend:3000'
     [[ -z "${GE_DEV_NGROK_DOMAIN_FRONTEND:-}" ]] || echo "    domain: ${GE_DEV_NGROK_DOMAIN_FRONTEND}"
   } >"$cfg"
+  chmod 600 "$cfg"
 }
 
-# Start both tunnels in one background agent. The authtoken lives in the user's
-# default ngrok config, so we pass ours *and* theirs (ngrok merges configs).
-bsky_start_ngrok() {
-  local cfg="$RUNTIME/ngrok.yml"
-  local -a extra=()
-  local defcfg
-  defcfg="$(ngrok config check 2>/dev/null | sed -n 's/.*[Vv]alid configuration file at \(.*\)/\1/p' | head -1)"
-  [[ -n "$defcfg" && -f "$defcfg" ]] && extra+=(--config "$defcfg")
+BSKY_PROFILE="bsky"
 
-  bsky_write_ngrok_config "$cfg"
-  nohup ngrok start --all --config "$cfg" ${extra[@]+"${extra[@]}"} >"$RUNTIME/ngrok.log" 2>&1 &
-  NGROK_PID=$!
-  sleep 1
-  kill -0 "$NGROK_PID" 2>/dev/null
+# Start the ngrok agent as a compose service. Fresh-recreate so it always picks
+# up this session's config, then confirm it stayed up (a bad authtoken exits
+# immediately) before we wait on its tunnels.
+bsky_start_ngrok() {
+  bsky_write_ngrok_config "$RUNTIME/ngrok.yml"
+  compose --profile "$BSKY_PROFILE" up -d --force-recreate ngrok >/dev/null 2>&1 || return 1
+  sleep 2
+  compose --profile "$BSKY_PROFILE" ps --status running --format '{{.Service}}' 2>/dev/null |
+    grep -q '^ngrok$'
+}
+
+# Stop and remove the ngrok container (nothing to preserve — the config is
+# regenerated each session).
+bsky_stop_ngrok() {
+  compose --profile "$BSKY_PROFILE" rm -sf ngrok >/dev/null 2>&1 || true
 }
 
 # Poll ngrok's local API for the https tunnel whose upstream is the given local
@@ -1457,7 +1469,7 @@ bsky_start_ngrok() {
 bsky_tunnel_host() {
   local port="$1" host
   for _ in $(seq 1 30); do
-    host="$(curl -s --max-time 2 http://127.0.0.1:4040/api/tunnels 2>/dev/null | python3 -c '
+    host="$(curl -s --max-time 2 "http://127.0.0.1:${NGROK_PORT}/api/tunnels" 2>/dev/null | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -1538,7 +1550,6 @@ GE_BSKY_DID=$3
 GE_BSKY_FRONTEND_HOST=$4
 GE_BSKY_FRONTEND_URL=$5
 GE_BSKY_OAUTH_OK=$6
-GE_BSKY_NGROK_PID=$NGROK_PID
 EOF
 }
 
@@ -1571,11 +1582,6 @@ bsky_print_summary() {
   echo "  devctl bsky down$(name_flag)"
 }
 
-bsky_kill_ngrok() {
-  local pid="${1:-}"
-  [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
-}
-
 # Recreate api + frontend at their local defaults (no tunnel DID, no public
 # origin, dev-auth shim back). Used by `down` and by `up`'s rollback. Re-supplies
 # the api's ES key the same way `up`/`restart` do — a bare recreate would drop it
@@ -1599,10 +1605,9 @@ bsky_down() {
   # Read fields with env_file_value (sed), never `source` — sourcing a value
   # with spaces or shell metacharacters would run it as a command (and abort
   # under set -e). Feed names live in the TSV, not here, for the same reason.
-  local handle app_password ngrok_pid
+  local handle app_password
   handle="$(env_file_value "$BSKY_STATE" GE_BSKY_HANDLE)"
   handle="${handle:-${GE_DEV_BSKY_HANDLE:-}}"
-  ngrok_pid="$(env_file_value "$BSKY_STATE" GE_BSKY_NGROK_PID)"
   app_password="${GE_BSKY_APP_PASSWORD:-}"
   if [[ -n "$handle" && -n "$app_password" ]] && service_running api; then
     echo "devctl: deleting feed records from $handle"
@@ -1614,7 +1619,7 @@ bsky_down() {
     echo "        publish_feed.py --delete-all --handle $handle" >&2
   fi
 
-  bsky_kill_ngrok "$ngrok_pid"
+  bsky_stop_ngrok
   rm -f "$BSKY_STATE" "$RUNTIME/$BSKY_FEEDS_TSV_NAME"
   bsky_restore_stack
   echo "devctl: bsky session torn down — back to a local-only feed."
@@ -2267,12 +2272,12 @@ Work with it:
   pull             fetch + fast-forward every sibling checkout and flag any on a
                    branch other than main (--repo-root <dir> for another copy)
 
-Serve on real Bluesky (opt-in; needs ngrok + a dev bsky account):
+Serve on real Bluesky (opt-in; ngrok runs as a container — just an authtoken):
   bsky up          tunnel this env to Bluesky and publish its feeds; also serves
                    the frontend for real sign-in. Prints the feed + sign-in links
   bsky down        delete those feed records and close the tunnels
   bsky status      show the active session's tunnels, sign-in URL and feed links
-                   (config: GE_DEV_BSKY_HANDLE, GE_BSKY_APP_PASSWORD; see README)
+       (config: NGROK_AUTHTOKEN, GE_DEV_BSKY_HANDLE, GE_BSKY_APP_PASSWORD; see README)
 
 Instances & ports:
   ls               every instance on this machine, and whether it's running
@@ -2299,7 +2304,7 @@ Configuration (devenv.local.env, gitignored — see devenv.local.env.example)
   Live-service keys:   GE_DEV_ES_API_KEY, GE_DEV_INFERENCE_API_KEY,
                        GE_PERSPECTIVE_API_KEY
   Stick a live choice: GE_DEV_LIVE, GE_DEV_LIVE_ENV (else a bare 'up' is all-local)
-  Serve on bsky:       GE_DEV_BSKY_HANDLE, GE_BSKY_APP_PASSWORD,
+  Serve on bsky:       NGROK_AUTHTOKEN, GE_DEV_BSKY_HANDLE, GE_BSKY_APP_PASSWORD,
                        GE_DEV_NGROK_DOMAIN[_API|_FRONTEND] (bsky up/down)
   Other overrides:     ports (GE_DEV_PORT_*), ES heap (GE_DEV_ES_HEAP),
                        repo root (GE_DEV_REPO_ROOT)
