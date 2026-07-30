@@ -332,6 +332,10 @@ services:
       # mode, where it points somewhere this environment doesn't run.
       - GE_INFERENCE_BASE_URL=${GE_DEV_INFERENCE_URL:-http://inference:8000}
       - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
+      # did:web the api answers as. Local by default; `devctl bsky up` recreates
+      # the api with the ngrok tunnel host so bsky's AppView can resolve
+      # /.well-known/did.json against it. `bsky down` restores the default.
+      - GE_FEED_GENERATOR_DID=${GE_DEV_FEED_GENERATOR_DID:-did:web:localhost}
       - GE_METRICS_EXPORT_INTERVAL_SEC=86400
       # The "your-feed" pipeline runs the `perspective` ranker, which calls
       # Google's Perspective API and hard-fails without a key. Default to the
@@ -357,6 +361,24 @@ services:
     volumes:
       - ${GE_DEV_REPO_ROOT:-../..}/api:/app
       - api_venv:/app/.venv
+
+  # ngrok agent for `devctl bsky up` — serve this environment's feed on real
+  # Bluesky (issue #19). Profile-gated ("bsky"), so a plain `devctl up` never
+  # starts it: a public tunnel to the stack is opt-in and torn down by
+  # `devctl bsky down`. It dials the api and frontend by service name on the
+  # compose network, so it needs no host-published app ports. devctl writes the
+  # session config (both tunnels + the authtoken from devenv.local.env) into the
+  # runtime dir before starting it; the config's web_addr binds the agent's
+  # inspection API to 0.0.0.0 so the published 4040 is reachable, which is how
+  # devctl reads back the public URLs.
+  ngrok:
+    image: ngrok/ngrok:latest
+    profiles: ["bsky"]
+    command: ["start", "--all", "--config", "/etc/ngrok.yml"]
+    volumes:
+      - ${GE_DEV_RUNTIME:-./.runtime}/ngrok.yml:/etc/ngrok.yml:ro
+    ports:
+      - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_NGROK:-4041}:4040"
 
   # Optional: real-time posts from the Megastream archives (issue api#269).
   #
