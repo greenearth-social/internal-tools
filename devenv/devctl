@@ -1267,7 +1267,7 @@ bsky_up() {
 
   # 2. Tunnels (a compose service). Match tunnels by the container-internal
   #    upstream port the config dials — api:8000 and frontend:3000.
-  bsky_start_ngrok || die "the ngrok container failed to start — devctl logs ngrok"
+  bsky_start_ngrok || die "ngrok didn't start (see the error above)"
   local api_host frontend_host
   api_host="$(bsky_tunnel_host 8000)" || {
     bsky_stop_ngrok
@@ -1447,14 +1447,24 @@ bsky_write_ngrok_config() {
 BSKY_PROFILE="bsky"
 
 # Start the ngrok agent as a compose service. Fresh-recreate so it always picks
-# up this session's config, then confirm it stayed up (a bad authtoken exits
-# immediately) before we wait on its tunnels.
+# up this session's config, then confirm it stayed up before we wait on its
+# tunnels: the agent exits on any startup error, so a dead container means a real
+# problem we should show rather than swallow.
 bsky_start_ngrok() {
   bsky_write_ngrok_config "$RUNTIME/ngrok.yml"
   compose --profile "$BSKY_PROFILE" up -d --force-recreate ngrok >/dev/null 2>&1 || return 1
   sleep 2
-  compose --profile "$BSKY_PROFILE" ps --status running --format '{{.Service}}' 2>/dev/null |
-    grep -q '^ngrok$'
+  if compose --profile "$BSKY_PROFILE" ps --status running --format '{{.Service}}' 2>/dev/null |
+    grep -q '^ngrok$'; then
+    return 0
+  fi
+  # The container came up but the agent exited — surface why. Common causes: a
+  # bad NGROK_AUTHTOKEN, or a reserved domain still held by another agent
+  # (ERR_NGROK_334) — e.g. a leftover session that hasn't released it; stop the
+  # holder or wait a few seconds and retry.
+  echo "devctl: the ngrok agent exited on startup:" >&2
+  compose --profile "$BSKY_PROFILE" logs --tail=10 ngrok 2>/dev/null | sed 's/^/        /' >&2
+  return 1
 }
 
 # Stop and remove the ngrok container (nothing to preserve — the config is
