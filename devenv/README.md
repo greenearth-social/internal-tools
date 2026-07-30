@@ -696,17 +696,19 @@ devctl bsky down      # delete the records and close the tunnels
 ```
 
 `bsky up` prints a `bsky.app/profile/<handle>/feed/<rkey>` link per feed (labeled
-by feed name) and, for sign-in, the **frontend tunnel URL** — browse that, not
-`localhost:3000`. Real OAuth redirects the callback to the public origin, so the
-signed-in session lives there; `localhost` stays on the local shim. See [Working
-on real Bluesky auth](#working-on-real-bluesky-auth) for what the origin change
-means.
+by its `feeds.py` key) and, for sign-in, the **frontend tunnel URL** — browse
+that, not `localhost:3000`. Real OAuth redirects the callback to the public
+origin, so the signed-in session lives there; `localhost` stays on the local
+shim. See [Working on real Bluesky auth](#working-on-real-bluesky-auth) for what
+the origin change means.
 
 Enabling real sign-in restarts the firebase emulator (the functions read
 `APP_ORIGIN` and the keys at startup), which **resets its emulator data** —
 Firestore documents and auth sessions. Plain feed-serving and `bsky down` leave
 the emulator untouched, so you only lose that data when you actually turn on real
-OAuth.
+OAuth — and even then, a repeat `bsky up` at the **same origin** (a stable ngrok
+domain plus the cached keypair) reuses the running emulator instead of recreating
+it, so its data survives an up/down/up cycle.
 
 **OAuth keys are generated, not borrowed from prod.** An AT Protocol OAuth
 client is identified by its metadata URL, which for you is the tunnel origin —

@@ -1309,7 +1309,7 @@ bsky_up() {
   # 6. Persist the session and print where to find everything. Capturing the
   #    feed names is best-effort (only affects the printed labels), so it never
   #    aborts after a successful publish.
-  bsky_capture_feeds "$handle" "$app_password"
+  bsky_capture_feeds
   bsky_write_state "$handle" "$api_host" "$did" "$frontend_host" "$frontend_url" "$oauth_ok"
   bsky_print_summary "$handle" "$did" "$frontend_url" "$oauth_ok"
 }
@@ -1366,9 +1366,22 @@ bsky_export_oauth_env() {
   export OAUTH_STATE_ENCRYPTION_KEY="$(cat "$BSKY_OAUTH_DIR/state-key")"
 }
 
-# Recreate frontend + firebase with the tunnel as the public origin. With OAuth
-# keys, also take the dev-auth shim out so real Bluesky sign-in runs; without,
-# serve the app but leave the shim in and say sign-in is disabled.
+# True when the running firebase already has the given APP_ORIGIN and client kid
+# loaded — i.e. its functions are already configured for this tunnel, so it can
+# be reused rather than recreated (which would wipe the emulator's data).
+bsky_firebase_has_env() {
+  local want_origin="$1" want_kid="$2" cur_origin cur_kid
+  [[ -n "$want_kid" ]] || return 1
+  service_running firebase || return 1
+  cur_origin="$(compose exec -T firebase printenv APP_ORIGIN 2>/dev/null || true)"
+  cur_kid="$(compose exec -T firebase printenv BLUESKY_OAUTH_CLIENT_KID 2>/dev/null || true)"
+  [[ "$cur_origin" == "$want_origin" && "$cur_kid" == "$want_kid" ]]
+}
+
+# Recreate the frontend (and, only when needed, firebase) with the tunnel as the
+# public origin. With OAuth keys, also take the dev-auth shim out so real Bluesky
+# sign-in runs; without, serve the app but leave the shim in and say sign-in is
+# disabled.
 bsky_wire_frontend() {
   local host="$1" oauth_ok="$2"
   echo "devctl: wiring the frontend for https://$host"
@@ -1383,8 +1396,17 @@ bsky_wire_frontend() {
     export GE_DEV_APP_ORIGIN="https://$host"
     bsky_export_oauth_env
     export GE_DEV_FUNCTIONS_TARGET="firebase:15001"
-    services+=(firebase)
-    echo "devctl: restarting the firebase emulator to enable real OAuth (its emulator data resets)" >&2
+    # `bsky down` leaves the tunnel APP_ORIGIN + keys loaded in the functions
+    # (only the frontend reverts to the shim), so a repeat `bsky up` at the same
+    # origin — a stable ngrok domain plus the cached keypair — can reuse the
+    # running emulator instead of recreating it, keeping its data across the
+    # up/down/up cycle. Restart only when the loaded env doesn't already match.
+    if bsky_firebase_has_env "https://$host" "${BLUESKY_OAUTH_CLIENT_KID:-}"; then
+      echo "devctl: firebase already has this origin and keys — reusing its emulator state"
+    else
+      services+=(firebase)
+      echo "devctl: restarting the firebase emulator to enable real OAuth (its emulator data resets)" >&2
+    fi
   else
     echo "devctl: real sign-in disabled (no OAuth keys) — the app is served but /auth uses the local shim" >&2
   fi
@@ -1475,26 +1497,20 @@ except Exception:
   return 1
 }
 
-# Capture each published feed's rkey and human-readable display name into a TSV
-# in the runtime dir (rkey<TAB>name per line), read back from the same --list
-# output. The rkey builds the URL; the display name is what we label it with,
-# since the dev rkeys are opaque and already appear in the URL.
+# Capture each published feed as "rkey<TAB>label" into a TSV in the runtime dir.
+# The label is the feeds.py key (e.g. unranked-your-feed) — the recognizable
+# name; the URL uses the published rkey, which in dev is the feed's
+# internal_rkey. Read straight from the api's FEEDS config (the authoritative
+# source, and exactly what --sync publishes), so no bsky round-trip is needed.
 BSKY_FEEDS_TSV_NAME="bsky_feeds.tsv"
 bsky_capture_feeds() {
-  local handle="$1" app_password="$2"
-  compose_exec api pipenv run python scripts/publish_feed.py --list \
-    --handle "$handle" --app-password "$app_password" 2>/dev/null |
-    python3 -c '
+  compose_exec api pipenv run python -c '
 import sys
-rkey = None
-for line in sys.stdin:
-    t = line.strip()
-    if t[:1] == "•":            # "  • <rkey>"
-        rkey = t[1:].strip()
-    elif t.startswith("Name:") and rkey:
-        print(rkey + "\t" + t[5:].strip())
-        rkey = None
-' >"$RUNTIME/$BSKY_FEEDS_TSV_NAME" || true
+sys.path.insert(0, "src")
+from app.feeds import FEEDS
+for key, cfg in FEEDS.items():
+    print((cfg.internal_rkey or key) + "\t" + key)
+' 2>/dev/null >"$RUNTIME/$BSKY_FEEDS_TSV_NAME" || true
 }
 
 # Aligned "<display name>:  https://bsky.app/.../feed/<rkey>" lines — labels pad
