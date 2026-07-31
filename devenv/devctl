@@ -1913,6 +1913,23 @@ print("%s posts / %s likes" % (format(c["posts"], ","), format(c["likes"], ","))
   fi
   d_ok "running: ${running_svcs% }"
 
+  # "Running" only means the container is up. A service whose app is failing
+  # inside — a crash loop, a config it rejects — keeps the container running
+  # while its healthcheck never passes. `devctl up` waits on those
+  # healthchecks, so without this the wait looks like a hang and the only
+  # symptom reported is whatever step got skipped downstream.
+  local health_lines unhealthy starting
+  health_lines="$(compose ps --status running --format '{{.Service}} {{.Health}}' 2>/dev/null)"
+  unhealthy="$(awk '$2 == "unhealthy" {print $1}' <<<"$health_lines" | tr '\n' ' ')"
+  starting="$(awk '$2 == "starting" {print $1}' <<<"$health_lines" | tr '\n' ' ')"
+  [[ -z "${unhealthy// /}" ]] ||
+    d_fail "running but failing their healthcheck: ${unhealthy% }" \
+      "devctl logs$(name_flag) ${unhealthy%% *} — the container is up, so the fault is inside the service"
+  [[ -z "${starting// /}" ]] ||
+    d_warn "healthcheck not passing yet: ${starting% }" \
+      "devctl logs$(name_flag) ${starting%% *} — normal right after devctl up; if it stays
+             here the service is failing to become ready, not just slow"
+
   local killed
   killed="$(compose ps -a --format '{{.Service}} {{.Status}}' 2>/dev/null |
     { grep "Exited (137)" || true; } | awk '{print $1}' | tr '\n' ' ')"
