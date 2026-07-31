@@ -1434,14 +1434,15 @@ bsky_wire_frontend() {
 # so no host app ports are involved. web_addr binds the agent's inspection API
 # to 0.0.0.0 so the published 4040 is reachable from the host (the emulators need
 # socat for the same reason; the ngrok agent has a config knob for it). The
-# authtoken goes in the config since we always start with --config. Both tunnels
-# are wide open — the api tunnel is usable for plain api development too.
+# config contains no secrets and is world-readable so the image's non-root user
+# can read it regardless of the host user or sudo ownership. NGROK_AUTHTOKEN is
+# passed separately by compose. Both tunnels are wide open — the api tunnel is
+# usable for plain api development too.
 bsky_write_ngrok_config() {
   local cfg="$1"
   local api_domain="${GE_DEV_NGROK_DOMAIN_API:-${GE_DEV_NGROK_DOMAIN:-}}"
   {
     echo 'version: "2"'
-    echo "authtoken: ${NGROK_AUTHTOKEN}"
     echo 'web_addr: 0.0.0.0:4040'
     echo 'tunnels:'
     echo '  api:'
@@ -1453,7 +1454,7 @@ bsky_write_ngrok_config() {
     echo '    addr: frontend:3000'
     [[ -z "${GE_DEV_NGROK_DOMAIN_FRONTEND:-}" ]] || echo "    domain: ${GE_DEV_NGROK_DOMAIN_FRONTEND}"
   } >"$cfg"
-  chmod 600 "$cfg"
+  chmod 644 "$cfg"
 }
 
 BSKY_PROFILE="bsky"

@@ -34,7 +34,8 @@ working copy with `up --repo-root <dir>` — see
 `devenv.local.env` is the gitignored file for all local overrides (ports, live
 services, bsky serving, …); copy
 [`devenv.local.env.example`](devenv.local.env.example) to start, or run
-`./devctl help` for the shortlist.
+`./devctl help` for the shortlist. It can contain credentials, so keep it
+private to your user (`chmod 600 devenv.local.env`).
 
 **New here?** [docs/onboarding.md](docs/onboarding.md) is the full
 walkthrough, from clone to a ranked feed. The rest of the docs directory:
@@ -676,7 +677,9 @@ workflow — so it doesn't take `--repo-root`.
 ### What `bsky up` needs
 
 ngrok runs as a container (profile-gated, started only by `bsky up`) — nothing to
-install on the host. In `devenv.local.env`:
+install on the host. Its authtoken is passed through the container environment;
+the generated, bind-mounted tunnel configuration contains no secrets. In
+`devenv.local.env`:
 
 - An ngrok **authtoken** — copy it from your
   [ngrok dashboard](https://dashboard.ngrok.com/get-started/your-authtoken); a
