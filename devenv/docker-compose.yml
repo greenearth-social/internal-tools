@@ -285,7 +285,12 @@ services:
       - |
         set -e
         pipenv install --dev
-        exec pipenv run uvicorn src.app.main:app --host 0.0.0.0 --port 8000 ${GE_DEV_API_RELOAD:+--reload}
+        # --loop asyncio matches prod (Procfile): uvloop has an fd-bookkeeping
+        # race with aiohttp under connection churn (uvloop#646/#653) that the
+        # api hit during load tests. Keep the two in sync so the dev env can
+        # reproduce concurrency behaviour. Revisit when uvloop >0.22.1 ships the
+        # #740 fix.
+        exec pipenv run uvicorn src.app.main:app --host 0.0.0.0 --port 8000 --loop asyncio ${GE_DEV_API_RELOAD:+--reload}
     # perspective-stub and inference are deliberately absent: either can be
     # replaced by a deployed service (`devctl up --live`), and naming one here
     # would start the local container anyway. devctl brings up whichever are

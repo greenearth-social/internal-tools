@@ -423,42 +423,53 @@ sharers_of_owner() {
   echo "${out% }"
 }
 
-# --- seed staleness ---------------------------------------------------------
+# --- data staleness ---------------------------------------------------------
 # The rebase leaves the fixture window ending an hour before seed time, and
 # the api's popularity generator only looks back 24h (RECENCY_WINDOW) — so
 # from ~23 hours after a seed, recency-anchored feeds (popularity, your-feed)
 # come back thin or empty with nothing visibly wrong. That's the single most
 # misleading failure this environment has, so it's warned about wherever the
 # symptom would otherwise surface.
-STALE_SEED_HOURS=23
+STALE_DATA_HOURS=23
 
-# Where this instance's data was seeded: a sharer serves the owner's data, so
-# its staleness is the owner's.
-seed_runtime() {
-  if share_es; then echo "$ES_OWNER_RUNTIME"; else echo "$RUNTIME"; fi
+# Hours since the newest indexed post — the ground truth for recency drift.
+# Read straight from Elasticsearch rather than a seed-time marker: the marker
+# was only written by `devctl seed`, so a persisted ES volume reloaded by
+# `up`/`bootstrap` (which skip re-seeding when posts already exist) had no
+# marker and aged silently. This works regardless of who seeded or when, and
+# a sharer sees the owner's data because es_curl reads the owner's cluster.
+# Empty (nonzero return) when ES is unreachable or the index is empty, so
+# callers treat "unknown" as "don't warn" rather than "fresh".
+data_age_hours() {
+  local newest_ms
+  newest_ms="$(es_curl /posts/_search -H 'Content-Type: application/json' \
+    -d '{"size":0,"aggs":{"newest":{"max":{"field":"created_at"}}}}' 2>/dev/null |
+    python3 -c 'import json, sys
+try:
+    v = json.load(sys.stdin)["aggregations"]["newest"]["value"]
+except Exception:
+    sys.exit(0)
+if v is not None:
+    print(int(v))' 2>/dev/null)"
+  [[ -n "$newest_ms" ]] || return 0
+  # Clamp at 0: right after a seed the newest post can sit a touch ahead of
+  # now, and a negative "age" reads as broken rather than fresh.
+  local age=$((($(date +%s) - newest_ms / 1000) / 3600))
+  echo $((age > 0 ? age : 0))
 }
 
-# Hours since the last seed; nothing if never seeded (or seeded before this
-# was recorded).
-seed_age_hours() {
-  local seeded
-  seeded="$(env_file_value "$(seed_runtime)/seed.env" GE_DEV_SEEDED_AT)"
-  [[ -n "$seeded" ]] || return 0
-  echo $((($(date +%s) - seeded) / 3600))
-}
-
-warn_stale_seed() {
+warn_stale_data() {
   local age
-  age="$(seed_age_hours)"
-  [[ -n "$age" && "$age" -ge "$STALE_SEED_HOURS" ]] || return 0
+  age="$(data_age_hours)"
+  [[ -n "$age" && "$age" -ge "$STALE_DATA_HOURS" ]] || return 0
   local target="devctl seed"
   if share_es; then
     target="devctl seed   (on the '$ES_OWNER' instance, which owns the data)"
   fi
   cat >&2 <<EOF
-devctl: the data was seeded ${age}h ago and has drifted out of the api's 24h
-        recency window — recency-anchored feeds come back thin or empty from
-        here. Re-seed: $target
+devctl: the newest indexed post is ${age}h old — the data has drifted out of
+        the api's 24h recency window, so recency-anchored feeds come back thin
+        or empty from here. Re-seed: $target
 EOF
 }
 
@@ -1063,6 +1074,10 @@ EOF
     else
       fixtures_hint
     fi
+  else
+    # Data present but possibly aged past the api's recency window. Skip under
+    # --live es, where the api reads a live cluster and local data age is moot.
+    live_has es || warn_stale_data
   fi
 }
 
@@ -1113,9 +1128,6 @@ cmd_seed() {
   compose run --rm seed-megastream
   echo "devctl: loading likes and like counts..."
   compose run --rm seed-likes
-  # status/feed/doctor compare against this to warn when the window drifts
-  # out of the api's recency windows.
-  printf 'GE_DEV_SEEDED_AT=%s\n' "$(date +%s)" >"$RUNTIME/seed.env"
   local persona api_running=0
   persona="$(env_file_value "$RUNTIME/probe.env" GE_PROBE_USER_DID)"
   # Restart the api so it picks up the new persona from .runtime/probe.env —
@@ -1153,8 +1165,8 @@ cmd_feed() {
   # your-feed). See feed_view.py --help for the full flag set.
   service_running api ||
     die "the api isn't running — start it with: devctl up$(name_flag)"
-  # The symptom of a stale seed is exactly this command coming back empty.
-  warn_stale_seed
+  # The symptom of stale data is exactly this command coming back empty.
+  warn_stale_data
   compose_exec api pipenv run python scripts/feed_view.py "$@"
 }
 
@@ -1821,9 +1833,9 @@ cmd_status() {
   [[ "$GE_DEV_REPO_ROOT" == "$DEFAULT_REPO_ROOT" ]] ||
     echo "code         mounted from $GE_DEV_REPO_ROOT"
   local age
-  age="$(seed_age_hours)"
-  [[ -z "$age" ]] || echo "seeded       ${age}h ago"
-  warn_stale_seed
+  age="$(data_age_hours)"
+  [[ -z "$age" ]] || echo "data age     newest post ${age}h old"
+  warn_stale_data
 }
 
 # --- doctor -----------------------------------------------------------------
@@ -1965,12 +1977,12 @@ print("%s posts / %s likes" % (format(c["posts"], ","), format(c["likes"], ","))
     fi
 
     local age
-    age="$(seed_age_hours)"
-    if [[ -n "$age" && "$age" -ge "$STALE_SEED_HOURS" ]]; then
-      d_warn "seeded ${age}h ago — outside the api's 24h recency window, so recency feeds are empty" \
+    age="$(data_age_hours)"
+    if [[ -n "$age" && "$age" -ge "$STALE_DATA_HOURS" ]]; then
+      d_warn "newest post ${age}h old — outside the api's 24h recency window, so recency feeds are empty" \
         "$seed_fix"
     elif [[ -n "$age" ]]; then
-      d_ok "seeded ${age}h ago"
+      d_ok "newest post ${age}h old"
     fi
 
     local code
