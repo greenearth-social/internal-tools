@@ -450,6 +450,10 @@ through a port-forward. Run one in its own terminal:
 ./devctl tunnel stage     # or: prod
 ```
 
+The command uses `gcloud` to select that environment's
+`greenearth-<env>-cluster` before starting `kubectl`; it does not depend on the
+context that was selected when you opened the terminal.
+
 It reconnects on its own — `kubectl port-forward` drops connections routinely,
 and a silently dead tunnel looks like a broken environment.
 

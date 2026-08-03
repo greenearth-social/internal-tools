@@ -1170,6 +1170,29 @@ cmd_feed() {
   compose_exec api pipenv run python scripts/feed_view.py "$@"
 }
 
+configure_tunnel_context() {
+  local env="$1"
+  local cluster="${GE_DEV_K8S_CLUSTER:-greenearth-$env-cluster}"
+  local region="${GE_GCP_REGION:-us-east1}"
+  local project="${GE_GCP_PROJECT_ID:-greenearth-471522}"
+  local context
+
+  command -v gcloud >/dev/null ||
+    die "gcloud is required for devctl tunnel to select the $env cluster"
+
+  echo "devctl: selecting Kubernetes cluster $cluster ($project/$region)" >&2
+  if ! gcloud container clusters get-credentials "$cluster" \
+    --location="$region" --project="$project" >&2; then
+    die "couldn't configure kubectl for $cluster — check your gcloud login and cluster access"
+  fi
+
+  context="$(kubectl config current-context 2>/dev/null)" ||
+    die "gcloud configured $cluster, but kubectl has no current context"
+  [[ -n "$context" ]] ||
+    die "gcloud configured $cluster, but kubectl has no current context"
+  printf '%s\n' "$context"
+}
+
 cmd_tunnel() {
   # `--live es` needs one of these open: the cluster sits behind an internal
   # load balancer with no address a container can dial. Runs in the foreground
@@ -1185,15 +1208,21 @@ cmd_tunnel() {
   local ns="${GE_DEV_ES_NAMESPACE:-greenearth-$env}"
   local svc="${GE_DEV_ES_SERVICE:-svc/greenearth-es-internal-lb}"
   local port="${GE_DEV_ES_TUNNEL_PORT:-9200}"
+  local context
 
-  echo "devctl: tunneling $ns/$svc to localhost:$port (ctrl-c to stop)"
+  # stage and prod live in separate GKE clusters. Select the matching one
+  # instead of inheriting whichever global kubectl context happened to be
+  # active, then pin it so a later context change cannot redirect the tunnel.
+  context="$(configure_tunnel_context "$env")" || exit 1
+
+  echo "devctl: tunneling $ns/$svc to localhost:$port via $context (ctrl-c to stop)"
   echo "        then, in another shell: devctl up --live es --live-env $env"
   # The listener must be reachable from containers, which name the host as
   # host.docker.internal. Docker Desktop routes that to loopback, so the
   # default is fine there; on native Linux it's the bridge gateway, so the
   # tunnel has to listen wider: GE_DEV_ES_TUNNEL_BIND=0.0.0.0 (docs/remote.md).
   while true; do
-    kubectl port-forward "$svc" "${port}:9200" -n "$ns" \
+    kubectl --context "$context" port-forward "$svc" "${port}:9200" -n "$ns" \
       --address "${GE_DEV_ES_TUNNEL_BIND:-127.0.0.1}" || true
     echo "devctl: tunnel dropped, reconnecting..." >&2
     sleep 2
