@@ -137,15 +137,26 @@ def apply_like_counts() -> None:
 
 
 def update_posts_recent() -> None:
-    """Point the posts_recent alias (the api's kNN/candidate index) at the
-    seeded posts indexes. In prod a cronjob keeps it on the two most recent
-    period indexes; dev data is small enough to alias everything."""
-    request(
-        "POST",
-        "/_aliases",
-        json.dumps({"actions": [{"add": {"index": "posts-*", "alias": "posts_recent"}}]}).encode(),
-    )
-    print("posts_recent alias updated")
+    """Point the posts_recent and posts_recent_quality aliases at the seeded
+    posts indexes. In prod the update-recent-alias cronjob keeps them on the two
+    (resp. three) most recent period indexes; dev data is small enough to alias
+    everything.
+
+    posts_recent must exclude posts-quality-*: those indexes match the posts-*
+    pattern too, and sweeping them in would surface every quality post twice in
+    the api's candidate generators (greenearth-social/ingex#442)."""
+    actions = [
+        {"add": {"indices": ["posts-*", "-posts-quality-*"], "alias": "posts_recent"}}
+    ]
+
+    # The quality corpus is built by ingex's backfill_quality_index command, which
+    # runs after a seed (if at all). Aliasing a wildcard that matches no index is
+    # an error, so only add it once something is there.
+    if request("GET", "/_cat/indices/posts-quality-*?format=json&h=index"):
+        actions.append({"add": {"index": "posts-quality-*", "alias": "posts_recent_quality"}})
+
+    request("POST", "/_aliases", json.dumps({"actions": actions}).encode())
+    print(f"aliases updated ({len(actions)} action(s))")
 
 
 def main() -> None:
