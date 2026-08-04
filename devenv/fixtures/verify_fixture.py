@@ -124,6 +124,22 @@ def main() -> int:
         if unknown:
             warnings.append(f"{unknown} persona lookup(s) failed; could not confirm those DIDs")
 
+    # Dev-team accounts (internal-tools#22). Not a failure — --no-dev-users is
+    # a legitimate way to generate one — but a fixture without them gives
+    # everyone on the team an empty feed when they sign in as themselves, and
+    # this is the last point before it becomes a public release.
+    dev_users = manifest.get("dev_users", [])
+    if not dev_users:
+        warnings.append(
+            "no dev_users in the manifest — signing in as yourself will give an "
+            "empty feed (regenerate without --no-dev-users)"
+        )
+    else:
+        empty = [u["handle"] for u in dev_users if not u.get("likes")]
+        print(f"  dev users={len(dev_users)} with history={len(dev_users) - len(empty)}")
+        if empty:
+            warnings.append(f"dev accounts with no like history: {', '.join(empty)}")
+
     for warning in warnings:
         print(f"  WARN: {warning}")
     if failures:
