@@ -1,0 +1,81 @@
+{
+  "note": [
+    "Bluesky accounts belonging to the dev team, mixed into every generated",
+    "fixture by default (generate_sample.py --no-dev-users opts out).",
+    "",
+    "Without this, signing into a devenv frontend as yourself gives an empty,",
+    "unpersonalized feed: the fixture's like graph is sampled from whoever was",
+    "most active on Bluesky that day, which is never us. Including these DIDs",
+    "in the sample cohort pulls each account's real like history into the",
+    "fixture, so the user tower has something to encode when you log in.",
+    "",
+    "To add someone, append an entry with just a handle — the generator",
+    "resolves the DID at generation time and prints it to paste back here.",
+    "Handles change and DIDs don't, so the DID is what actually matters; the",
+    "handle is documentation.",
+    "",
+    "Source of the original list: greenearth-social/api#251."
+  ],
+  "users": [
+    {
+      "handle": "gauth23278.bsky.social",
+      "did": "did:plc:rpxkei7kngbbjjmyrssarres",
+      "owner": "Gautham-Raju"
+    },
+    {
+      "handle": "gr-dev.bsky.social",
+      "did": "did:plc:ipzirzo72baqc352vkixv6zx",
+      "owner": "Gautham-Raju"
+    },
+    {
+      "handle": "bluethunderroad.bsky.social",
+      "did": "did:plc:dwlo6lvdf2mqxxz3zh6uzxp5",
+      "owner": "davidfreifeld"
+    },
+    {
+      "handle": "greenearth-djf-dev.bsky.social",
+      "did": "did:plc:ikp6daxqote6rxnsv6vrocaj",
+      "owner": "davidfreifeld"
+    },
+    {
+      "handle": "jonathanstray.bsky.social",
+      "did": "did:plc:qvvxd4csdhymtkfx2o5aagvf",
+      "owner": "jstray"
+    },
+    {
+      "handle": "ibakecookies.bsky.social",
+      "did": "did:plc:zdpqlnyg3meypguxklekat2j",
+      "owner": "juan-lievano"
+    },
+    {
+      "handle": "max.pds.techforwhat.xyz",
+      "did": "did:plc:tznvy2um264es2v3273ugxfm",
+      "owner": "mjmor"
+    },
+    {
+      "handle": "max-dev-acct.bsky.social",
+      "did": "did:plc:tyakvaf2f2x5hp3til5xqnoz",
+      "owner": "mjmor"
+    },
+    {
+      "handle": "raindrift.bsky.social",
+      "did": "did:plc:6bvotymhgydqxubcbw4u5che",
+      "owner": "raindrift"
+    },
+    {
+      "handle": "greenearth-rd-dev.bsky.social",
+      "did": "did:plc:xp63bewrrbwzz4xthtlznhow",
+      "owner": "raindrift"
+    },
+    {
+      "handle": "greenearth-social.bsky.social",
+      "did": "did:plc:wrmpulygwvuhjn2c3jbalgqj",
+      "owner": "raindrift"
+    },
+    {
+      "handle": "ge-stage.bsky.social",
+      "did": "did:plc:n5joql37jrpxsahnbdpg4z7z",
+      "owner": "raindrift"
+    }
+  ]
+}

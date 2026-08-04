@@ -299,11 +299,32 @@ Bluesky API.
 An earlier version pseudonymized liker DIDs, but that isn't necessary since
 complete ATProto archives exist elsewhere already.
 
+### The dev team is in the fixture
+
+A fixture's like graph is sampled from whoever was most active on Bluesky
+during the captured window, which is never us — so signing into the frontend
+as *yourself* (real Bluesky auth, via `devctl tunnel`) used to land on a user
+the fixture had never heard of, and the feed came back empty.
+
+`fixtures/dev_users.json` is the checked-in list of the team's own accounts.
+Generation pulls each one's real like history into the sample, over a 30-day
+lookback rather than the 48-hour sample window, because ordinary accounts
+don't like enough in two days to feed the user tower. The manifest's
+`dev_users` block records how many likes each account contributed, so
+"my feed is empty" has an answer you can look up.
+
+To add someone, append `{"handle": "...", "owner": "..."}` — the generator
+resolves the DID and prints it to paste back in — and regenerate the fixture.
+Accounts with no likes in the lookback get a warning at generation time; the
+fix for those is to go like some posts, not to change the generator.
+`--no-dev-users` opts out entirely.
+
 ### Generating your own
 
 `fixtures/generate_sample.py` is the committed, parameterized generator — what
 makes a good sample is encoded in it (contiguous window, cohort-densified
-likes, hydrated danglers, dev personas; see its docstring). `--source prod-es`
+likes, hydrated danglers, dev personas, dev-team accounts; see its docstring).
+`--source prod-es`
 samples a real cluster through a port-forward; `--source megastream-files`
 builds from megastream archives with a synthesized like graph, no credentials
 needed. Output goes to `fixtures/data/` (gitignored).

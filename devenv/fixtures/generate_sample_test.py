@@ -1,3 +1,4 @@
+import argparse
 import base64
 import datetime as dt
 import email.message
@@ -355,3 +356,321 @@ def test_search_retries_a_gateway_error(monkeypatch):
     with pytest.raises(SystemExit):
         client.search("posts", {})
     assert len(calls) == gs.ES_MAX_ATTEMPTS
+
+
+# --------------------------------------------------------------------------
+# dev-team accounts
+#
+# A fixture whose like graph doesn't contain the team's own DIDs gives an
+# empty, unpersonalized feed to anyone who signs into the devenv frontend as
+# themselves (internal-tools#22). These cover the two ways that regresses
+# quietly: dev likes never being fetched, and dev likes being fetched but
+# then discarded because their subjects lost the hydration cap.
+# --------------------------------------------------------------------------
+
+
+def _dev_users_file(tmp_path, users):
+    path = tmp_path / "dev_users.json"
+    path.write_text(json.dumps({"users": users}))
+    return path
+
+
+def test_dev_users_load_with_their_checked_in_dids_and_no_network(tmp_path, monkeypatch):
+    def no_network(*_a, **_k):
+        raise AssertionError("resolving should not happen when the did is already recorded")
+
+    monkeypatch.setattr(gs.urllib.request, "urlopen", no_network)
+    path = _dev_users_file(
+        tmp_path,
+        [
+            {"handle": "a.bsky.social", "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"},
+            {"handle": "b.bsky.social", "did": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb"},
+        ],
+    )
+
+    users = gs.load_dev_users(path)
+
+    assert [u["did"] for u in users] == [
+        "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+    ]
+    assert users[0]["handle"] == "a.bsky.social"
+
+
+def test_dev_user_with_only_a_handle_is_resolved(tmp_path, monkeypatch):
+    # Adding a teammate should take one line, not a manual DID lookup.
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"did": "did:plc:cccccccccccccccccccccccc"}'
+
+    monkeypatch.setattr(gs.urllib.request, "urlopen", lambda *_a, **_k: _Resp())
+    path = _dev_users_file(tmp_path, [{"handle": "new.bsky.social"}])
+
+    assert gs.load_dev_users(path) == [
+        {"handle": "new.bsky.social", "did": "did:plc:cccccccccccccccccccccccc"}
+    ]
+
+
+def test_dev_user_that_cannot_be_resolved_fails_the_run(tmp_path, monkeypatch):
+    def unreachable(*_a, **_k):
+        raise gs.urllib.error.URLError("no route to host")
+
+    monkeypatch.setattr(gs.urllib.request, "urlopen", unreachable)
+    path = _dev_users_file(tmp_path, [{"handle": "gone.bsky.social"}])
+
+    with pytest.raises(SystemExit) as exc:
+        gs.load_dev_users(path)
+    assert "gone.bsky.social" in str(exc.value)
+
+
+def test_duplicate_dev_dids_are_collapsed(tmp_path):
+    path = _dev_users_file(
+        tmp_path,
+        [
+            {"handle": "old.bsky.social", "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"},
+            {"handle": "renamed.bsky.social", "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"},
+        ],
+    )
+
+    assert len(gs.load_dev_users(path)) == 1
+
+
+def test_empty_dev_user_list_fails_rather_than_silently_skipping(tmp_path):
+    # Silently generating a fixture with no dev users is the bug, not a mode.
+    with pytest.raises(SystemExit):
+        gs.load_dev_users(_dev_users_file(tmp_path, []))
+
+
+def test_the_checked_in_dev_user_list_is_usable():
+    users = gs.load_dev_users(gs.DEV_USERS_FILE)
+
+    assert len(users) >= 1
+    assert all(u["did"].startswith("did:plc:") for u in users)
+
+
+def test_dev_users_are_recorded_in_the_manifest(tmp_path):
+    gs.write_fixture_set(
+        tmp_path,
+        "prod-es",
+        _posts(1),
+        [_like()],
+        [],
+        [{"did": "did:plc:persona", "likes": 9}],
+        dt.datetime(2026, 7, 22, tzinfo=dt.UTC),
+        dt.datetime(2026, 7, 23, tzinfo=dt.UTC),
+        1,
+        [{"handle": "a.bsky.social", "did": "did:plc:aaaa", "likes": 4}],
+    )
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["dev_users"] == [{"handle": "a.bsky.social", "did": "did:plc:aaaa", "likes": 4}]
+
+
+def test_summarize_dev_users_reports_accounts_with_no_history(capsys):
+    rows = gs.summarize_dev_users(
+        [
+            {"handle": "active.bsky.social", "did": "did:plc:active"},
+            {"handle": "quiet.bsky.social", "did": "did:plc:quiet"},
+        ],
+        gs.Counter({"did:plc:active": 3}),
+    )
+
+    assert rows == [
+        {"handle": "active.bsky.social", "did": "did:plc:active", "likes": 3},
+        {"handle": "quiet.bsky.social", "did": "did:plc:quiet", "likes": 0},
+    ]
+    # An account with no likes gets an unpersonalized feed weeks later, when
+    # nobody remembers how the fixture was built. Say it now.
+    assert "quiet.bsky.social" in capsys.readouterr().out
+
+
+# --- prod-es sampling, against a fake cluster -----------------------------
+
+DEV_DID = "did:plc:devuser00000000000000000"
+DEV_USERS = [{"handle": "dev.bsky.social", "did": DEV_DID}]
+WINDOW_END = dt.datetime(2026, 7, 23, tzinfo=dt.UTC)
+
+
+def _es_post(uri, created, like_count=0):
+    return {
+        "at_uri": uri,
+        "author_did": "did:plc:author0000000000000000",
+        "content": "hello",
+        "created_at": gs.iso_z(created),
+        "like_count": like_count,
+        "embeddings": {"all_MiniLM_L12_v2": [0.1] * 4},
+    }
+
+
+def _es_like(author, subject, created):
+    return {
+        "at_uri": f"at://{author}/app.bsky.feed.like/{subject.rsplit('/', 1)[-1]}",
+        "subject_uri": subject,
+        "author_did": author,
+        "created_at": gs.iso_z(created),
+        "indexed_at": gs.iso_z(created),
+    }
+
+
+def _matches(doc, query):
+    for clause in query["bool"]["filter"]:
+        if "range" in clause:
+            field, bounds = next(iter(clause["range"].items()))
+            value = gs.parse_iso(doc[field])
+            if value < gs.parse_iso(bounds["gte"]) or value >= gs.parse_iso(bounds["lt"]):
+                return False
+        elif "exists" in clause:
+            if not doc.get("embeddings"):
+                return False
+        elif "terms" in clause:
+            field, values = next(iter(clause["terms"].items()))
+            if doc.get(field) not in values:
+                return False
+        else:
+            raise AssertionError(f"unhandled clause {clause}")
+    return True
+
+
+class _FakeEs:
+    """Just enough Elasticsearch to run run_prod_es end to end."""
+
+    def __init__(self, posts, likes):
+        self.posts, self.likes = posts, likes
+
+    def _docs(self, index):
+        return self.posts if index == "posts" else self.likes
+
+    def search(self, index, body):
+        if body.get("size") == 0 and "aggs" in body:
+            terms = body["aggs"]["likers"]["terms"]
+            counts = gs.Counter(
+                like["author_did"] for like in self.likes if _matches(like, body["query"])
+            )
+            return {
+                "aggregations": {
+                    "likers": {
+                        "buckets": [
+                            {"key": did, "doc_count": n}
+                            for did, n in counts.most_common(terms["size"])
+                            if n >= terms["min_doc_count"]
+                        ]
+                    }
+                }
+            }
+        hits = [d for d in self._docs(index) if _matches(d, body["query"])]
+        return {"hits": {"hits": [{"_source": d} for d in hits[: body["size"]]]}}
+
+    def scan(self, index, query, source, page_size=1000):
+        for doc in self._docs(index):
+            if _matches(doc, query):
+                yield {"_source": doc}
+
+
+def _prod_es_args(**overrides):
+    defaults = {
+        "window_end": gs.iso_z(WINDOW_END),
+        "window_hours": 1,
+        # Small enough that the dangler-hydration cap (max_posts // 2) bites,
+        # which is where dev-team likes get silently dropped.
+        "max_posts": 4,
+        "min_cohort_likes": 1,
+        "max_cohort": 300,
+        "dev_user_lookback_days": 30,
+        "personas": 5,
+    }
+    return argparse.Namespace(**{**defaults, **overrides})
+
+
+def _fake_cluster():
+    """One in-window post, three popular danglers, one old dev-only dangler."""
+    in_window = _es_post(
+        "at://a/app.bsky.feed.post/inwindow", WINDOW_END - dt.timedelta(minutes=30)
+    )
+    danglers = [
+        _es_post(f"at://a/app.bsky.feed.post/dangler{i}", WINDOW_END - dt.timedelta(days=2))
+        for i in range(3)
+    ]
+    dev_subject = _es_post(
+        "at://a/app.bsky.feed.post/devsubject", WINDOW_END - dt.timedelta(days=25)
+    )
+
+    likes = []
+    for i in range(3):  # cohort likers, most popular dangler first
+        liker = f"did:plc:liker{i}0000000000000000000"
+        for dangler in danglers[: 3 - i]:
+            likes.append(_es_like(liker, dangler["at_uri"], WINDOW_END - dt.timedelta(minutes=10)))
+    # The dev account liked one post, 25 days ago — outside the sample window
+    # and unpopular, so both the window filter and the cap would lose it.
+    likes.append(_es_like(DEV_DID, dev_subject["at_uri"], WINDOW_END - dt.timedelta(days=25)))
+
+    return _FakeEs([in_window, *danglers, dev_subject], likes)
+
+
+def _run_prod_es(tmp_path, monkeypatch, dev_users, **overrides):
+    fake = _fake_cluster()
+    monkeypatch.setattr(gs, "EsClient", lambda: fake)
+    gs.run_prod_es(_prod_es_args(**overrides), tmp_path, dev_users)
+    return json.loads((tmp_path / "manifest.json").read_text()), [
+        json.loads(line)
+        for line in gzip.decompress((tmp_path / "likes.jsonl.gz").read_bytes())
+        .decode()
+        .splitlines()
+    ]
+
+
+def test_dev_user_history_survives_sampling(tmp_path, monkeypatch):
+    manifest, likes = _run_prod_es(tmp_path, monkeypatch, DEV_USERS)
+
+    # The like is older than the sample window and its subject is the least
+    # popular dangler — it only survives if dev likes get their own lookback
+    # and jump the hydration queue.
+    assert [like["author_did"] for like in likes].count(DEV_DID) == 1
+    assert manifest["dev_users"] == [{"handle": "dev.bsky.social", "did": DEV_DID, "likes": 1}]
+
+
+def test_dev_users_do_not_take_persona_slots(tmp_path, monkeypatch):
+    # The probe persona should be the densest history in the fixture, not
+    # whichever of us liked the most posts last month.
+    manifest, _ = _run_prod_es(tmp_path, monkeypatch, DEV_USERS)
+
+    assert DEV_DID not in [persona["did"] for persona in manifest["personas"]]
+    assert manifest["personas"]
+
+
+def test_no_dev_users_leaves_the_sample_untouched(tmp_path, monkeypatch):
+    manifest, likes = _run_prod_es(tmp_path, monkeypatch, [])
+
+    assert DEV_DID not in [like["author_did"] for like in likes]
+    assert manifest["dev_users"] == []
+
+
+# --- megastream-files mode ------------------------------------------------
+
+
+def test_megastream_mode_gives_dev_users_a_synthesized_history(tmp_path, monkeypatch):
+    # The offline path invents its whole like graph, so dev accounts get an
+    # invented history too — logging in as yourself has to work here as well.
+    monkeypatch.setattr(gs, "read_megastream_posts", lambda _: _posts(20))
+    args = argparse.Namespace(
+        input=str(tmp_path),
+        window_hours=48,
+        cohort=3,
+        min_likes=2,
+        max_likes=4,
+        seed=1,
+        personas=5,
+    )
+
+    gs.run_megastream_files(args, tmp_path, DEV_USERS)
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    (dev_row,) = manifest["dev_users"]
+    assert dev_row["did"] == DEV_DID
+    assert dev_row["likes"] >= args.min_likes
+    assert DEV_DID not in [persona["did"] for persona in manifest["personas"]]
