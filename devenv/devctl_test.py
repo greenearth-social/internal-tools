@@ -1,6 +1,8 @@
 """Regression tests for devctl's generated and declarative ngrok configuration."""
 
+import json
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -19,11 +21,26 @@ def shell_function(name: str) -> str:
     devctl is an executable orchestrator rather than a sourceable shell library.
     Extracting the function lets the test execute the production implementation
     without invoking Docker or adding a test-only command to the user-facing CLI.
-    Top-level functions end at the first unindented closing brace.
+    Top-level functions end at the first unindented closing brace — ignoring
+    heredoc bodies, which are data (a generated config can contain one).
     """
     lines = DEVCTL.read_text().splitlines()
     start = lines.index(f"{name}() {{")
-    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
+    end = None
+    terminator = None
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if terminator is not None:
+            if line.strip() == terminator:
+                terminator = None
+            continue
+        heredoc = re.search(r"<<-?\s*'?([A-Za-z_][A-Za-z0-9_]*)'?\s*$", line)
+        if heredoc:
+            terminator = heredoc.group(1)
+        elif line == "}":
+            end = index
+            break
+    assert end is not None, f"no closing brace for {name}()"
     return "\n".join(lines[start : end + 1])
 
 
@@ -116,6 +133,65 @@ def write_ngrok_config(path: Path, **environment: str) -> None:
     )
 
 
+def write_gateway_config(path: Path) -> None:
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            "umask 077",
+            shell_function("bsky_write_gateway_config"),
+            'bsky_write_gateway_config "$1"',
+        ]
+    )
+    subprocess.run(
+        ["bash", "-s", "--", str(path)],
+        check=True,
+        input=script,
+        text=True,
+        env={"PATH": os.environ["PATH"]},
+    )
+
+
+def run_tunnel_host(tmp_path: Path, tunnels: object) -> subprocess.CompletedProcess:
+    """Run bsky_tunnel_host against a canned ngrok agent API response.
+
+    Faking curl (and sleep, so the retry loop doesn't really wait) exercises the
+    production polling and pooling checks without an ngrok account or a tunnel.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (tmp_path / "tunnels.json").write_text(json.dumps(tunnels))
+    write_executable(
+        bin_dir / "curl",
+        """#!/usr/bin/env bash
+cat "$TEST_TUNNELS_JSON"
+""",
+    )
+    write_executable(bin_dir / "sleep", "#!/usr/bin/env bash\nexit 0\n")
+
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            shell_function("bsky_tunnel_host"),
+            "bsky_tunnel_host",
+        ]
+    )
+    return subprocess.run(
+        ["bash", "-s"],
+        input=script,
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "TEST_TUNNELS_JSON": str(tmp_path / "tunnels.json"),
+            "NGROK_PORT": "4041",
+        },
+    )
+
+
+def tunnel_record(public_url: str, addr: str) -> dict:
+    return {"public_url": public_url, "config": {"addr": addr}}
+
+
 def test_ngrok_config_is_readable_and_contains_no_authtoken(tmp_path):
     config = tmp_path / "ngrok.yml"
 
@@ -127,12 +203,9 @@ def test_ngrok_config_is_readable_and_contains_no_authtoken(tmp_path):
 version: "2"
 web_addr: 0.0.0.0:4040
 tunnels:
-  api:
+  public:
     proto: http
-    addr: api:8000
-  frontend:
-    proto: http
-    addr: frontend:3000
+    addr: gateway:80
 """
     )
     assert "must-not-be-written" not in config.read_text()
@@ -140,35 +213,94 @@ tunnels:
     assert stat.S_IMODE(config.stat().st_mode) == 0o644
 
 
-@pytest.mark.parametrize(
-    ("environment", "expected_api_domain"),
-    [
-        ({"GE_DEV_NGROK_DOMAIN": "shared.ngrok.dev"}, "shared.ngrok.dev"),
-        (
-            {
-                "GE_DEV_NGROK_DOMAIN": "shared.ngrok.dev",
-                "GE_DEV_NGROK_DOMAIN_API": "api.ngrok.dev",
-            },
-            "api.ngrok.dev",
-        ),
-    ],
-)
-def test_ngrok_config_preserves_api_domain_selection(tmp_path, environment, expected_api_domain):
-    config = tmp_path / "ngrok.yml"
-
-    write_ngrok_config(config, **environment)
-
-    parsed = yaml.safe_load(config.read_text())
-    assert parsed["tunnels"]["api"]["domain"] == expected_api_domain
-
-
-def test_ngrok_config_includes_the_optional_frontend_domain(tmp_path):
+def test_ngrok_config_defines_exactly_one_tunnel(tmp_path):
+    """Two tunnels share one hostname on the free tier, and ngrok pools them."""
     config = tmp_path / "ngrok.yml"
 
     write_ngrok_config(config, GE_DEV_NGROK_DOMAIN_FRONTEND="app.ngrok.dev")
 
     parsed = yaml.safe_load(config.read_text())
-    assert parsed["tunnels"]["frontend"]["domain"] == "app.ngrok.dev"
+    assert list(parsed["tunnels"]) == ["public"]
+    assert "app.ngrok.dev" not in config.read_text()
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected_domain"),
+    [
+        ({"GE_DEV_NGROK_DOMAIN": "shared.ngrok.dev"}, "shared.ngrok.dev"),
+        # The pre-gateway name for the same reserved domain still works.
+        ({"GE_DEV_NGROK_DOMAIN_API": "api.ngrok.dev"}, "api.ngrok.dev"),
+        (
+            {
+                "GE_DEV_NGROK_DOMAIN": "shared.ngrok.dev",
+                "GE_DEV_NGROK_DOMAIN_API": "api.ngrok.dev",
+            },
+            "shared.ngrok.dev",
+        ),
+    ],
+)
+def test_ngrok_config_preserves_domain_selection(tmp_path, environment, expected_domain):
+    config = tmp_path / "ngrok.yml"
+
+    write_ngrok_config(config, **environment)
+
+    parsed = yaml.safe_load(config.read_text())
+    assert parsed["tunnels"]["public"]["domain"] == expected_domain
+
+
+def test_gateway_routes_the_atproto_surface_to_the_api(tmp_path):
+    """The routing table is the fix: one hostname, deterministic by path."""
+    config = tmp_path / "Caddyfile"
+
+    write_gateway_config(config)
+
+    lines = [line.strip() for line in config.read_text().splitlines()]
+    assert "@api path /xrpc/* /.well-known/did.json /api/*" in lines
+    assert "reverse_proxy @api api:8000" in lines
+    # Unmatched paths — the app, its assets, the OAuth metadata and callback —
+    # fall through to the frontend.
+    assert lines.index("reverse_proxy @api api:8000") < lines.index("reverse_proxy frontend:3000")
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+
+
+def test_tunnel_host_reports_the_single_public_hostname(tmp_path):
+    result = run_tunnel_host(
+        tmp_path,
+        {
+            "tunnels": [
+                tunnel_record("http://dev-domain.ngrok-free.dev", "http://gateway:80"),
+                tunnel_record("https://dev-domain.ngrok-free.dev", "http://gateway:80"),
+            ]
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "dev-domain.ngrok-free.dev"
+
+
+def test_tunnel_host_refuses_a_pooled_hostname(tmp_path):
+    """Two endpoints on one URL are load-balanced, not routed — issue #25."""
+    result = run_tunnel_host(
+        tmp_path,
+        {
+            "tunnels": [
+                tunnel_record("https://dev-domain.ngrok-free.dev", "http://api:8000"),
+                tunnel_record("https://dev-domain.ngrok-free.dev", "http://frontend:3000"),
+            ]
+        },
+    )
+
+    assert result.returncode == 2
+    assert result.stdout.strip() == ""
+    assert "pooled" in result.stderr
+
+
+def test_tunnel_host_gives_up_when_no_tunnel_appears(tmp_path):
+    result = run_tunnel_host(tmp_path, {"tunnels": []})
+
+    assert result.returncode == 1
+    assert result.stdout.strip() == ""
+    assert "timed out" in result.stderr
 
 
 def test_compose_forwards_authtoken_without_running_ngrok_as_root():
@@ -178,6 +310,18 @@ def test_compose_forwards_authtoken_without_running_ngrok_as_root():
     assert ngrok["environment"] == ["NGROK_AUTHTOKEN"]
     assert "user" not in ngrok
     assert ngrok["volumes"] == ["${GE_DEV_RUNTIME:-./.runtime}/ngrok.yml:/etc/ngrok.yml:ro"]
+
+
+def test_compose_tunnels_into_the_gateway_and_starts_neither_by_default():
+    compose = yaml.safe_load(COMPOSE_FILE.read_text())
+    gateway = compose["services"]["gateway"]
+
+    assert gateway["profiles"] == ["bsky"]
+    assert compose["services"]["ngrok"]["profiles"] == ["bsky"]
+    assert gateway["volumes"] == ["${GE_DEV_RUNTIME:-./.runtime}/Caddyfile:/etc/caddy/Caddyfile:ro"]
+    # The gateway is only reachable from the compose network: the tunnel is the
+    # one way in, so nothing is exposed on the host when no session is up.
+    assert "ports" not in gateway
 
 
 @pytest.mark.parametrize("environment_name", ["stage", "prod"])
