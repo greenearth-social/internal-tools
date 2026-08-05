@@ -125,6 +125,7 @@ def create_ilm_policies() -> None:
     for name, policy in [
         ("inferences_ilm_policy", inference_policy),
         ("posts_ilm_policy", forcemerge_policy),
+        ("posts_quality_ilm_policy", forcemerge_policy),
         ("replies_ilm_policy", forcemerge_policy),
         ("likes_ilm_policy", delete_policy),
         ("tombstones_ilm_policy", delete_policy),
