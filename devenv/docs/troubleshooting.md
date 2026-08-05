@@ -33,6 +33,22 @@ window, which is rare in any sample; and any feed can go empty for a persona
 whose DID isn't real (pre-2026 pseudonymized fixtures). The api's logs say
 which ("No liked posts found for followed users of ...").
 
+### ...but only when I sign in as myself
+
+Signed in through real Bluesky auth, the feed is served for *your* DID, not
+the seeded persona, so it's only as good as your own like history inside the
+fixture. `fixtures/dev_users.json` puts the team's accounts into every
+generated fixture for exactly this reason; check whether yours made it:
+
+```bash
+python3 -c 'import json;print(json.load(open("fixtures/data/manifest.json")).get("dev_users"))'
+```
+
+Absent means the fixture predates the list or was generated with
+`--no-dev-users`; zero likes means you weren't active in the lookback window.
+Either way the fix is a fresh fixture (see [runbooks](runbooks.md)) — after
+adding yourself to `dev_users.json`, or after liking some posts.
+
 ## Feeds are thin (a few posts where there should be dozens)
 
 The `two_tower` generator runs kNN over seeded post embeddings *filtered by

@@ -12,6 +12,7 @@ need replacing.
 | Index mappings changed in `ingex` | Publish a new fixture (generated against the new mappings) |
 | New models trained and blessed for serving | Publish a new model bundle, bump `MODELS_TAG` |
 | Content encoder or embedding dims changed | Publish **both** — model/fixture compatibility is checked and enforced |
+| Someone joined the team, or their account is missing from `fixtures/dev_users.json` | Add them, then publish a new fixture |
 
 A seeded environment never *requires* a fresh fixture — seeding rebases
 timestamps so any fixture stays usable indefinitely. Replace the published
@@ -43,9 +44,18 @@ prod Elasticsearch access via kubectl (internal engineers only).
    cohort-densified likes, hydrated danglers, dev personas. See its
    docstring before changing parameters. Output lands in `fixtures/data/`.
 
+   Watch the dev-user lines near the end: the run reports how many of the
+   accounts in `fixtures/dev_users.json` contributed likes, and warns about
+   any that contributed none. Those accounts will get an empty, unpersonalized
+   feed when their owner signs into a devenv frontend as themselves, which is
+   the thing this list exists to prevent. Widening
+   `--dev-user-lookback-days` helps only if they've been active at all;
+   otherwise tell them to go like some posts before the next regeneration.
+
    Without prod access, `--source megastream-files` builds a fixture from
    megastream `.db.zip` archives and synthesizes the like graph —
-   deterministic under `--seed`, no credentials.
+   deterministic under `--seed`, no credentials. Dev accounts get a
+   synthesized history there too, so signing in as yourself still works.
 
 3. **Try it locally** before publishing:
 

@@ -26,6 +26,9 @@ Two source modes:
       pulled into the sample, so likes never point at missing posts;
     - named dev personas: the densest likers, recorded in the manifest so
       feed requests have stable, interesting identities;
+    - the dev team's own accounts (fixtures/dev_users.json), pulled in over a
+      longer lookback than the sample window, so signing into a devenv
+      frontend as yourself gives a personalized feed instead of an empty one;
     - only posts with MiniLM embeddings (post_similarity / two_tower need
       them), keeping the popularity head and the long tail alike.
 
@@ -34,7 +37,9 @@ Two source modes:
     checked-in samples in ingex/ingest/test_data/megastream) and synthesizes
     a like graph over them with Zipf-flavored popularity. No credentials or
     network needed — the path external contributors (and CI-less smoke tests)
-    use. Deterministic under --seed. Liker DIDs here are invented.
+    use. Deterministic under --seed. Liker DIDs here are invented, apart from
+    the dev-team accounts, which get a synthesized history like everyone else
+    so that logging in as yourself works in this mode too.
 
 Identities are real
 -------------------
@@ -77,6 +82,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 import zlib
@@ -92,6 +98,8 @@ ES_MAX_ATTEMPTS = 6
 ES_BACKOFF_CAP = 30
 ES_RETRY_STATUS = frozenset({502, 503, 504, 429})
 TID_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz"
+DEV_USERS_FILE = Path(__file__).parent / "dev_users.json"
+RESOLVE_HANDLE_URL = "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle"
 
 
 # --------------------------------------------------------------------------
@@ -126,6 +134,91 @@ def generator_commit() -> str:
         ).stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return "unknown"
+
+
+# --------------------------------------------------------------------------
+# dev-team accounts
+#
+# A fixture's like graph comes from whoever happened to be most active on
+# Bluesky during the sampled window, which is never us — so signing into a
+# devenv frontend as yourself lands on a user the fixture has never heard of,
+# and the feed comes back empty and unpersonalized (issue internal-tools#22).
+# Seeding the sample cohort with the team's own DIDs fixes that at the source.
+# --------------------------------------------------------------------------
+
+
+def resolve_handle(handle: str) -> str:
+    """Resolve a Bluesky handle to a DID via the public appview (no auth)."""
+    url = f"{RESOLVE_HANDLE_URL}?{urllib.parse.urlencode({'handle': handle})}"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            return json.loads(resp.read())["did"]
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as e:
+        sys.exit(
+            f"FATAL: could not resolve dev-team handle {handle}: {e}\n"
+            f"       Fix or remove the entry in {DEV_USERS_FILE.name}, or pass --no-dev-users."
+        )
+
+
+def load_dev_users(path: Path) -> list[dict]:
+    """Load the checked-in dev-team account list as [{handle, did}, ...].
+
+    Entries normally carry their DID, so a generation run needs no network for
+    this. A freshly added entry may list only a handle; that one gets resolved
+    here and printed, so it can be pasted back into the file and stay stable
+    afterwards (handles get renamed, DIDs don't).
+    """
+    try:
+        doc = json.loads(path.read_text())
+    except FileNotFoundError:
+        sys.exit(f"FATAL: dev user list {path} not found (pass --no-dev-users to skip it)")
+    except json.JSONDecodeError as e:
+        sys.exit(f"FATAL: dev user list {path} is not valid JSON: {e}")
+
+    users: list[dict] = []
+    seen: set[str] = set()
+    for entry in doc.get("users") or []:
+        handle = (entry.get("handle") or "").strip()
+        did = (entry.get("did") or "").strip()
+        if not handle and not did:
+            sys.exit(f"FATAL: {path} has an entry with neither a handle nor a did: {entry}")
+        if not did:
+            did = resolve_handle(handle)
+            print(f"  resolved {handle} -> {did} (paste this into {path.name})")
+        if not did.startswith("did:"):
+            sys.exit(f"FATAL: {path}: {handle or did} has a did that isn't a DID: {did!r}")
+        if did in seen:
+            continue
+        seen.add(did)
+        users.append({"handle": handle or did, "did": did})
+
+    if not users:
+        sys.exit(f"FATAL: {path} lists no dev users (pass --no-dev-users to skip it)")
+    print(f"  {len(users)} dev-team accounts will be mixed into the sample")
+    return users
+
+
+def summarize_dev_users(dev_users: list[dict], likes_by_did: Counter) -> list[dict]:
+    """Per-account like counts for the manifest, loudest problem first.
+
+    An account with zero likes is the exact failure this feature exists to
+    prevent, and it's invisible until someone logs in as that account weeks
+    later — so say it at generation time, while the window can still be
+    widened.
+    """
+    rows = [
+        {"handle": user["handle"], "did": user["did"], "likes": likes_by_did.get(user["did"], 0)}
+        for user in dev_users
+    ]
+    empty = [row["handle"] for row in rows if row["likes"] == 0]
+    if empty:
+        print(
+            f"  WARNING: {len(empty)} dev account(s) contributed no likes and will get an "
+            f"unpersonalized feed: {', '.join(empty)}"
+        )
+    with_likes = len(rows) - len(empty)
+    print(f"  dev accounts with history in this fixture: {with_likes}/{len(rows)}")
+    return rows
 
 
 def build_raw_post(
@@ -240,6 +333,7 @@ def write_fixture_set(
     window_start: dt.datetime,
     window_end: dt.datetime,
     cohort_size: int,
+    dev_users: list[dict] | None = None,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("*.db.zip"):
@@ -265,12 +359,17 @@ def write_fixture_set(
             "files": len(files),
         },
         "personas": personas,
+        # Recorded so `devctl doctor` and anyone debugging "why is my feed
+        # empty" can tell whether their own account made it into this fixture.
+        "dev_users": dev_users or [],
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"Fixture set written to {out_dir}")
     print(f"  posts={len(posts)} likes={len(likes)} cohort={cohort_size}")
     for persona in personas:
         print(f"  persona {persona['did']} ({persona['likes']} likes)")
+    for user in dev_users or []:
+        print(f"  dev user {user['handle']} ({user['likes']} likes)")
 
 
 # --------------------------------------------------------------------------
@@ -358,7 +457,7 @@ class EsClient:
             search_after = hits[-1]["sort"]
 
 
-def run_prod_es(args: argparse.Namespace, out_dir: Path) -> None:
+def run_prod_es(args: argparse.Namespace, out_dir: Path, dev_users: list[dict]) -> None:
     es = EsClient()
     window_end = (
         parse_iso(args.window_end)
@@ -438,14 +537,42 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path) -> None:
         sys.exit("FATAL: empty cohort; widen the window or lower --min-cohort-likes")
 
     # 3. All cohort likes in the window.
-    raw_likes: list[dict] = []
-    for i in range(0, len(cohort), 64):
-        chunk = cohort[i : i + 64]
-        query = {"bool": {"filter": [window_range, {"terms": {"author_did": chunk}}]}}
-        like_fields = ["at_uri", "subject_uri", "author_did", "created_at", "indexed_at"]
-        for hit in es.scan("likes", query, like_fields):
-            raw_likes.append(hit["_source"])
+    like_fields = ["at_uri", "subject_uri", "author_did", "created_at", "indexed_at"]
+
+    def fetch_likes(dids: list[str], time_range: dict) -> list[dict]:
+        out: list[dict] = []
+        for i in range(0, len(dids), 64):
+            chunk = dids[i : i + 64]
+            query = {"bool": {"filter": [time_range, {"terms": {"author_did": chunk}}]}}
+            for hit in es.scan("likes", query, like_fields):
+                out.append(hit["_source"])
+        return out
+
+    raw_likes = fetch_likes(cohort, window_range)
     print(f"  {len(raw_likes)} cohort likes fetched")
+
+    # 3b. Dev-team likes, over a much longer lookback than the sample window.
+    # These are ordinary accounts, not the hyper-active likers the cohort
+    # aggregation selects for, so a 48-hour slice of one of them is often
+    # empty — and an empty history is the whole bug. The api reads user
+    # history as "most recent N likes" with no recency filter, so older likes
+    # are just as usable, and rebasing shifts them by the same delta as
+    # everything else.
+    dev_likes: list[dict] = []
+    if dev_users:
+        dev_start = window_end - dt.timedelta(days=args.dev_user_lookback_days)
+        dev_range = {"range": {"created_at": {"gte": iso_z(dev_start), "lt": iso_z(window_end)}}}
+        seen_like_uris = {like["at_uri"] for like in raw_likes}
+        dev_likes = [
+            like
+            for like in fetch_likes([user["did"] for user in dev_users], dev_range)
+            if like["at_uri"] not in seen_like_uris
+        ]
+        raw_likes.extend(dev_likes)
+        print(
+            f"  {len(dev_likes)} dev-team likes fetched over the last "
+            f"{args.dev_user_lookback_days} days"
+        )
 
     # 4. Hydrate dangling like targets (liked posts outside the sample). Cap
     # the hydration set, keeping the subjects the cohort liked most — those
@@ -454,9 +581,20 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path) -> None:
         like["subject_uri"] for like in raw_likes if like["subject_uri"] not in posts_by_uri
     )
     hydrate_cap = args.max_posts // 2
-    missing = [uri for uri, _ in missing_counts.most_common(hydrate_cap)]
-    if len(missing_counts) > hydrate_cap:
-        print(f"  capping dangler hydration at {hydrate_cap} of {len(missing_counts)} subjects")
+    # Dev-team likes are one-offs on posts nobody else in the cohort touched,
+    # so ranking hydration purely by popularity would cut every one of them at
+    # the cap — and a like whose subject isn't hydrated gets dropped in full
+    # below. Hydrate theirs first; the popularity ranking fills what's left.
+    dev_subjects = [
+        uri for uri in {like["subject_uri"] for like in dev_likes} if uri in missing_counts
+    ]
+    missing = dev_subjects[:hydrate_cap]
+    dev_subject_set = set(missing)
+    missing += [uri for uri, _ in missing_counts.most_common() if uri not in dev_subject_set][
+        : hydrate_cap - len(missing)
+    ]
+    if len(missing_counts) > len(missing):
+        print(f"  capping dangler hydration at {len(missing)} of {len(missing_counts)} subjects")
     hydrated = 0
     for i in range(0, len(missing), 500):
         chunk = missing[i : i + 500]
@@ -480,9 +618,16 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path) -> None:
 
     likes = kept
 
-    # 5. Personas: densest likers among kept likes.
+    # 5. Personas: densest likers among kept likes. Dev accounts are reported
+    # separately rather than competing for a persona slot — the probe persona
+    # the seed picks should be the densest history available, not whichever of
+    # us liked the most posts last month.
     by_liker = Counter(like["author_did"] for like in likes)
-    personas = [{"did": did, "likes": count} for did, count in by_liker.most_common(args.personas)]
+    dev_dids = {user["did"] for user in dev_users}
+    personas = [
+        {"did": did, "likes": count} for did, count in by_liker.most_common() if did not in dev_dids
+    ][: args.personas]
+    dev_user_rows = summarize_dev_users(dev_users, by_liker) if dev_users else []
 
     # 6. Convert to fixture rows.
     posts = []
@@ -526,6 +671,7 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path) -> None:
         window_start,
         window_end,
         len(cohort),
+        dev_user_rows,
     )
 
 
@@ -599,7 +745,7 @@ def synth_tid(rng: random.Random) -> str:
     return "".join(rng.choices(TID_ALPHABET, k=13))
 
 
-def run_megastream_files(args: argparse.Namespace, out_dir: Path) -> None:
+def run_megastream_files(args: argparse.Namespace, out_dir: Path, dev_users: list[dict]) -> None:
     input_dir = Path(args.input).expanduser()
     print(f"Reading megastream files from {input_dir}")
     posts = read_megastream_posts(input_dir)
@@ -646,7 +792,11 @@ def run_megastream_files(args: argparse.Namespace, out_dir: Path) -> None:
         keyed.sort(key=lambda pair: pair[0], reverse=True)
         return [post for _, post in keyed[:k]]
 
-    cohort = [synth_did(rng, i) for i in range(args.cohort)]
+    # The dev team gets synthesized histories alongside the invented likers, so
+    # signing in as yourself works in this mode too. Their DIDs are real; the
+    # likes attributed to them here are not, which is fine — this mode invents
+    # the whole like graph.
+    cohort = [user["did"] for user in dev_users] + [synth_did(rng, i) for i in range(args.cohort)]
     likes: list[dict] = []
     per_post = Counter()
     per_user = Counter()
@@ -674,7 +824,11 @@ def run_megastream_files(args: argparse.Namespace, out_dir: Path) -> None:
         {"at_uri": uri, "author_did": post_authors[uri], "like_count": count}
         for uri, count in per_post.items()
     ]
-    personas = [{"did": did, "likes": count} for did, count in per_user.most_common(args.personas)]
+    dev_dids = {user["did"] for user in dev_users}
+    personas = [
+        {"did": did, "likes": count} for did, count in per_user.most_common() if did not in dev_dids
+    ][: args.personas]
+    dev_user_rows = summarize_dev_users(dev_users, per_user) if dev_users else []
 
     write_fixture_set(
         out_dir,
@@ -686,6 +840,7 @@ def run_megastream_files(args: argparse.Namespace, out_dir: Path) -> None:
         window_start,
         window_end,
         len(cohort),
+        dev_user_rows,
     )
 
 
@@ -709,6 +864,11 @@ def main() -> None:
     parser.add_argument("--max-posts", type=int, default=100_000)
     parser.add_argument("--min-cohort-likes", type=int, default=10)
     parser.add_argument("--max-cohort", type=int, default=300)
+    # Dev accounts like a handful of posts a week, not a handful an hour, so
+    # their history has to be collected over a much longer stretch than the
+    # sample window to add up to anything. Prod keeps likes and posts for 60
+    # days, which bounds how far back this can usefully reach.
+    parser.add_argument("--dev-user-lookback-days", type=int, default=30)
     # megastream-files options
     parser.add_argument(
         "--input",
@@ -721,13 +881,25 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     # common
     parser.add_argument("--personas", type=int, default=5)
+    parser.add_argument(
+        "--dev-users",
+        default=str(DEV_USERS_FILE),
+        help=f"dev-team account list to mix in (default: {DEV_USERS_FILE.name})",
+    )
+    parser.add_argument(
+        "--no-dev-users",
+        action="store_true",
+        help="don't mix the dev team's own accounts into the sample",
+    )
     args = parser.parse_args()
+
+    dev_users = [] if args.no_dev_users else load_dev_users(Path(args.dev_users).expanduser())
 
     out_dir = Path(args.out).expanduser()
     if args.source == "prod-es":
-        run_prod_es(args, out_dir)
+        run_prod_es(args, out_dir, dev_users)
     else:
-        run_megastream_files(args, out_dir)
+        run_megastream_files(args, out_dir, dev_users)
 
 
 if __name__ == "__main__":
