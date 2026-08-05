@@ -689,12 +689,12 @@ run `devctl feed` and reload.
 ## Serving a local feed on real Bluesky
 
 `devctl bsky up` points a real Bluesky account at this environment: it opens an
-ngrok tunnel to the api, publishes this env's feeds as records on your dev
-account, and — via a second tunnel to the frontend — lets you sign in with real
-Bluesky and see the GreenEarth transparency view of the same posts. `devctl bsky
-down` deletes those records and closes the tunnels. It never runs on its own: a
-tunnel to your laptop is on the public internet, so this is an explicit pair you
-tear down when you're finished.
+ngrok tunnel to this stack, publishes this env's feeds as records on your dev
+account, and lets you sign in with real Bluesky at that same URL to see the
+GreenEarth transparency view of the same posts. `devctl bsky down` deletes those
+records and closes the tunnel. It never runs on its own: a tunnel to your laptop
+is on the public internet, so this is an explicit pair you tear down when you're
+finished.
 
 It's for human testing from the primary checkout — not the parallel-instance
 workflow — so it doesn't take `--repo-root`.
@@ -719,22 +719,22 @@ the generated, bind-mounted tunnel configuration contains no secrets. In
   ```
 
 - A running, seeded stack (`devctl up && devctl seed`). The first `bsky up`
-  pulls the ngrok image.
+  pulls the ngrok and gateway images.
 
 ### Running it
 
 ```bash
 devctl bsky up        # tunnel, publish feeds, wire the frontend; prints the links
-devctl bsky status    # the tunnels, the sign-in URL and the feed links again
-devctl bsky down      # delete the records and close the tunnels
+devctl bsky status    # the public URL, the sign-in note and the feed links again
+devctl bsky down      # delete the records and close the tunnel
 ```
 
 `bsky up` prints a `bsky.app/profile/<handle>/feed/<rkey>` link per feed (labeled
-by its `feeds.py` key) and, for sign-in, the **frontend tunnel URL** — browse
-that, not `localhost:3000`. Real OAuth redirects the callback to the public
-origin, so the signed-in session lives there; `localhost` stays on the local
-shim. See [Working on real Bluesky auth](#working-on-real-bluesky-auth) for what
-the origin change means.
+by its `feeds.py` key) and the **public URL** — browse that for sign-in, not
+`localhost:3000`. Real OAuth redirects the callback to the public origin, so the
+signed-in session lives there; `localhost` stays on the local shim. See
+[Working on real Bluesky auth](#working-on-real-bluesky-auth) for what the origin
+change means.
 
 Enabling real sign-in restarts the firebase emulator (the functions read
 `APP_ORIGIN` and the keys at startup), which **resets its emulator data** —
@@ -752,17 +752,58 @@ dev ES256 keypair (cached under the instance's runtime dir) and uses it
 automatically. Set `BLUESKY_OAUTH_*` in `devenv.local.env` only to point at
 externally-managed keys instead.
 
-**Free vs. paid ngrok.** Free ngrok gives a fresh random URL each run (so the
-feed records are re-published every `bsky up`) and may allow only one endpoint
-at a time — in which case the api tunnel comes up and the frontend/OAuth half is
-skipped with a warning. A reserved domain (`GE_DEV_NGROK_DOMAIN`, or the
-`_API` / `_FRONTEND` forms for two) gives stable URLs and lets both tunnels run.
-Both tunnels are wide open — the api tunnel reaches the whole api (handy for api
-development too), not just the feed-generator endpoints.
+**Free vs. paid ngrok.** A free account is enough — the whole feature, sign-in
+included, runs on one endpoint. What free ngrok doesn't give you is a *stable*
+URL: each run gets a fresh random hostname, so the feed records (and the OAuth
+client, whose id is the origin) are re-made every `bsky up`. Set
+`GE_DEV_NGROK_DOMAIN` to a reserved domain for a stable one. (`_API` still works
+as an alias for it; `_FRONTEND` is no longer used — there's one hostname now.)
 
-**Security.** Both tunnels are public while up. Don't leave a session running —
+**A session outlives the containers.** `devctl down` (or a reboot) closes the
+tunnel but leaves the feed records on your account, now resolving to nothing, so
+the session file under `.runtime/` is kept rather than cleaned up with the stack
+— it's the only record of what was published. Both `down` and `nuke` say so, and
+`bsky status` distinguishes a session that's serving from one that's only still
+owed a `bsky down`.
+
+**Security.** The tunnel is public while up. Don't leave a session running —
 `devctl bsky down` (or `devctl bsky status` to check) — and treat the exposure
 the same way as `GE_DEV_BIND=0.0.0.0` in [docs/remote.md](docs/remote.md).
+
+### One URL, routed by path
+
+The feed generator and the app share a single public hostname. A small Caddy
+gateway (also profile-gated, also torn down by `bsky down`) sits behind the
+tunnel and splits them:
+
+| Path | Goes to |
+| --- | --- |
+| the api's own routes — `/xrpc/*`, `/.well-known/did.json`, `/api/*`, `/rank/*`, `/candidates/*`, `/health`, `/docs`, … | api |
+| everything else | frontend — the app, its assets, the OAuth client metadata and callback |
+
+`bsky up` asks the running api for that list (walking its routers, the way
+`devctl feed` reads its feed config) rather than keeping a copy here, so a new
+router is exposed without editing devctl — a missed path wouldn't 404, it would
+quietly answer with the frontend's HTML. Two paths are decided rather than
+derived: `/` is the app the browser loads, not the api's root route, and
+`/.well-known/did.json` is matched exactly because the OAuth client metadata and
+JWKS next to it belong to the frontend. The frontend is the catch-all because
+Vite serves an open-ended set of paths (`/@vite`, `/@fs`, `/node_modules/.vite`,
+every SPA route) that can't be enumerated, while the api's can.
+
+It works this way because a tunnel each can't be trusted: ngrok's free tier hands
+out one development domain, so two tunnels come back on the *same* hostname, and
+ngrok then treats them as a **pool** — load-balancing requests across both
+services rather than routing them. `/xrpc` and the OAuth metadata each answer
+from the wrong service about half the time, and a sign-in fails with `Unable to
+obtain client metadata ... Not Found` (internal-tools#25). One tunnel with
+deterministic path routing behaves identically on every plan. If ngrok ever does
+report more than one endpoint for a session, `bsky up` stops rather than publish
+feed records against a pooled hostname.
+
+The whole api is reachable this way, as the old api tunnel was — handy for api
+development, not just for serving the feed. Everything it exposes is public
+while the session is up, so mind the security note above.
 
 ## Service endpoints (defaults)
 

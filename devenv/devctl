@@ -1253,14 +1253,23 @@ EOF
 }
 
 # --- bsky: serve a local feed on real Bluesky (issue #19) --------------------
-# `bsky up` opens two ngrok tunnels from one agent and points real Bluesky at
-# this environment: the *api* tunnel becomes the feed generator (its host is the
-# did:web the AppView resolves), and the *frontend* tunnel becomes the public
-# origin the browser does real OAuth against. `bsky down` deletes the feed
-# records it created and returns the stack to a purely local feed. It never runs
-# by default — an open tunnel to your laptop is on the public internet — so it's
-# an explicit, opt-in pair you tear down when you're done. Primary repo root
-# only (this is human testing, not parallel agents); see the issue.
+# `bsky up` opens one ngrok tunnel into a small path-routing gateway and points
+# real Bluesky at this environment. That single public origin is both the feed
+# generator (its host is the did:web the AppView resolves, reached via /xrpc and
+# /.well-known/did.json) and the app the browser does real OAuth against
+# (everything else). `bsky down` deletes the feed records it created and returns
+# the stack to a purely local feed. It never runs by default — an open tunnel to
+# your laptop is on the public internet — so it's an explicit, opt-in pair you
+# tear down when you're done. Primary repo root only (this is human testing, not
+# parallel agents); see the issue.
+#
+# One origin rather than a tunnel each (issue #25): ngrok's free tier hands out
+# a single development domain, so two tunnels come back on the *same* hostname
+# and ngrok treats them as a pool — it load-balances requests across both
+# upstreams, and /xrpc, /oauth/callback and the OAuth client metadata each
+# answer from the wrong service about half the time (a Bluesky sign-in then
+# fails with "Unable to obtain client metadata ... Not Found"). Deterministic
+# path routing in front of one tunnel works the same on every ngrok plan.
 
 # A dev OAuth keypair generated in the firebase container with Node's built-in
 # EC-to-JWK export — no dependency on jose or an ESM entry point. The dev client
@@ -1268,8 +1277,14 @@ EOF
 # origin), so this never touches prod keys.
 BSKY_KEYGEN_JS='const c=require("crypto");const{publicKey,privateKey}=c.generateKeyPairSync("ec",{namedCurve:"P-256"});const pub=publicKey.export({format:"jwk"});const priv=privateKey.export({format:"jwk"});const kid=c.randomUUID();pub.kid=kid;pub.use="sig";pub.alg="ES256";priv.kid=kid;priv.alg="ES256";process.stdout.write(JSON.stringify({kid:kid,privateJwk:priv,publicJwks:{keys:[pub]}}));'
 
+# The session file records feed records published to a real Bluesky account —
+# state that outlives every container here, and that only `bsky down` cleans up.
+# So it's deliberately *not* removed with the stack: `down` and `nuke` warn about
+# it instead (see bsky_warn_if_published), because deleting it would leave those
+# records on the account with nothing left that knows they exist.
+BSKY_STATE="$RUNTIME/bsky.env"
+
 cmd_bsky() {
-  BSKY_STATE="$RUNTIME/bsky.env"
   BSKY_OAUTH_DIR="$RUNTIME/oauth"
   local sub="${1:-}"
   shift || true
@@ -1306,17 +1321,17 @@ bsky_up() {
   local oauth_ok=0
   if bsky_ensure_oauth_keys; then oauth_ok=1; fi
 
-  # 2. Tunnels (a compose service). Match tunnels by the container-internal
-  #    upstream port the config dials — api:8000 and frontend:3000.
-  bsky_start_ngrok || die "ngrok didn't start (see the error above)"
-  local api_host frontend_host
-  api_host="$(bsky_tunnel_host 8000)" || {
-    bsky_stop_ngrok
-    die "timed out waiting for the api tunnel — devctl logs ngrok"
+  # 2. The public endpoint: the gateway plus one tunnel into it (both compose
+  #    services). Every plan gets exactly one hostname this way — see the
+  #    section header for why two tunnels can't be trusted.
+  bsky_start_tunnel || die "the public endpoint didn't start (see the error above)"
+  local host
+  host="$(bsky_tunnel_host)" || {
+    bsky_stop_tunnel
+    die "no usable tunnel — devctl logs ngrok"
   }
-  frontend_host="$(bsky_tunnel_host 3000)" || frontend_host=""
 
-  local did="did:web:$api_host"
+  local did="did:web:$host"
 
   # 3. Recreate the api as the tunnel's feed generator. Recreating drops the
   #    environment `up` injected, so re-supply it the way `restart` does (the ES
@@ -1327,24 +1342,18 @@ bsky_up() {
   resolve_live
   export_api_es_env
   GE_DEV_FEED_GENERATOR_DID="$did" compose up -d --no-deps --force-recreate api >/dev/null
-  bsky_wait_did "$api_host" "$did" ||
-    echo "devctl: warning — did.json hasn't confirmed yet at https://$api_host/.well-known/did.json (bsky may need a minute)" >&2
+  bsky_wait_did "$host" "$did" ||
+    echo "devctl: warning — did.json hasn't confirmed yet at https://$host/.well-known/did.json (bsky may need a minute)" >&2
 
-  # 4. Frontend / OAuth wiring — only when the second tunnel came up.
-  local frontend_url=""
-  if [[ -n "$frontend_host" ]]; then
-    frontend_url="https://$frontend_host"
-    bsky_wire_frontend "$frontend_host" "$oauth_ok"
-  else
-    echo "devctl: only one tunnel came up — the frontend/OAuth half is unavailable" >&2
-    echo "        (free ngrok allows a single endpoint; set GE_DEV_NGROK_DOMAIN_* or upgrade for two)" >&2
-  fi
+  # 4. Frontend / OAuth wiring, on that same origin — the gateway keeps the two
+  #    apart by path, so the browser and the AppView share one hostname.
+  bsky_wire_frontend "$host" "$oauth_ok"
 
   # 5. Publish the feeds, pointing them at this tunnel's DID.
   echo "devctl: publishing feeds to $handle"
   compose_exec api pipenv run python scripts/publish_feed.py --sync --environment dev \
     --handle "$handle" --app-password "$app_password" --generator-did "$did" || {
-    bsky_stop_ngrok
+    bsky_stop_tunnel
     bsky_restore_stack
     die "publishing feeds failed — the tunnel and api change have been rolled back"
   }
@@ -1353,8 +1362,8 @@ bsky_up() {
   #    feed names is best-effort (only affects the printed labels), so it never
   #    aborts after a successful publish.
   bsky_capture_feeds
-  bsky_write_state "$handle" "$api_host" "$did" "$frontend_host" "$frontend_url" "$oauth_ok"
-  bsky_print_summary "$handle" "$did" "$frontend_url" "$oauth_ok"
+  bsky_write_state "$handle" "$host" "$did" "$oauth_ok"
+  bsky_print_summary "$handle" "$host" "$did" "$oauth_ok"
 }
 
 # Generate (once) and cache a dev ES256 keypair + AES state key, unless the
@@ -1458,89 +1467,207 @@ bsky_wire_frontend() {
   compose up -d --no-deps --force-recreate "${services[@]}" >/dev/null
 }
 
+# The api's public paths, as Caddy `path` matcher tokens, read from the running
+# api itself — the same trick as bsky_capture_feeds, and for the same reason: a
+# list hand-copied into devctl goes stale the next time the api adds a router,
+# and a missed path doesn't 404, it silently answers with the frontend's HTML.
+# The routers are walked rather than read from the OpenAPI schema so paths that
+# opt out of the schema still route.
+#
+# Two paths need judgement rather than a prefix:
+#   /                     the api has a root route, but the tunnel's "/" is the
+#                         app the browser loads — the frontend keeps it.
+#   /.well-known/did.json matched exactly, because the neighbouring
+#                         oauth-client-metadata and jwks.json are the frontend's.
+# Everything else routes by first path segment, so new endpoints under an
+# existing router work without regenerating anything.
+bsky_api_gateway_paths() {
+  compose_exec api pipenv run python -c '
+import sys
+sys.path.insert(0, "src")
+from app.main import app
+
+
+def walk(routes):
+    for route in routes:
+        included = getattr(route, "original_router", None)
+        if included is not None:
+            yield from walk(included.routes)
+        elif getattr(route, "path", None):
+            yield route.path
+
+
+exact, prefixes, nested = [], [], set()
+for path in walk(app.routes):
+    if path == "/":
+        continue
+    if path.startswith("/.well-known/"):
+        exact.append(path)
+        continue
+    segment = path.split("/")[1]
+    prefixes.append(segment)
+    if path.count("/") > 1:
+        nested.add(segment)
+tokens = sorted(set(exact))
+for segment in sorted(set(prefixes)):
+    tokens.append("/" + segment)
+    if segment in nested:
+        tokens.append("/" + segment + "/*")
+print(" ".join(tokens))
+' 2>/dev/null | tr -d '\r'
+}
+
+# What to route to the api when the api can't be asked (it is running by the
+# time `bsky up` gets here, so this is a backstop, not the normal path). Serving
+# the feed at all needs the first two; the rest is what the api exposed when
+# this was written.
+BSKY_GATEWAY_FALLBACK_PATHS="/.well-known/did.json /xrpc /xrpc/* /admin /admin/* /api /api/* \
+/candidates /candidates/* /diversify /docs /docs/* /health /openapi.json /r /r/* /rank /rank/* \
+/redoc /skylight /skylight/*"
+
+# Write the Caddyfile the gateway container reads. It is the whole of the public
+# routing policy: the api's own paths (argument 2, from bsky_api_gateway_paths)
+# go to the api, and everything else — the app, its assets, the OAuth metadata
+# and callback the Firebase functions serve through Vite — goes to the frontend.
+# The frontend is the catch-all because Vite serves an open-ended set of paths
+# (/@vite, /@fs, /node_modules/.vite, the SPA's own routes) that can't be
+# enumerated, while the api's can.
+#
+# Upstreams are service names on the compose network: `bsky up` recreates the
+# api (and usually the frontend) *after* this starts, and Caddy resolves the
+# name per dial, so it follows them to their new containers instead of pinning a
+# stale address. trusted_proxies keeps the X-Forwarded-* that ngrok sets (it
+# terminates TLS, so the hop into the gateway is plain http and would otherwise
+# be re-stamped as X-Forwarded-Proto: http). Like the ngrok config this holds no
+# secrets and is world-readable so the image's user can read it whatever the
+# host ownership.
+bsky_write_gateway_config() {
+  local cfg="$1" api_paths="$2"
+  cat >"$cfg" <<EOF
+{
+	admin off
+	auto_https off
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+:80 {
+	@api path $api_paths
+	reverse_proxy @api api:8000
+	reverse_proxy frontend:3000
+}
+EOF
+  chmod 644 "$cfg"
+}
+
 # Write the ngrok agent config the container reads (mounted at /etc/ngrok.yml).
-# The tunnels dial the api and frontend by service name on the compose network,
-# so no host app ports are involved. web_addr binds the agent's inspection API
-# to 0.0.0.0 so the published 4040 is reachable from the host (the emulators need
-# socat for the same reason; the ngrok agent has a config knob for it). The
-# config contains no secrets and is world-readable so the image's non-root user
-# can read it regardless of the host user or sudo ownership. NGROK_AUTHTOKEN is
-# passed separately by compose. Both tunnels are wide open — the api tunnel is
-# usable for plain api development too.
+# Exactly one tunnel, dialing the gateway by service name on the compose network,
+# so no host app ports are involved — and so ngrok can never pool two endpoints
+# behind one free-tier hostname (issue #25). web_addr binds the agent's
+# inspection API to 0.0.0.0 so the published 4040 is reachable from the host (the
+# emulators need socat for the same reason; the ngrok agent has a config knob for
+# it). The config contains no secrets and is world-readable so the image's
+# non-root user can read it regardless of the host user or sudo ownership.
+# NGROK_AUTHTOKEN is passed separately by compose. The tunnel is wide open, and
+# the gateway behind it reaches the whole api, so this is usable for plain api
+# development too.
 bsky_write_ngrok_config() {
   local cfg="$1"
-  local api_domain="${GE_DEV_NGROK_DOMAIN_API:-${GE_DEV_NGROK_DOMAIN:-}}"
+  # GE_DEV_NGROK_DOMAIN_API named this same reserved domain back when the api
+  # had its own tunnel; honour it so an existing devenv.local.env keeps working.
+  local domain="${GE_DEV_NGROK_DOMAIN:-${GE_DEV_NGROK_DOMAIN_API:-}}"
   {
     echo 'version: "2"'
     echo 'web_addr: 0.0.0.0:4040'
     echo 'tunnels:'
-    echo '  api:'
+    echo '  public:'
     echo '    proto: http'
-    echo '    addr: api:8000'
-    [[ -z "$api_domain" ]] || echo "    domain: $api_domain"
-    echo '  frontend:'
-    echo '    proto: http'
-    echo '    addr: frontend:3000'
-    [[ -z "${GE_DEV_NGROK_DOMAIN_FRONTEND:-}" ]] || echo "    domain: ${GE_DEV_NGROK_DOMAIN_FRONTEND}"
+    echo '    addr: gateway:80'
+    [[ -z "$domain" ]] || echo "    domain: $domain"
   } >"$cfg"
   chmod 644 "$cfg"
 }
 
 BSKY_PROFILE="bsky"
 
-# Start the ngrok agent as a compose service. Fresh-recreate so it always picks
-# up this session's config, then confirm it stayed up before we wait on its
-# tunnels: the agent exits on any startup error, so a dead container means a real
-# problem we should show rather than swallow.
-bsky_start_ngrok() {
-  bsky_write_ngrok_config "$RUNTIME/ngrok.yml"
-  compose --profile "$BSKY_PROFILE" up -d --force-recreate ngrok >/dev/null 2>&1 || return 1
-  sleep 2
-  if compose --profile "$BSKY_PROFILE" ps --status running --format '{{.Service}}' 2>/dev/null |
-    grep -q '^ngrok$'; then
-    return 0
+# Start the gateway and the ngrok agent as compose services. Fresh-recreate so
+# they always pick up this session's config, then confirm both stayed up before
+# we wait on the tunnel: the agent exits on any startup error, so a dead
+# container means a real problem we should show rather than swallow.
+bsky_start_tunnel() {
+  local api_paths
+  api_paths="$(bsky_api_gateway_paths)"
+  if [[ -z "$api_paths" ]]; then
+    echo "devctl: warning — couldn't read the api's routes; routing the paths devctl knows about" >&2
+    api_paths="$BSKY_GATEWAY_FALLBACK_PATHS"
   fi
-  # The container came up but the agent exited — surface why. Common causes: a
-  # bad NGROK_AUTHTOKEN, or a reserved domain still held by another agent
-  # (ERR_NGROK_334) — e.g. a leftover session that hasn't released it; stop the
-  # holder or wait a few seconds and retry.
-  echo "devctl: the ngrok agent exited on startup:" >&2
-  compose --profile "$BSKY_PROFILE" logs --tail=10 ngrok 2>/dev/null | sed 's/^/        /' >&2
-  return 1
+  bsky_write_gateway_config "$RUNTIME/Caddyfile" "$api_paths"
+  bsky_write_ngrok_config "$RUNTIME/ngrok.yml"
+  compose --profile "$BSKY_PROFILE" up -d --force-recreate gateway ngrok >/dev/null 2>&1 || return 1
+  sleep 2
+  local running
+  running="$(compose --profile "$BSKY_PROFILE" ps --status running --format '{{.Service}}' 2>/dev/null)"
+  local service ok=1
+  for service in gateway ngrok; do
+    if grep -q "^$service\$" <<<"$running"; then
+      continue
+    fi
+    ok=0
+    # The container came up but the process exited — surface why. Common causes
+    # for ngrok: a bad NGROK_AUTHTOKEN, or a reserved domain still held by
+    # another agent (ERR_NGROK_334) — e.g. a leftover session that hasn't
+    # released it; stop the holder or wait a few seconds and retry.
+    echo "devctl: the $service container exited on startup:" >&2
+    compose --profile "$BSKY_PROFILE" logs --tail=10 "$service" 2>/dev/null | sed 's/^/        /' >&2
+  done
+  [[ "$ok" == 1 ]]
 }
 
-# Stop and remove the ngrok container (nothing to preserve — the config is
+# Stop and remove the tunnel containers (nothing to preserve — their configs are
 # regenerated each session).
-bsky_stop_ngrok() {
-  compose --profile "$BSKY_PROFILE" rm -sf ngrok >/dev/null 2>&1 || true
+bsky_stop_tunnel() {
+  compose --profile "$BSKY_PROFILE" rm -sf gateway ngrok >/dev/null 2>&1 || true
 }
 
-# Poll ngrok's local API for the https tunnel whose upstream is the given local
-# port, and print its hostname. Matching on the port rather than the tunnel name
-# keeps it robust across ngrok's config-format differences.
+# Poll ngrok's local API for the session's public hostname. There is exactly one
+# tunnel (see bsky_write_ngrok_config), so more than one https endpoint means
+# the agent is also serving somebody else's config — and on the free tier those
+# share a single development domain, which makes ngrok *pool* them and split
+# requests between unrelated upstreams (issue #25). Refuse rather than pick one:
+# a pooled hostname would publish feed records that answer intermittently.
 bsky_tunnel_host() {
-  local port="$1" host
+  local endpoints count
   for _ in $(seq 1 30); do
-    host="$(curl -s --max-time 2 "http://127.0.0.1:${NGROK_PORT}/api/tunnels" 2>/dev/null | python3 -c '
+    endpoints="$(curl -s --max-time 2 "http://127.0.0.1:${NGROK_PORT}/api/tunnels" 2>/dev/null | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit(1)
-port = sys.argv[1]
 for t in d.get("tunnels", []):
     url = t.get("public_url", "")
-    addr = str(t.get("config", {}).get("addr", ""))
-    if url.startswith("https://") and addr.endswith(":" + port):
-        print(url.split("://", 1)[1])
-        break
-' "$port" 2>/dev/null)" || true
-    [[ -n "$host" ]] && {
-      echo "$host"
+    if url.startswith("https://"):
+        print(url.split("://", 1)[1], t.get("config", {}).get("addr", ""))
+' 2>/dev/null)" || true
+    count="$(grep -c . <<<"$endpoints" || true)"
+    if [[ "$count" -eq 1 ]]; then
+      awk '{print $1}' <<<"$endpoints"
       return 0
-    }
+    fi
+    if [[ "$count" -gt 1 ]]; then
+      echo "devctl: ngrok is publishing $count endpoints for this session, not one:" >&2
+      awk '{printf "        https://%s -> %s\n", $1, $2}' <<<"$endpoints" >&2
+      echo "        devctl runs a single tunnel into the gateway, so another agent or a" >&2
+      echo "        leftover session is sharing this account. Endpoints on one hostname are" >&2
+      echo "        pooled by ngrok and answer from whichever upstream it picks, so this" >&2
+      echo "        session would serve the wrong service at random. Stop the other agent" >&2
+      echo "        (check https://dashboard.ngrok.com/agents) and retry." >&2
+      return 2
+    fi
     sleep 1
   done
+  echo "devctl: timed out waiting for the tunnel to come up" >&2
   return 1
 }
 
@@ -1597,40 +1724,37 @@ bsky_feed_links() {
 bsky_write_state() {
   cat >"$BSKY_STATE" <<EOF
 GE_BSKY_HANDLE=$1
-GE_BSKY_API_HOST=$2
+GE_BSKY_HOST=$2
 GE_BSKY_DID=$3
-GE_BSKY_FRONTEND_HOST=$4
-GE_BSKY_FRONTEND_URL=$5
-GE_BSKY_OAUTH_OK=$6
+GE_BSKY_OAUTH_OK=$4
 EOF
 }
 
-# The external tunnel URLs, aligned. `API:`/`Frontend:` pad to a common width so
-# the URLs line up. Shared by `bsky up` and `bsky status`.
-bsky_print_tunnels() {
-  local api_host="$1" frontend_url="$2"
-  printf '  %-10s https://%s\n' "API:" "$api_host"
-  [[ -z "$frontend_url" ]] || printf '  %-10s %s\n' "Frontend:" "$frontend_url"
+# The one public URL and what answers on it. Shared by `bsky up` and
+# `bsky status`.
+bsky_print_endpoint() {
+  local host="$1" oauth_ok="$2"
+  echo "Public URL:  https://$host"
+  echo "  /xrpc/* and /.well-known/did.json reach the api (the feed generator);"
+  echo "  everything else reaches the frontend."
+  if [[ "$oauth_ok" == "1" ]]; then
+    echo "  (sign in with real Bluesky there — browse that URL, not localhost)"
+  else
+    echo "  (real sign-in disabled until OAuth keys are set)"
+  fi
 }
 
 bsky_print_summary() {
-  local handle="$1" did="$2" frontend_url="$3" oauth_ok="$4"
+  local handle="$1" host="$2" did="$3" oauth_ok="$4"
   echo
   echo "Serving this environment's feed on Bluesky as $handle ($did)."
   echo
   echo "Published feeds:"
   bsky_feed_links "$handle"
   echo
-  bsky_print_tunnels "${did#did:web:}" "$frontend_url"
-  if [[ -n "$frontend_url" ]]; then
-    if [[ "$oauth_ok" == "1" ]]; then
-      echo "  (sign in with real Bluesky at the Frontend URL — browse it, not localhost)"
-    else
-      echo "  (Frontend real sign-in disabled until OAuth keys are set)"
-    fi
-  fi
+  bsky_print_endpoint "$host" "$oauth_ok"
   echo
-  echo "These tunnels are on the public internet. Tear them down when you're done:"
+  echo "This tunnel is on the public internet. Tear it down when you're done:"
   echo "  devctl bsky down$(name_flag)"
 }
 
@@ -1671,10 +1795,31 @@ bsky_down() {
     echo "        publish_feed.py --delete-all --handle $handle" >&2
   fi
 
-  bsky_stop_ngrok
+  bsky_stop_tunnel
   rm -f "$BSKY_STATE" "$RUNTIME/$BSKY_FEEDS_TSV_NAME"
   bsky_restore_stack
   echo "devctl: bsky session torn down — back to a local-only feed."
+}
+
+# Warn that a bsky session's feed records are still on a real account, for the
+# commands that take the tunnel down without deleting them. `nuke` also destroys
+# the session file, so it gets the manual incantation rather than `bsky down`.
+bsky_warn_if_published() {
+  local mode="${1:-stop}" handle
+  [[ -f "$BSKY_STATE" ]] || return 0
+  handle="$(env_file_value "$BSKY_STATE" GE_BSKY_HANDLE)"
+  handle="${handle:-${GE_DEV_BSKY_HANDLE:-your dev account}}"
+  if [[ "$mode" == "nuke" ]]; then
+    echo "devctl: note — this environment's feeds are still published on $handle, and" >&2
+    echo "        nuke removes the record of that session along with everything else." >&2
+    echo "        Delete them afterwards with:" >&2
+    echo "          devctl up$(name_flag) && devctl exec api pipenv run \\" >&2
+    echo "            python scripts/publish_feed.py --delete-all --handle $handle" >&2
+  else
+    echo "devctl: note — this environment's feeds are still published on $handle," >&2
+    echo "        and the tunnel serving them is now closed." >&2
+    echo "        Delete them with: devctl up$(name_flag) && devctl bsky down$(name_flag)" >&2
+  fi
 }
 
 bsky_status() {
@@ -1685,25 +1830,29 @@ bsky_status() {
     return
   fi
   # Read with env_file_value (sed), never `source` — see bsky_down.
-  local handle did api_host frontend_url oauth_ok
+  local handle did host oauth_ok
   handle="$(env_file_value "$BSKY_STATE" GE_BSKY_HANDLE)"
   did="$(env_file_value "$BSKY_STATE" GE_BSKY_DID)"
-  api_host="$(env_file_value "$BSKY_STATE" GE_BSKY_API_HOST)"
-  frontend_url="$(env_file_value "$BSKY_STATE" GE_BSKY_FRONTEND_URL)"
+  host="$(env_file_value "$BSKY_STATE" GE_BSKY_HOST)"
+  # The DID is the hostname, so it stands in for a state file written before
+  # the two tunnels became one (that one recorded GE_BSKY_API_HOST instead).
+  host="${host:-${did#did:web:}}"
   oauth_ok="$(env_file_value "$BSKY_STATE" GE_BSKY_OAUTH_OK)"
-  echo "bsky session active$(instance_label) as ${handle:-?} (${did:-?})."
+  # The tunnel containers stop with the rest of the stack (`devctl down`, a
+  # reboot), but the published records don't go anywhere — so distinguish a
+  # session that's serving from one that's only still owed a cleanup.
+  if service_running ngrok; then
+    echo "bsky session active$(instance_label) as ${handle:-?} (${did:-?})."
+  else
+    echo "bsky session recorded$(instance_label) as ${handle:-?} (${did:-?}), but its tunnel isn't running."
+    echo "The feeds below are still published and now resolve to nothing:"
+    echo "  devctl up$(name_flag) restores them; devctl bsky down$(name_flag) deletes them."
+  fi
   echo
   echo "Published feeds:"
   bsky_feed_links "${handle:-}"
   echo
-  bsky_print_tunnels "${api_host:-?}" "${frontend_url:-}"
-  if [[ -n "${frontend_url:-}" ]]; then
-    if [[ "${oauth_ok:-0}" == "1" ]]; then
-      echo "  (sign in with real Bluesky at the Frontend URL — browse it, not localhost)"
-    else
-      echo "  (Frontend real sign-in disabled until OAuth keys are set)"
-    fi
-  fi
+  bsky_print_endpoint "${host:-?}" "${oauth_ok:-0}"
   echo
   echo "tear down with: devctl bsky down$(name_flag)"
 }
@@ -2055,6 +2204,7 @@ cmd_nuke() {
         (devctl up --name <name> --dedicated-es), or force it:
         GE_DEV_FORCE_NUKE=1 devctl nuke"
   fi
+  bsky_warn_if_published nuke
   compose down -v --remove-orphans
   # Volumes are namespaced by compose project, and the runtime directory and
   # derived Firebase config are named after the instance — so this destroys
@@ -2325,10 +2475,11 @@ Work with it:
                    branch other than main (--repo-root <dir> for another copy)
 
 Serve on real Bluesky (opt-in; ngrok runs as a container — just an authtoken):
-  bsky up          tunnel this env to Bluesky and publish its feeds; also serves
-                   the frontend for real sign-in. Prints the feed + sign-in links
-  bsky down        delete those feed records and close the tunnels
-  bsky status      show the active session's tunnels, sign-in URL and feed links
+  bsky up          tunnel this env to Bluesky and publish its feeds; the same
+                   public URL serves the frontend for real sign-in. Prints the
+                   feed + sign-in links
+  bsky down        delete those feed records and close the tunnel
+  bsky status      show the active session's URL, sign-in note and feed links
        (config: NGROK_AUTHTOKEN, GE_DEV_BSKY_HANDLE, GE_BSKY_APP_PASSWORD; see README)
 
 Instances & ports:
@@ -2357,7 +2508,7 @@ Configuration (devenv.local.env, gitignored — see devenv.local.env.example)
                        GE_PERSPECTIVE_API_KEY
   Stick a live choice: GE_DEV_LIVE, GE_DEV_LIVE_ENV (else a bare 'up' is all-local)
   Serve on bsky:       NGROK_AUTHTOKEN, GE_DEV_BSKY_HANDLE, GE_BSKY_APP_PASSWORD,
-                       GE_DEV_NGROK_DOMAIN[_API|_FRONTEND] (bsky up/down)
+                       GE_DEV_NGROK_DOMAIN (bsky up/down)
   Other overrides:     ports (GE_DEV_PORT_*), ES heap (GE_DEV_ES_HEAP),
                        repo root (GE_DEV_REPO_ROOT)
 EOF
@@ -2409,6 +2560,7 @@ down)
   fi
   compose down
   rm -f "$GE_DEV_REPO_ROOT/frontend/$GE_DEV_FIREBASE_CONFIG"
+  bsky_warn_if_published
   ;;
 nuke) cmd_nuke "$@" ;;
 "" | help | -h | --help) usage ;;
