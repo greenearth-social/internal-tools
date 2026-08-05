@@ -152,7 +152,9 @@ def shell_constant(name: str) -> str:
 def embedded_python(function_name: str) -> str:
     """The single-quoted python program a devctl function passes to python -c."""
     body = shell_function(function_name)
-    return re.search(r"python -c '\n(.*?)\n'", body, re.DOTALL).group(1)
+    program = re.search(r"python -c '\n(.*?)\n'", body, re.DOTALL)
+    assert program is not None, f"no embedded python program in {function_name}()"
+    return program.group(1)
 
 
 def write_gateway_config(path: Path, api_paths: str) -> None:
