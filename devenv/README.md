@@ -778,9 +778,18 @@ tunnel and splits them:
 
 | Path | Goes to |
 | --- | --- |
-| `/xrpc/*`, `/.well-known/did.json` | api — what the AppView fetches to resolve and query the feed |
-| `/api/*` | api — the transparency calls, matching what Firebase Hosting rewrites in the deployed stack |
+| the api's own routes — `/xrpc/*`, `/.well-known/did.json`, `/api/*`, `/rank/*`, `/candidates/*`, `/health`, `/docs`, … | api |
 | everything else | frontend — the app, its assets, the OAuth client metadata and callback |
+
+`bsky up` asks the running api for that list (walking its routers, the way
+`devctl feed` reads its feed config) rather than keeping a copy here, so a new
+router is exposed without editing devctl — a missed path wouldn't 404, it would
+quietly answer with the frontend's HTML. Two paths are decided rather than
+derived: `/` is the app the browser loads, not the api's root route, and
+`/.well-known/did.json` is matched exactly because the OAuth client metadata and
+JWKS next to it belong to the frontend. The frontend is the catch-all because
+Vite serves an open-ended set of paths (`/@vite`, `/@fs`, `/node_modules/.vite`,
+every SPA route) that can't be enumerated, while the api's can.
 
 It works this way because a tunnel each can't be trusted: ngrok's free tier hands
 out one development domain, so two tunnels come back on the *same* hostname, and
@@ -792,8 +801,9 @@ deterministic path routing behaves identically on every plan. If ngrok ever does
 report more than one endpoint for a session, `bsky up` stops rather than publish
 feed records against a pooled hostname.
 
-Only the routed paths above reach the api from outside; for the rest of it, use
-the api's local port (`localhost:8300` by default).
+The whole api is reachable this way, as the old api tunnel was — handy for api
+development, not just for serving the feed. Everything it exposes is public
+while the session is up, so mind the security note above.
 
 ## Service endpoints (defaults)
 

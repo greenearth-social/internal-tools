@@ -1467,12 +1467,71 @@ bsky_wire_frontend() {
   compose up -d --no-deps --force-recreate "${services[@]}" >/dev/null
 }
 
-# Write the Caddyfile the gateway container reads. It is the whole of the
-# public routing policy: the AT Protocol surface the AppView fetches goes to the
-# api, and everything else — the app, its assets, the OAuth metadata and
-# callback the Firebase functions serve through Vite — goes to the frontend.
-# /api/* matches what Firebase Hosting rewrites to the api in the deployed
-# stack, so the browser's transparency calls behave the same here.
+# The api's public paths, as Caddy `path` matcher tokens, read from the running
+# api itself — the same trick as bsky_capture_feeds, and for the same reason: a
+# list hand-copied into devctl goes stale the next time the api adds a router,
+# and a missed path doesn't 404, it silently answers with the frontend's HTML.
+# The routers are walked rather than read from the OpenAPI schema so paths that
+# opt out of the schema still route.
+#
+# Two paths need judgement rather than a prefix:
+#   /                     the api has a root route, but the tunnel's "/" is the
+#                         app the browser loads — the frontend keeps it.
+#   /.well-known/did.json matched exactly, because the neighbouring
+#                         oauth-client-metadata and jwks.json are the frontend's.
+# Everything else routes by first path segment, so new endpoints under an
+# existing router work without regenerating anything.
+bsky_api_gateway_paths() {
+  compose_exec api pipenv run python -c '
+import sys
+sys.path.insert(0, "src")
+from app.main import app
+
+
+def walk(routes):
+    for route in routes:
+        included = getattr(route, "original_router", None)
+        if included is not None:
+            yield from walk(included.routes)
+        elif getattr(route, "path", None):
+            yield route.path
+
+
+exact, prefixes, nested = [], [], set()
+for path in walk(app.routes):
+    if path == "/":
+        continue
+    if path.startswith("/.well-known/"):
+        exact.append(path)
+        continue
+    segment = path.split("/")[1]
+    prefixes.append(segment)
+    if path.count("/") > 1:
+        nested.add(segment)
+tokens = sorted(set(exact))
+for segment in sorted(set(prefixes)):
+    tokens.append("/" + segment)
+    if segment in nested:
+        tokens.append("/" + segment + "/*")
+print(" ".join(tokens))
+' 2>/dev/null | tr -d '\r'
+}
+
+# What to route to the api when the api can't be asked (it is running by the
+# time `bsky up` gets here, so this is a backstop, not the normal path). Serving
+# the feed at all needs the first two; the rest is what the api exposed when
+# this was written.
+BSKY_GATEWAY_FALLBACK_PATHS="/.well-known/did.json /xrpc /xrpc/* /admin /admin/* /api /api/* \
+/candidates /candidates/* /diversify /docs /docs/* /health /openapi.json /r /r/* /rank /rank/* \
+/redoc /skylight /skylight/*"
+
+# Write the Caddyfile the gateway container reads. It is the whole of the public
+# routing policy: the api's own paths (argument 2, from bsky_api_gateway_paths)
+# go to the api, and everything else — the app, its assets, the OAuth metadata
+# and callback the Firebase functions serve through Vite — goes to the frontend.
+# The frontend is the catch-all because Vite serves an open-ended set of paths
+# (/@vite, /@fs, /node_modules/.vite, the SPA's own routes) that can't be
+# enumerated, while the api's can.
 #
 # Upstreams are service names on the compose network: `bsky up` recreates the
 # api (and usually the frontend) *after* this starts, and Caddy resolves the
@@ -1483,8 +1542,8 @@ bsky_wire_frontend() {
 # secrets and is world-readable so the image's user can read it whatever the
 # host ownership.
 bsky_write_gateway_config() {
-  local cfg="$1"
-  cat >"$cfg" <<'EOF'
+  local cfg="$1" api_paths="$2"
+  cat >"$cfg" <<EOF
 {
 	admin off
 	auto_https off
@@ -1494,7 +1553,7 @@ bsky_write_gateway_config() {
 }
 
 :80 {
-	@api path /xrpc/* /.well-known/did.json /api/*
+	@api path $api_paths
 	reverse_proxy @api api:8000
 	reverse_proxy frontend:3000
 }
@@ -1510,9 +1569,9 @@ EOF
 # emulators need socat for the same reason; the ngrok agent has a config knob for
 # it). The config contains no secrets and is world-readable so the image's
 # non-root user can read it regardless of the host user or sudo ownership.
-# NGROK_AUTHTOKEN is passed separately by compose. The tunnel is wide open, but
-# only the routed paths above reach the api — for the rest of it, talk to the
-# api's own host port locally.
+# NGROK_AUTHTOKEN is passed separately by compose. The tunnel is wide open, and
+# the gateway behind it reaches the whole api, so this is usable for plain api
+# development too.
 bsky_write_ngrok_config() {
   local cfg="$1"
   # GE_DEV_NGROK_DOMAIN_API named this same reserved domain back when the api
@@ -1537,7 +1596,13 @@ BSKY_PROFILE="bsky"
 # we wait on the tunnel: the agent exits on any startup error, so a dead
 # container means a real problem we should show rather than swallow.
 bsky_start_tunnel() {
-  bsky_write_gateway_config "$RUNTIME/Caddyfile"
+  local api_paths
+  api_paths="$(bsky_api_gateway_paths)"
+  if [[ -z "$api_paths" ]]; then
+    echo "devctl: warning — couldn't read the api's routes; routing the paths devctl knows about" >&2
+    api_paths="$BSKY_GATEWAY_FALLBACK_PATHS"
+  fi
+  bsky_write_gateway_config "$RUNTIME/Caddyfile" "$api_paths"
   bsky_write_ngrok_config "$RUNTIME/ngrok.yml"
   compose --profile "$BSKY_PROFILE" up -d --force-recreate gateway ngrok >/dev/null 2>&1 || return 1
   sleep 2

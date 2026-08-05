@@ -133,22 +133,95 @@ def write_ngrok_config(path: Path, **environment: str) -> None:
     )
 
 
-def write_gateway_config(path: Path) -> None:
+def shell_constant(name: str) -> str:
+    """Expand one top-level assignment from devctl, continuation lines included."""
+    lines = DEVCTL.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(f"{name}="))
+    end = start
+    while lines[end].endswith("\\"):
+        end += 1
+    assignment = "\n".join(lines[start : end + 1])
+    return subprocess.run(
+        ["bash", "-c", f'{assignment}\nprintf "%s" "${name}"'],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def embedded_python(function_name: str) -> str:
+    """The single-quoted python program a devctl function passes to python -c."""
+    body = shell_function(function_name)
+    return re.search(r"python -c '\n(.*?)\n'", body, re.DOTALL).group(1)
+
+
+def write_gateway_config(path: Path, api_paths: str) -> None:
     script = "\n".join(
         [
             "set -euo pipefail",
             "umask 077",
             shell_function("bsky_write_gateway_config"),
-            'bsky_write_gateway_config "$1"',
+            'bsky_write_gateway_config "$1" "$2"',
         ]
     )
     subprocess.run(
-        ["bash", "-s", "--", str(path)],
+        ["bash", "-s", "--", str(path), api_paths],
         check=True,
         input=script,
         text=True,
         env={"PATH": os.environ["PATH"]},
     )
+
+
+def derive_api_paths(tmp_path: Path, paths: list[str], included: list[str] | None = None) -> str:
+    """Run the route-walking half of bsky_api_gateway_paths over a fake api.
+
+    The production snippet imports the api's FastAPI app from ``src``; standing
+    up a module of that shape is what lets the path derivation — which decides
+    what the public hostname exposes — be tested without the api container.
+    ``included`` becomes a nested router, the shape FastAPI gives an
+    ``include_router`` call and the reason the walk has to recurse at all.
+    """
+    package = tmp_path / "src" / "app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").touch()
+    (package / "main.py").write_text(
+        f"""\
+import json
+
+
+class Route:
+    def __init__(self, path):
+        self.path = path
+
+
+class Router:
+    def __init__(self, routes):
+        self.routes = routes
+
+
+class IncludedRouter:
+    def __init__(self, routes):
+        self.original_router = Router(routes)
+
+
+class App:
+    routes = [Route(p) for p in json.loads({json.dumps(json.dumps(paths))})]
+    included = json.loads({json.dumps(json.dumps(included or []))})
+    if included:
+        routes = routes + [IncludedRouter([Route(p) for p in included])]
+
+
+app = App()
+"""
+    )
+    return subprocess.run(
+        ["python3", "-c", embedded_python("bsky_api_gateway_paths")],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    ).stdout.strip()
 
 
 def run_tunnel_host(tmp_path: Path, tunnels: object) -> subprocess.CompletedProcess:
@@ -248,19 +321,56 @@ def test_ngrok_config_preserves_domain_selection(tmp_path, environment, expected
     assert parsed["tunnels"]["public"]["domain"] == expected_domain
 
 
-def test_gateway_routes_the_atproto_surface_to_the_api(tmp_path):
+def test_gateway_routes_the_api_paths_and_falls_through_to_the_frontend(tmp_path):
     """The routing table is the fix: one hostname, deterministic by path."""
     config = tmp_path / "Caddyfile"
 
-    write_gateway_config(config)
+    write_gateway_config(config, "/.well-known/did.json /health /xrpc /xrpc/*")
 
     lines = [line.strip() for line in config.read_text().splitlines()]
-    assert "@api path /xrpc/* /.well-known/did.json /api/*" in lines
+    assert "@api path /.well-known/did.json /health /xrpc /xrpc/*" in lines
     assert "reverse_proxy @api api:8000" in lines
     # Unmatched paths — the app, its assets, the OAuth metadata and callback —
     # fall through to the frontend.
     assert lines.index("reverse_proxy @api api:8000") < lines.index("reverse_proxy frontend:3000")
     assert stat.S_IMODE(config.stat().st_mode) == 0o644
+
+
+def test_gateway_paths_come_from_the_api_including_nested_routers(tmp_path):
+    derived = derive_api_paths(
+        tmp_path,
+        ["/", "/.well-known/did.json", "/health", "/openapi.json"],
+        included=["/xrpc/app.bsky.feed.getFeedSkeleton", "/rank/models", "/diversify"],
+    )
+
+    assert derived.split() == [
+        # Exact: the neighbouring oauth-client-metadata is the frontend's.
+        "/.well-known/did.json",
+        # A router with sub-paths gets the prefix and the wildcard; a bare
+        # endpoint gets just itself.
+        "/diversify",
+        "/health",
+        "/openapi.json",
+        "/rank",
+        "/rank/*",
+        "/xrpc",
+        "/xrpc/*",
+    ]
+
+
+def test_gateway_leaves_the_root_path_to_the_frontend(tmp_path):
+    """The api has a root route, but "/" on the tunnel is the app to load."""
+    derived = derive_api_paths(tmp_path, ["/", "/health"])
+
+    assert derived.split() == ["/health"]
+
+
+def test_gateway_fallback_covers_the_feed_generator():
+    fallback = shell_constant("BSKY_GATEWAY_FALLBACK_PATHS").split()
+
+    assert "/.well-known/did.json" in fallback
+    assert "/xrpc/*" in fallback
+    assert "/" not in fallback
 
 
 def test_tunnel_host_reports_the_single_public_hostname(tmp_path):
