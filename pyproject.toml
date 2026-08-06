@@ -31,10 +31,14 @@ indent-style = "space"
 
 [tool.pyright]
 include = ["velocity", "devenv"]
-# dev-auth adds this to sys.path at runtime (the directory is mounted into its
-# container), so tell the checker where those modules come from instead of
-# silencing the import.
-extraPaths = ["devenv/firebase"]
+# dev-auth adds firebase/ to sys.path at runtime (the directory is mounted into
+# its container), so tell the checker where those modules come from instead of
+# silencing the import. dev-auth itself is listed for a different reason: its
+# test imports the neighbouring `app` module the way pytest resolves it, and
+# extraPaths are searched before site-packages — so `import app` keeps meaning
+# dev-auth's app.py even when the shell has a sibling repo's virtualenv active
+# (the api installs itself editable under exactly that name).
+extraPaths = ["devenv/firebase", "devenv/dev-auth"]
 # Same exclusion as ruff: notebook cells re-import and shadow freely.
 exclude = ["velocity/notebooks", "**/__pycache__"]
 pythonVersion = "3.13"
