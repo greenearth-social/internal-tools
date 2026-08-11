@@ -272,3 +272,52 @@ def test_resolve_without_runbook_prompts_add(client, mock_db):
         response = _post_interaction(client, RESOLVE_PAYLOAD_NO_RUNBOOK)
     assert response.status_code == 200
     assert "/runbook add" in response.json()["data"]["content"]
+
+
+# ---------------------------------------------------------------------------
+# /runbook add modal + modal submit tests
+# ---------------------------------------------------------------------------
+
+RUNBOOK_ADD_PAYLOAD = {
+    "type": 2,
+    "data": {
+        "name": "runbook",
+        "options": [{"name": "add", "type": 1, "options": []}],
+    },
+    "member": {"user": {"id": "uid1", "username": "inthree3", "global_name": "Inseon"}},
+}
+
+MODAL_SUBMIT_PAYLOAD = {
+    "type": 5,
+    "data": {
+        "custom_id": "runbook_add_modal",
+        "components": [
+            {"type": 1, "components": [{"custom_id": "policy_name", "value": "es-storage-high"}]},
+            {"type": 1, "components": [{"custom_id": "title", "value": "ES Storage > 80%"}]},
+            {"type": 1, "components": [{"custom_id": "content", "value": "## Steps\n1. Check."}]},
+        ],
+    },
+    "member": {"user": {"id": "uid1", "username": "inthree3", "global_name": "Inseon"}},
+}
+
+
+def test_runbook_add_returns_modal(client):
+    response = _post_interaction(client, RUNBOOK_ADD_PAYLOAD)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["type"] == 9  # MODAL
+    assert data["data"]["custom_id"] == "runbook_add_modal"
+
+
+def test_modal_submit_creates_pr_and_replies(client):
+    with patch("app.create_runbook_pr", return_value="https://github.com/.../pull/42") as mock_pr:
+        response = _post_interaction(client, MODAL_SUBMIT_PAYLOAD)
+    assert response.status_code == 200
+    content = response.json()["data"]["content"]
+    assert "https://github.com/.../pull/42" in content
+    mock_pr.assert_called_once_with(
+        os.environ["GE_GITHUB_TOKEN"],
+        "es-storage-high",
+        "ES Storage > 80%",
+        "## Steps\n1. Check.",
+    )

@@ -7,6 +7,7 @@ import google.cloud.firestore as fs
 from discord_utils import send_channel_message, format_ts, verify_discord_request
 from firestore import get_current_oncall, get_user, create_alert, register_user, set_current_oncall, ack_alert, resolve_alert
 from runbooks import fetch_runbook
+from github_utils import create_runbook_pr
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ DISCORD_BOT_TOKEN = os.environ["GE_DISCORD_BOT_TOKEN"]
 DISCORD_ONCALL_CHANNEL_ID = os.environ["GE_DISCORD_ONCALL_CHANNEL_ID"]
 DISCORD_PUBLIC_KEY = os.environ["GE_DISCORD_PUBLIC_KEY"]
 RUNBOOKS_BRANCH = os.environ.get("GE_ONCALL_RUNBOOKS_BRANCH", "main")
+GITHUB_TOKEN = os.environ["GE_GITHUB_TOKEN"]
 
 # Interaction types
 _PING = 1
@@ -211,9 +213,47 @@ async def _handle_command(request: Request, payload: dict) -> dict:
             )
         return _interaction_response(_MESSAGE, "✓ Resolved.")
 
+    if name == "runbook":
+        subcommand = payload["data"]["options"][0]
+        if subcommand["name"] == "add":
+            return {
+                "type": _MODAL,
+                "data": {
+                    "custom_id": "runbook_add_modal",
+                    "title": "Add Runbook",
+                    "components": [
+                        {"type": 1, "components": [{"type": 4, "custom_id": "policy_name",
+                            "label": "Alert policy name", "style": 1,
+                            "placeholder": "es-storage-high", "required": True}]},
+                        {"type": 1, "components": [{"type": 4, "custom_id": "title",
+                            "label": "Title", "style": 1,
+                            "placeholder": "ES Storage > 80%", "required": True}]},
+                        {"type": 1, "components": [{"type": 4, "custom_id": "content",
+                            "label": "Content (Markdown)", "style": 2,
+                            "placeholder": "## Likely cause\n...\n\n## Steps\n1. ...",
+                            "required": True, "max_length": 3000}]},
+                    ],
+                },
+            }
+
     return _interaction_response(_MESSAGE, f"Unknown command: {name}")
 
 
 async def _handle_modal_submit(request: Request, payload: dict) -> dict:
-    # Implemented in Task 8
-    return _interaction_response(_MESSAGE, "Modal received.")
+    if payload["data"]["custom_id"] != "runbook_add_modal":
+        return _interaction_response(_MESSAGE, "Unknown modal.")
+
+    fields = {
+        c["components"][0]["custom_id"]: c["components"][0]["value"]
+        for c in payload["data"]["components"]
+    }
+    policy_name = fields["policy_name"]
+    title = fields["title"]
+    content = fields["content"]
+
+    try:
+        pr_url = create_runbook_pr(GITHUB_TOKEN, policy_name, title, content)
+        return _interaction_response(_MESSAGE, f"✓ Runbook PR opened: {pr_url}")
+    except Exception:
+        logger.exception("Failed to create runbook PR")
+        return _interaction_response(_MESSAGE, "Failed to open PR — check logs.")
