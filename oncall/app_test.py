@@ -105,6 +105,22 @@ def test_alert_critical_no_oncall_posts_without_mention(client, mock_db):
     assert "no oncall set" in sent_content
 
 
+def test_alert_critical_oncall_user_missing_still_alerts(client, mock_db):
+    """Test that missing user doc doesn't crash /alert CRITICAL path — falls back to user_id."""
+    with patch("app.get_current_oncall", return_value={"user_id": "uid-missing", "until": "2026-08-15T23:59:59+00:00"}), \
+         patch("app.get_user", return_value=None), \
+         patch("app.fetch_runbook", return_value=(False, "")), \
+         patch("app.send_channel_message") as mock_send, \
+         patch("app.create_alert"):
+        response = client.post("/alert", json=GCP_CRITICAL_PAYLOAD)
+
+    assert response.status_code == 200
+    mock_send.assert_called_once()
+    sent_content = mock_send.call_args[0][2]
+    assert "CRITICAL" in sent_content
+    assert "uid-missing" in sent_content  # Falls back to user_id when user doc is None
+
+
 # ---------------------------------------------------------------------------
 # Discord interactions tests
 # ---------------------------------------------------------------------------

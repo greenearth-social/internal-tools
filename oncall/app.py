@@ -94,9 +94,10 @@ async def alert(request: Request):
         oncall = get_current_oncall(request.app.state.db)
         if oncall:
             user = get_user(request.app.state.db, oncall["user_id"])
+            name_str = user["name"] if user else oncall["user_id"]
             until_dt = datetime.fromisoformat(oncall["until"])
             oncall_line = (
-                f"Oncall: {user['name']} (until {format_ts(until_dt)})"
+                f"Oncall: {name_str} (until {format_ts(until_dt)})"
                 f" — use `/ack {alert_id}` to acknowledge"
             )
         else:
