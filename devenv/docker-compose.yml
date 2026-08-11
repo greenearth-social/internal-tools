@@ -488,10 +488,20 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
+      firebase:
+        condition: service_healthy
     environment:
       - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
       - GE_JETSTREAM_URL=${GE_DEV_JETSTREAM_URL:-wss://jetstream2.us-east.bsky.network/subscribe}
       - GE_JETSTREAM_STATE_FILE=/runtime/seed/.jetstream_state.json
+      # Follow deltas for the api's followed-users cache (api#83). Points at
+      # the same emulator the api uses, so a follow on the real firehose shows
+      # up in a locally rendered feed.
+      - GE_FIRESTORE_EMULATOR_HOST=firebase:18080
+      - GE_FIRESTORE_PROJECT=${GE_DEV_FIREBASE_PROJECT:-greenearth-471522}
+      # Local users are seeded rarely; poll often enough that a newly seeded
+      # user starts being tracked without a container restart.
+      - GE_FOLLOWS_TRACKED_REFRESH_SEC=30
       # Matches seed-megastream. The binary's default is 10min, which is right
       # for prod's ILM but would leave a dev container that ran overnight
       # holding ~144 near-empty indices.
