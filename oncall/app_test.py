@@ -321,3 +321,33 @@ def test_modal_submit_creates_pr_and_replies(client):
         "ES Storage > 80%",
         "## Steps\n1. Check.",
     )
+
+
+# ---------------------------------------------------------------------------
+# /check-escalations tests
+# ---------------------------------------------------------------------------
+
+def test_check_escalations_pings_for_stale_alerts(client, mock_db):
+    stale = [{"id": "inc-abc123", "policy_name": "ES Storage > 80%",
+               "fired_at": "2026-08-10T19:00:00+00:00", "severity": "critical", "status": "open"}]
+    oncall = {"user_id": "uid1", "until": "2026-08-15T23:59:59+00:00"}
+
+    with patch("app.get_stale_alerts", return_value=stale), \
+         patch("app.get_current_oncall", return_value=oncall), \
+         patch("app.get_user", return_value={"name": "Inseon", "discord_handle": "inthree3"}), \
+         patch("app.send_channel_message") as mock_send:
+        response = client.post("/check-escalations")
+
+    assert response.status_code == 200
+    mock_send.assert_called_once()
+    content = mock_send.call_args[0][2]
+    assert "inc-abc123" in content
+    assert "Inseon" in content
+
+
+def test_check_escalations_no_stale_alerts_sends_nothing(client, mock_db):
+    with patch("app.get_stale_alerts", return_value=[]), \
+         patch("app.send_channel_message") as mock_send:
+        response = client.post("/check-escalations")
+    assert response.status_code == 200
+    mock_send.assert_not_called()

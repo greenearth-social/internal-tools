@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi import FastAPI, Request, Response
 import google.cloud.firestore as fs
 from discord_utils import send_channel_message, format_ts, verify_discord_request
-from firestore import get_current_oncall, get_user, create_alert, register_user, set_current_oncall, ack_alert, resolve_alert
+from firestore import get_current_oncall, get_user, create_alert, register_user, set_current_oncall, ack_alert, resolve_alert, get_stale_alerts
 from runbooks import fetch_runbook
 from github_utils import create_runbook_pr
 
@@ -27,6 +27,8 @@ _PONG = 1
 _MESSAGE = 4
 _MODAL = 9
 
+ESCALATION_THRESHOLD_MINUTES = 15
+
 
 @asynccontextmanager
 async def lifespan(application):
@@ -40,6 +42,36 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/check-escalations")
+async def check_escalations(request: Request):
+    db = request.app.state.db
+    threshold = datetime.now(timezone.utc) - timedelta(minutes=ESCALATION_THRESHOLD_MINUTES)
+    stale = get_stale_alerts(db, threshold)
+
+    oncall = get_current_oncall(db) if stale else None
+    oncall_name = None
+    if oncall:
+        user = get_user(db, oncall["user_id"])
+        oncall_name = user["name"] if user else oncall["user_id"]
+
+    for alert in stale:
+        alert_id = alert["id"]
+        policy_name = alert.get("policy_name", "Unknown alert")
+        fired_at = datetime.fromisoformat(alert["fired_at"])
+        minutes_ago = int((datetime.now(timezone.utc) - fired_at).total_seconds() / 60)
+        mention = f"**{oncall_name}**" if oncall_name else "*(no oncall set)*"
+        message = (
+            f"⚠️ Unacknowledged critical alert: **{policy_name}** (fired {minutes_ago}min ago)\n"
+            f"{mention} — please `/ack {alert_id}`"
+        )
+        try:
+            send_channel_message(DISCORD_ONCALL_CHANNEL_ID, DISCORD_BOT_TOKEN, message)
+        except Exception:
+            logger.exception("Failed to send escalation ping for alert %s", alert_id)
+
+    return {"escalated": len(stale)}
 
 
 @app.post("/alert")
