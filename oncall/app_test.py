@@ -1,3 +1,5 @@
+import json
+import os
 from fastapi.testclient import TestClient
 from unittest.mock import patch, MagicMock
 
@@ -101,3 +103,112 @@ def test_alert_critical_no_oncall_posts_without_mention(client, mock_db):
     assert response.status_code == 200
     sent_content = mock_send.call_args[0][2]
     assert "no oncall set" in sent_content
+
+
+# ---------------------------------------------------------------------------
+# Discord interactions tests
+# ---------------------------------------------------------------------------
+
+DISCORD_PUBLIC_KEY = os.environ["GE_DISCORD_PUBLIC_KEY"]
+
+
+def _discord_headers(body: bytes) -> dict:
+    # For tests we bypass real Ed25519 by patching verify_discord_request
+    return {
+        "X-Signature-Ed25519": "aa" * 64,
+        "X-Signature-Timestamp": "1234567890",
+    }
+
+
+PING_PAYLOAD = {"type": 1}
+
+REGISTER_PAYLOAD = {
+    "type": 2,
+    "data": {"name": "register"},
+    "member": {"user": {"id": "uid1", "username": "inthree3", "global_name": "Inseon"}},
+}
+
+ONCALL_WHO_PAYLOAD = {
+    "type": 2,
+    "data": {
+        "name": "oncall",
+        "options": [{"name": "who", "type": 1, "options": []}],
+    },
+    "member": {"user": {"id": "uid1", "username": "inthree3", "global_name": "Inseon"}},
+}
+
+ONCALL_SET_PAYLOAD = {
+    "type": 2,
+    "data": {
+        "name": "oncall",
+        "options": [{
+            "name": "set",
+            "type": 1,
+            "options": [
+                {"name": "user", "value": "uid2"},
+                {"name": "until", "value": "2026-08-15"},
+            ],
+        }],
+        "resolved": {
+            "users": {"uid2": {"id": "uid2", "username": "raindrift", "global_name": "Ian"}},
+        },
+    },
+    "member": {"user": {"id": "uid1", "username": "inthree3", "global_name": "Inseon"}},
+}
+
+
+def _post_interaction(client, payload):
+    body = json.dumps(payload).encode()
+    with patch("app.verify_discord_request", return_value=True):
+        return client.post(
+            "/discord/interactions",
+            content=body,
+            headers={**_discord_headers(body), "Content-Type": "application/json"},
+        )
+
+
+def test_discord_ping_returns_pong(client):
+    response = _post_interaction(client, PING_PAYLOAD)
+    assert response.status_code == 200
+    assert response.json()["type"] == 1
+
+
+def test_discord_invalid_signature_returns_401(client):
+    body = json.dumps(PING_PAYLOAD).encode()
+    with patch("app.verify_discord_request", return_value=False):
+        response = client.post(
+            "/discord/interactions",
+            content=body,
+            headers={**_discord_headers(body), "Content-Type": "application/json"},
+        )
+    assert response.status_code == 401
+
+
+def test_register_stores_user_and_replies(client, mock_db):
+    with patch("app.register_user") as mock_reg:
+        response = _post_interaction(client, REGISTER_PAYLOAD)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["type"] == 4
+    assert "Inseon" in data["data"]["content"]
+    mock_reg.assert_called_once_with(mock_db, "uid1", "Inseon", "inthree3")
+
+
+def test_oncall_who_no_oncall_set(client, mock_db):
+    mock_db.collection.return_value.document.return_value.get.return_value.exists = False
+    response = _post_interaction(client, ONCALL_WHO_PAYLOAD)
+    assert response.status_code == 200
+    assert "no oncall" in response.json()["data"]["content"].lower()
+
+
+def test_oncall_set_stores_and_replies(client, mock_db):
+    with patch("app.set_current_oncall") as mock_set:
+        response = _post_interaction(client, ONCALL_SET_PAYLOAD)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["type"] == 4
+    assert "Ian" in data["data"]["content"]
+    mock_set.assert_called_once()
+    args = mock_set.call_args[0]
+    assert args[1] == "uid2"
+    assert args[2].year == 2026 and args[2].month == 8 and args[2].day == 15

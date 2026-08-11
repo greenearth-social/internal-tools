@@ -1,18 +1,29 @@
 import os
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from fastapi import FastAPI, Request
+from datetime import date, datetime, timedelta, timezone
+from fastapi import FastAPI, Request, Response
 import google.cloud.firestore as fs
-from discord_utils import send_channel_message, format_ts
-from firestore import get_current_oncall, get_user, create_alert
+from discord_utils import send_channel_message, format_ts, verify_discord_request
+from firestore import get_current_oncall, get_user, create_alert, register_user, set_current_oncall
 from runbooks import fetch_runbook
 
 logger = logging.getLogger(__name__)
 
 DISCORD_BOT_TOKEN = os.environ["GE_DISCORD_BOT_TOKEN"]
 DISCORD_ONCALL_CHANNEL_ID = os.environ["GE_DISCORD_ONCALL_CHANNEL_ID"]
+DISCORD_PUBLIC_KEY = os.environ["GE_DISCORD_PUBLIC_KEY"]
 RUNBOOKS_BRANCH = os.environ.get("GE_ONCALL_RUNBOOKS_BRANCH", "main")
+
+# Interaction types
+_PING = 1
+_APPLICATION_COMMAND = 2
+_MODAL_SUBMIT = 5
+
+# Response types
+_PONG = 1
+_MESSAGE = 4
+_MODAL = 9
 
 
 @asynccontextmanager
@@ -88,3 +99,99 @@ async def alert(request: Request):
         logger.exception("Failed to post alert %s to Discord", alert_id)
 
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Discord interaction helpers
+# ---------------------------------------------------------------------------
+
+def _interaction_response(rtype: int, content: str = "", **extra) -> dict:
+    if rtype == _PONG:
+        return {"type": _PONG}
+    return {"type": rtype, "data": {"content": content, **extra}}
+
+
+def _end_of_week_utc() -> datetime:
+    today = date.today()
+    days_until_sunday = (6 - today.weekday()) % 7 or 7
+    end = today + timedelta(days=days_until_sunday)
+    return datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=timezone.utc)
+
+
+@app.post("/discord/interactions")
+async def discord_interactions(request: Request):
+    body = await request.body()
+    sig = request.headers.get("X-Signature-Ed25519", "")
+    ts = request.headers.get("X-Signature-Timestamp", "")
+    if not verify_discord_request(DISCORD_PUBLIC_KEY, sig, ts, body):
+        return Response(status_code=401)
+
+    payload = await request.json()
+    itype = payload.get("type")
+
+    if itype == _PING:
+        return _interaction_response(_PONG)
+
+    if itype == _APPLICATION_COMMAND:
+        return await _handle_command(request, payload)
+
+    if itype == _MODAL_SUBMIT:
+        return await _handle_modal_submit(request, payload)
+
+    return _interaction_response(_MESSAGE, "Unknown interaction type.")
+
+
+async def _handle_command(request: Request, payload: dict) -> dict:
+    db = request.app.state.db
+    name = payload["data"]["name"]
+    member = payload.get("member", {})
+    user = member.get("user", {})
+    user_id = user.get("id", "")
+    username = user.get("username", "")
+    display_name = user.get("global_name") or username
+
+    if name == "register":
+        register_user(db, user_id, display_name, username)
+        return _interaction_response(_MESSAGE, f"Registered **{display_name}** in the oncall system.")
+
+    if name == "oncall":
+        subcommand = payload["data"]["options"][0]
+        sub_name = subcommand["name"]
+
+        if sub_name == "who":
+            oncall = get_current_oncall(db)
+            if not oncall:
+                return _interaction_response(_MESSAGE, "No oncall set — run `/oncall set` to assign someone.")
+            oncall_user = get_user(db, oncall["user_id"])
+            until_dt = datetime.fromisoformat(oncall["until"])
+            name_str = oncall_user["name"] if oncall_user else oncall["user_id"]
+            return _interaction_response(
+                _MESSAGE,
+                f"**Current oncall:** {name_str} — until {format_ts(until_dt)}",
+            )
+
+        if sub_name == "set":
+            opts = {o["name"]: o["value"] for o in subcommand.get("options", [])}
+            target_user_id = opts["user"]
+            resolved_users = payload["data"].get("resolved", {}).get("users", {})
+            target_info = resolved_users.get(target_user_id, {})
+            target_name = target_info.get("global_name") or target_info.get("username", target_user_id)
+
+            if "until" in opts:
+                y, m, d = (int(p) for p in opts["until"].split("-"))
+                until_dt = datetime(y, m, d, 23, 59, 59, tzinfo=timezone.utc)
+            else:
+                until_dt = _end_of_week_utc()
+
+            set_current_oncall(db, target_user_id, until_dt)
+            return _interaction_response(
+                _MESSAGE,
+                f"**{target_name}** is now oncall until {format_ts(until_dt)}",
+            )
+
+    return _interaction_response(_MESSAGE, f"Unknown command: {name}")
+
+
+async def _handle_modal_submit(request: Request, payload: dict) -> dict:
+    # Implemented in Task 8
+    return _interaction_response(_MESSAGE, "Modal received.")
