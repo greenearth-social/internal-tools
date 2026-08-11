@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi import FastAPI, Request, Response
 import google.cloud.firestore as fs
 from discord_utils import send_channel_message, format_ts, verify_discord_request
-from firestore import get_current_oncall, get_user, create_alert, register_user, set_current_oncall
+from firestore import get_current_oncall, get_user, create_alert, register_user, set_current_oncall, ack_alert, resolve_alert
 from runbooks import fetch_runbook
 
 logger = logging.getLogger(__name__)
@@ -188,6 +188,28 @@ async def _handle_command(request: Request, payload: dict) -> dict:
                 _MESSAGE,
                 f"**{target_name}** is now oncall until {format_ts(until_dt)}",
             )
+
+    if name == "ack":
+        alert_id = payload["data"]["options"][0]["value"]
+        old = ack_alert(db, alert_id, user_id)
+        if old is None:
+            return _interaction_response(_MESSAGE, f"Alert `{alert_id}` not found.")
+        return _interaction_response(
+            _MESSAGE,
+            f"✓ Acknowledged by **{display_name}** — escalation stopped."
+        )
+
+    if name == "resolve":
+        alert_id = payload["data"]["options"][0]["value"]
+        old = resolve_alert(db, alert_id)
+        if old is None:
+            return _interaction_response(_MESSAGE, f"Alert `{alert_id}` not found.")
+        if not old.get("runbook_found", True):
+            return _interaction_response(
+                _MESSAGE,
+                f"✓ Resolved. No runbook matched this alert — run `/runbook add` to capture the fix."
+            )
+        return _interaction_response(_MESSAGE, "✓ Resolved.")
 
     return _interaction_response(_MESSAGE, f"Unknown command: {name}")
 

@@ -212,3 +212,63 @@ def test_oncall_set_stores_and_replies(client, mock_db):
     args = mock_set.call_args[0]
     assert args[1] == "uid2"
     assert args[2].year == 2026 and args[2].month == 8 and args[2].day == 15
+
+
+ACK_PAYLOAD = {
+    "type": 2,
+    "data": {
+        "name": "ack",
+        "options": [{"name": "alert_id", "value": "inc-abc123"}],
+    },
+    "member": {"user": {"id": "uid1", "username": "inthree3", "global_name": "Inseon"}},
+}
+
+RESOLVE_PAYLOAD_WITH_RUNBOOK = {
+    "type": 2,
+    "data": {
+        "name": "resolve",
+        "options": [{"name": "alert_id", "value": "inc-abc123"}],
+    },
+    "member": {"user": {"id": "uid1", "username": "inthree3", "global_name": "Inseon"}},
+}
+
+RESOLVE_PAYLOAD_NO_RUNBOOK = {
+    "type": 2,
+    "data": {
+        "name": "resolve",
+        "options": [{"name": "alert_id", "value": "inc-abc123"}],
+    },
+    "member": {"user": {"id": "uid1", "username": "inthree3", "global_name": "Inseon"}},
+}
+
+
+def test_ack_updates_alert_and_replies(client, mock_db):
+    with patch("app.ack_alert", return_value={"status": "open", "policy_name": "es-storage-high"}) as mock_ack:
+        response = _post_interaction(client, ACK_PAYLOAD)
+    assert response.status_code == 200
+    content = response.json()["data"]["content"]
+    assert "Acknowledged" in content
+    assert "Inseon" in content
+    mock_ack.assert_called_once_with(mock_db, "inc-abc123", "uid1")
+
+
+def test_ack_unknown_alert_replies_gracefully(client, mock_db):
+    with patch("app.ack_alert", return_value=None):
+        response = _post_interaction(client, ACK_PAYLOAD)
+    assert response.status_code == 200
+    assert "not found" in response.json()["data"]["content"].lower()
+
+
+def test_resolve_with_runbook_confirms(client, mock_db):
+    with patch("app.resolve_alert", return_value={"status": "acked", "runbook_found": True}):
+        response = _post_interaction(client, RESOLVE_PAYLOAD_WITH_RUNBOOK)
+    assert response.status_code == 200
+    assert "Resolved" in response.json()["data"]["content"]
+    assert "runbook add" not in response.json()["data"]["content"]
+
+
+def test_resolve_without_runbook_prompts_add(client, mock_db):
+    with patch("app.resolve_alert", return_value={"status": "acked", "runbook_found": False}):
+        response = _post_interaction(client, RESOLVE_PAYLOAD_NO_RUNBOOK)
+    assert response.status_code == 200
+    assert "/runbook add" in response.json()["data"]["content"]
