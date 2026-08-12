@@ -261,7 +261,7 @@ async def _handle_command(request: Request, payload: dict) -> dict:
         if not old.get("runbook_found", True):
             return _interaction_response(
                 _MESSAGE,
-                "✓ Resolved. No runbook matched this alert — run `/runbook add` to capture the fix.",
+                "✓ Resolved. No runbook matched this alert — run `/runbook add` to capture the fix.",  # noqa: E501
             )
         return _interaction_response(_MESSAGE, "✓ Resolved.")
 
