@@ -1,7 +1,8 @@
 from datetime import datetime
+
 import httpx
-from nacl.signing import VerifyKey
 from nacl.exceptions import BadSignatureError
+from nacl.signing import VerifyKey
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
 

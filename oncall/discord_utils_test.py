@@ -1,10 +1,11 @@
-from datetime import datetime, timezone
-from unittest.mock import patch, MagicMock
-from discord_utils import verify_discord_request, format_ts, send_channel_message
+from datetime import UTC, datetime
+from unittest.mock import MagicMock, patch
+
+from discord_utils import format_ts, send_channel_message, verify_discord_request
 
 
 def test_format_ts():
-    dt = datetime(2026, 8, 15, 23, 59, 59, tzinfo=timezone.utc)
+    dt = datetime(2026, 8, 15, 23, 59, 59, tzinfo=UTC)
     result = format_ts(dt)
     assert result == f"<t:{int(dt.timestamp())}:f>"
 

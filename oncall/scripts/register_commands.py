@@ -3,12 +3,14 @@
 Register Discord slash commands for the oncall bot.
 
 Run once after initial deploy, or whenever commands change:
-  GE_DISCORD_APPLICATION_ID=... GE_DISCORD_BOT_TOKEN=... GE_DISCORD_GUILD_ID=... python scripts/register_commands.py
+  GE_DISCORD_APPLICATION_ID=... GE_DISCORD_BOT_TOKEN=... GE_DISCORD_GUILD_ID=... \
+      python scripts/register_commands.py
 
 Uses guild commands (instant) rather than global commands (up to 1h propagation).
 Set GE_DISCORD_GUILD_ID to your server ID.
 """
 import os
+
 import httpx
 
 APPLICATION_ID = os.environ["GE_DISCORD_APPLICATION_ID"]
@@ -31,8 +33,18 @@ COMMANDS = [
                 "description": "Set who is on call",
                 "type": 1,
                 "options": [
-                    {"name": "user", "description": "User to set as oncall", "type": 6, "required": True},
-                    {"name": "until", "description": "Until date (YYYY-MM-DD), defaults to end of week", "type": 3, "required": False},
+                    {
+                        "name": "user",
+                        "description": "User to set as oncall",
+                        "type": 6,
+                        "required": True,
+                    },
+                    {
+                        "name": "until",
+                        "description": "Until date (YYYY-MM-DD), defaults to end of week",
+                        "type": 3,
+                        "required": False,
+                    },
                 ],
             },
             {"name": "who", "description": "Show who is currently on call", "type": 1},
@@ -42,13 +54,19 @@ COMMANDS = [
         "name": "ack",
         "description": "Acknowledge a critical alert",
         "type": 1,
-        "options": [{"name": "alert_id", "description": "Alert ID to acknowledge", "type": 3, "required": True}],
+        "options": [
+            {"name": "alert_id", "description": "Alert ID to acknowledge", "type": 3,
+             "required": True},
+        ],
     },
     {
         "name": "resolve",
         "description": "Mark an alert as resolved",
         "type": 1,
-        "options": [{"name": "alert_id", "description": "Alert ID to resolve", "type": 3, "required": True}],
+        "options": [
+            {"name": "alert_id", "description": "Alert ID to resolve", "type": 3,
+             "required": True},
+        ],
     },
     {
         "name": "runbook",

@@ -1,13 +1,23 @@
-import os
 import logging
+import os
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta, timezone
-from fastapi import FastAPI, Request, Response
+from datetime import UTC, date, datetime, timedelta
+
 import google.cloud.firestore as fs
-from discord_utils import send_channel_message, format_ts, verify_discord_request
-from firestore import get_current_oncall, get_user, create_alert, register_user, set_current_oncall, ack_alert, resolve_alert, get_stale_alerts
-from runbooks import fetch_runbook
+from discord_utils import format_ts, send_channel_message, verify_discord_request
+from fastapi import FastAPI, Request, Response
+from firestore import (
+    ack_alert,
+    create_alert,
+    get_current_oncall,
+    get_stale_alerts,
+    get_user,
+    register_user,
+    resolve_alert,
+    set_current_oncall,
+)
 from github_utils import create_runbook_pr
+from runbooks import fetch_runbook
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +57,7 @@ def health():
 @app.post("/check-escalations")
 async def check_escalations(request: Request):
     db = request.app.state.db
-    threshold = datetime.now(timezone.utc) - timedelta(minutes=ESCALATION_THRESHOLD_MINUTES)
+    threshold = datetime.now(UTC) - timedelta(minutes=ESCALATION_THRESHOLD_MINUTES)
     stale = get_stale_alerts(db, threshold)
 
     oncall = get_current_oncall(db) if stale else None
@@ -60,7 +70,7 @@ async def check_escalations(request: Request):
         alert_id = alert["id"]
         policy_name = alert.get("policy_name", "Unknown alert")
         fired_at = datetime.fromisoformat(alert["fired_at"])
-        minutes_ago = int((datetime.now(timezone.utc) - fired_at).total_seconds() / 60)
+        minutes_ago = int((datetime.now(UTC) - fired_at).total_seconds() / 60)
         mention = f"**{oncall_name}**" if oncall_name else "*(no oncall set)*"
         message = (
             f"⚠️ Unacknowledged critical alert: **{policy_name}** (fired {minutes_ago}min ago)\n"
@@ -85,7 +95,7 @@ async def alert(request: Request):
     alert_id = incident["incident_id"]
     condition_name = incident.get("condition_name", "Unknown alert")
     severity = incident.get("severity", "WARNING").upper()
-    started_at = datetime.fromtimestamp(incident.get("started_at", 0), tz=timezone.utc)
+    started_at = datetime.fromtimestamp(incident.get("started_at", 0), tz=UTC)
     summary = incident.get("summary", "")
 
     found, runbook_content = fetch_runbook(condition_name, RUNBOOKS_BRANCH)
@@ -103,7 +113,10 @@ async def alert(request: Request):
         else:
             oncall_line = "no oncall set — run `/oncall set` to assign someone"
 
-        runbook_section = runbook_content if found else "No runbook found — run `/runbook add` to capture the fix."
+        runbook_section = (
+            runbook_content if found
+            else "No runbook found — run `/runbook add` to capture the fix."
+        )
 
         message = (
             f"🚨 **[CRITICAL]** {condition_name}\n"
@@ -150,7 +163,7 @@ def _end_of_week_utc() -> datetime:
     today = date.today()
     days_until_sunday = (6 - today.weekday()) % 7 or 7
     end = today + timedelta(days=days_until_sunday)
-    return datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=timezone.utc)
+    return datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=UTC)
 
 
 @app.post("/discord/interactions")
@@ -187,7 +200,9 @@ async def _handle_command(request: Request, payload: dict) -> dict:
 
     if name == "register":
         register_user(db, user_id, display_name, username)
-        return _interaction_response(_MESSAGE, f"Registered **{display_name}** in the oncall system.")
+        return _interaction_response(
+            _MESSAGE, f"Registered **{display_name}** in the oncall system."
+        )
 
     if name == "oncall":
         subcommand = payload["data"]["options"][0]
@@ -196,7 +211,9 @@ async def _handle_command(request: Request, payload: dict) -> dict:
         if sub_name == "who":
             oncall = get_current_oncall(db)
             if not oncall:
-                return _interaction_response(_MESSAGE, "No oncall set — run `/oncall set` to assign someone.")
+                return _interaction_response(
+                    _MESSAGE, "No oncall set — run `/oncall set` to assign someone."
+                )
             oncall_user = get_user(db, oncall["user_id"])
             until_dt = datetime.fromisoformat(oncall["until"])
             name_str = oncall_user["name"] if oncall_user else oncall["user_id"]
@@ -210,11 +227,13 @@ async def _handle_command(request: Request, payload: dict) -> dict:
             target_user_id = opts["user"]
             resolved_users = payload["data"].get("resolved", {}).get("users", {})
             target_info = resolved_users.get(target_user_id, {})
-            target_name = target_info.get("global_name") or target_info.get("username", target_user_id)
+            target_name = (
+                target_info.get("global_name") or target_info.get("username", target_user_id)
+            )
 
             if "until" in opts:
                 y, m, d = (int(p) for p in opts["until"].split("-"))
-                until_dt = datetime(y, m, d, 23, 59, 59, tzinfo=timezone.utc)
+                until_dt = datetime(y, m, d, 23, 59, 59, tzinfo=UTC)
             else:
                 until_dt = _end_of_week_utc()
 
@@ -242,7 +261,7 @@ async def _handle_command(request: Request, payload: dict) -> dict:
         if not old.get("runbook_found", True):
             return _interaction_response(
                 _MESSAGE,
-                f"✓ Resolved. No runbook matched this alert — run `/runbook add` to capture the fix."
+                "✓ Resolved. No runbook matched this alert — run `/runbook add` to capture the fix."
             )
         return _interaction_response(_MESSAGE, "✓ Resolved.")
 

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def register_user(db, user_id: str, name: str, discord_handle: str) -> None:
@@ -47,7 +47,7 @@ def ack_alert(db, alert_id: str, user_id: str) -> dict | None:
     ref.update({
         "status": "acked",
         "acked_by": user_id,
-        "acked_at": datetime.now(timezone.utc).isoformat(),
+        "acked_at": datetime.now(UTC).isoformat(),
     })
     return doc.to_dict()
 
@@ -59,7 +59,7 @@ def resolve_alert(db, alert_id: str) -> dict | None:
         return None
     ref.update({
         "status": "resolved",
-        "resolved_at": datetime.now(timezone.utc).isoformat(),
+        "resolved_at": datetime.now(UTC).isoformat(),
     })
     return doc.to_dict()
 

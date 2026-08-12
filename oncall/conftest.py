@@ -1,6 +1,7 @@
 import os
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
 from fastapi.testclient import TestClient
 
 # Set required env vars before importing app
@@ -13,6 +14,7 @@ os.environ.setdefault("GE_GITHUB_TOKEN", "test_github_token")
 os.environ.setdefault("GE_ONCALL_RUNBOOKS_BRANCH", "main")
 
 from app import app
+
 
 @pytest.fixture()
 def mock_db():

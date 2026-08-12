@@ -1,5 +1,6 @@
-from unittest.mock import patch, MagicMock
-from runbooks import policy_name_to_slug, fetch_runbook
+from unittest.mock import MagicMock, patch
+
+from runbooks import fetch_runbook, policy_name_to_slug
 
 SAMPLE_MD = """\
 ---

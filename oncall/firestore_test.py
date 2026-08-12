@@ -1,11 +1,18 @@
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, call
+from datetime import UTC, datetime
+from unittest.mock import MagicMock
+
 from firestore import (
-    register_user, get_user, get_current_oncall, set_current_oncall,
-    create_alert, ack_alert, resolve_alert, get_stale_alerts,
+    ack_alert,
+    create_alert,
+    get_current_oncall,
+    get_stale_alerts,
+    get_user,
+    register_user,
+    resolve_alert,
+    set_current_oncall,
 )
 
-NOW = datetime(2026, 8, 10, 20, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 10, 20, 0, 0, tzinfo=UTC)
 
 
 def _mock_db_with_doc(data: dict | None):
@@ -111,7 +118,7 @@ def test_get_stale_alerts_filters_by_threshold():
        .where.return_value
        .get.return_value) = [old_doc, recent_doc]
 
-    threshold = datetime(2026, 8, 10, 20, 15, 0, tzinfo=timezone.utc)
+    threshold = datetime(2026, 8, 10, 20, 15, 0, tzinfo=UTC)
     stale = get_stale_alerts(db, threshold)
     assert len(stale) == 1
     assert stale[0]["id"] == "inc-001"

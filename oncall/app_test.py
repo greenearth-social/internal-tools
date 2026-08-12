@@ -1,7 +1,6 @@
 import json
 import os
-from fastapi.testclient import TestClient
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 
 def test_health(client):
@@ -107,7 +106,8 @@ def test_alert_critical_no_oncall_posts_without_mention(client, mock_db):
 
 def test_alert_critical_oncall_user_missing_still_alerts(client, mock_db):
     """Test that missing user doc doesn't crash /alert CRITICAL path — falls back to user_id."""
-    with patch("app.get_current_oncall", return_value={"user_id": "uid-missing", "until": "2026-08-15T23:59:59+00:00"}), \
+    oncall_val = {"user_id": "uid-missing", "until": "2026-08-15T23:59:59+00:00"}
+    with patch("app.get_current_oncall", return_value=oncall_val), \
          patch("app.get_user", return_value=None), \
          patch("app.fetch_runbook", return_value=(False, "")), \
          patch("app.send_channel_message") as mock_send, \
@@ -259,7 +259,8 @@ RESOLVE_PAYLOAD_NO_RUNBOOK = {
 
 
 def test_ack_updates_alert_and_replies(client, mock_db):
-    with patch("app.ack_alert", return_value={"status": "open", "policy_name": "es-storage-high"}) as mock_ack:
+    ack_val = {"status": "open", "policy_name": "es-storage-high"}
+    with patch("app.ack_alert", return_value=ack_val) as mock_ack:
         response = _post_interaction(client, ACK_PAYLOAD)
     assert response.status_code == 200
     content = response.json()["data"]["content"]

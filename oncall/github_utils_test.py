@@ -1,8 +1,10 @@
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import MagicMock, patch
+
 from github_utils import create_runbook_pr
 
 GITHUB_API = "https://api.github.com"
 REPO = "greenearth-social/internal-tools"
+PR_URL_BASE = f"https://github.com/{REPO}/pull"
 
 
 def _make_response(json_data: dict, status: int = 200):
@@ -28,24 +30,28 @@ def test_create_runbook_pr_returns_url():
     sha_resp = _make_response({"object": {"sha": "abc123"}})
     branch_resp = _make_response({}, 201)
     file_resp = _make_response({}, 201)
-    pr_resp = _make_response({"html_url": "https://github.com/greenearth-social/internal-tools/pull/42"}, 201)
+    pr_resp = _make_response({"html_url": f"{PR_URL_BASE}/42"}, 201)
 
     mock_client = _mock_httpx_client(sha_resp, branch_resp, file_resp, pr_resp)
     with patch("github_utils.httpx.Client", return_value=mock_client):
-        url = create_runbook_pr("ghp_token", "ES Storage > 80%", "ES Storage High", "## Steps\n1. Fix it.")
+        url = create_runbook_pr(
+            "ghp_token", "ES Storage > 80%", "ES Storage High", "## Steps\n1. Fix it."
+        )
 
-    assert url == "https://github.com/greenearth-social/internal-tools/pull/42"
+    assert url == f"{PR_URL_BASE}/42"
 
 
 def test_create_runbook_pr_slugifies_policy_name():
     sha_resp = _make_response({"object": {"sha": "def456"}})
     branch_resp = _make_response({}, 201)
     file_resp = _make_response({}, 201)
-    pr_resp = _make_response({"html_url": "https://github.com/greenearth-social/internal-tools/pull/99"}, 201)
+    pr_resp = _make_response({"html_url": f"{PR_URL_BASE}/99"}, 201)
 
     mock_client = _mock_httpx_client(sha_resp, branch_resp, file_resp, pr_resp)
     with patch("github_utils.httpx.Client", return_value=mock_client):
-        url = create_runbook_pr("ghp_token", "ES Storage > 80%", "ES Storage High", "## Steps\n1. Fix it.")
+        create_runbook_pr(
+            "ghp_token", "ES Storage > 80%", "ES Storage High", "## Steps\n1. Fix it."
+        )
 
     # Verify branch was created with slugified name
     branch_call = mock_client.post.call_args_list[0]
@@ -61,7 +67,7 @@ def test_create_runbook_pr_file_content_format():
     sha_resp = _make_response({"object": {"sha": "abc123"}})
     branch_resp = _make_response({}, 201)
     file_resp = _make_response({}, 201)
-    pr_resp = _make_response({"html_url": "https://github.com/greenearth-social/internal-tools/pull/1"}, 201)
+    pr_resp = _make_response({"html_url": f"{PR_URL_BASE}/1"}, 201)
 
     mock_client = _mock_httpx_client(sha_resp, branch_resp, file_resp, pr_resp)
     with patch("github_utils.httpx.Client", return_value=mock_client):
@@ -77,7 +83,7 @@ def test_create_runbook_pr_call_sequence():
     sha_resp = _make_response({"object": {"sha": "abc123"}})
     branch_resp = _make_response({}, 201)
     file_resp = _make_response({}, 201)
-    pr_resp = _make_response({"html_url": "https://github.com/greenearth-social/internal-tools/pull/5"}, 201)
+    pr_resp = _make_response({"html_url": f"{PR_URL_BASE}/5"}, 201)
 
     mock_client = _mock_httpx_client(sha_resp, branch_resp, file_resp, pr_resp)
     with patch("github_utils.httpx.Client", return_value=mock_client):
@@ -90,16 +96,16 @@ def test_create_runbook_pr_call_sequence():
 
     # GET: main branch ref
     get_call = mock_client.get.call_args[0][0]
-    assert "/repos/greenearth-social/internal-tools/git/refs/heads/main" in get_call
+    assert f"/repos/{REPO}/git/refs/heads/main" in get_call
 
     # POST 1: create branch
     post1_url = mock_client.post.call_args_list[0][0][0]
-    assert "/repos/greenearth-social/internal-tools/git/refs" in post1_url
+    assert f"/repos/{REPO}/git/refs" in post1_url
 
     # PUT: create file
     put_url = mock_client.put.call_args[0][0]
-    assert "/repos/greenearth-social/internal-tools/contents/" in put_url
+    assert f"/repos/{REPO}/contents/" in put_url
 
     # POST 2: create PR
     post2_url = mock_client.post.call_args_list[1][0][0]
-    assert "/repos/greenearth-social/internal-tools/pulls" in post2_url
+    assert f"/repos/{REPO}/pulls" in post2_url
