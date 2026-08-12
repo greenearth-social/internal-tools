@@ -10,11 +10,8 @@ IMAGE="gcr.io/${GE_GCP_PROJECT_ID}/${SERVICE_NAME}"
 GIT_SHA=$(git rev-parse --short HEAD)
 
 echo "[INFO] Building image ${IMAGE}:${GIT_SHA}"
-docker build --build-arg GIT_SHA="${GIT_SHA}" -t "${IMAGE}:${GIT_SHA}" -t "${IMAGE}:latest" .
-
-echo "[INFO] Pushing image"
-docker push "${IMAGE}:${GIT_SHA}"
-docker push "${IMAGE}:latest"
+docker buildx build --platform linux/amd64 --build-arg GIT_SHA="${GIT_SHA}" \
+  -t "${IMAGE}:${GIT_SHA}" -t "${IMAGE}:latest" --push .
 
 echo "[INFO] Deploying to Cloud Run"
 gcloud run deploy "${SERVICE_NAME}" \
