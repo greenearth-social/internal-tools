@@ -50,13 +50,13 @@ def test_alert_critical_posts_to_discord_and_stores(client, mock_db):
     user_doc = MagicMock()
     user_doc.exists = True
     user_doc.to_dict.return_value = {"name": "Inseon", "discord_handle": "inthree3"}
-    mock_db.collection.return_value.document.return_value.get.side_effect = [
-        oncall_doc, user_doc
-    ]
+    mock_db.collection.return_value.document.return_value.get.side_effect = [oncall_doc, user_doc]
 
-    with patch("app.fetch_runbook", return_value=(True, "## Steps\n1. Check storage.")), \
-         patch("app.send_channel_message") as mock_send, \
-         patch("app.create_alert") as mock_create:
+    with (
+        patch("app.fetch_runbook", return_value=(True, "## Steps\n1. Check storage.")),
+        patch("app.send_channel_message") as mock_send,
+        patch("app.create_alert") as mock_create,
+    ):
         response = client.post("/alert", json=GCP_CRITICAL_PAYLOAD)
 
     assert response.status_code == 200
@@ -69,9 +69,11 @@ def test_alert_critical_posts_to_discord_and_stores(client, mock_db):
 
 
 def test_alert_warning_posts_without_mention_no_firestore(client, mock_db):
-    with patch("app.fetch_runbook", return_value=(False, "")), \
-         patch("app.send_channel_message") as mock_send, \
-         patch("app.create_alert") as mock_create:
+    with (
+        patch("app.fetch_runbook", return_value=(False, "")),
+        patch("app.send_channel_message") as mock_send,
+        patch("app.create_alert") as mock_create,
+    ):
         response = client.post("/alert", json=GCP_WARNING_PAYLOAD)
 
     assert response.status_code == 200
@@ -94,9 +96,11 @@ def test_alert_critical_no_oncall_posts_without_mention(client, mock_db):
     oncall_doc.exists = False
     mock_db.collection.return_value.document.return_value.get.return_value = oncall_doc
 
-    with patch("app.fetch_runbook", return_value=(False, "")), \
-         patch("app.send_channel_message") as mock_send, \
-         patch("app.create_alert"):
+    with (
+        patch("app.fetch_runbook", return_value=(False, "")),
+        patch("app.send_channel_message") as mock_send,
+        patch("app.create_alert"),
+    ):
         response = client.post("/alert", json=GCP_CRITICAL_PAYLOAD)
 
     assert response.status_code == 200
@@ -107,11 +111,13 @@ def test_alert_critical_no_oncall_posts_without_mention(client, mock_db):
 def test_alert_critical_oncall_user_missing_still_alerts(client, mock_db):
     """Test that missing user doc doesn't crash /alert CRITICAL path — falls back to user_id."""
     oncall_val = {"user_id": "uid-missing", "until": "2026-08-15T23:59:59+00:00"}
-    with patch("app.get_current_oncall", return_value=oncall_val), \
-         patch("app.get_user", return_value=None), \
-         patch("app.fetch_runbook", return_value=(False, "")), \
-         patch("app.send_channel_message") as mock_send, \
-         patch("app.create_alert"):
+    with (
+        patch("app.get_current_oncall", return_value=oncall_val),
+        patch("app.get_user", return_value=None),
+        patch("app.fetch_runbook", return_value=(False, "")),
+        patch("app.send_channel_message") as mock_send,
+        patch("app.create_alert"),
+    ):
         response = client.post("/alert", json=GCP_CRITICAL_PAYLOAD)
 
     assert response.status_code == 200
@@ -157,14 +163,16 @@ ONCALL_SET_PAYLOAD = {
     "type": 2,
     "data": {
         "name": "oncall",
-        "options": [{
-            "name": "set",
-            "type": 1,
-            "options": [
-                {"name": "user", "value": "uid2"},
-                {"name": "until", "value": "2026-08-15"},
-            ],
-        }],
+        "options": [
+            {
+                "name": "set",
+                "type": 1,
+                "options": [
+                    {"name": "user", "value": "uid2"},
+                    {"name": "until", "value": "2026-08-15"},
+                ],
+            }
+        ],
         "resolved": {
             "users": {"uid2": {"id": "uid2", "username": "raindrift", "global_name": "Ian"}},
         },
@@ -344,15 +352,25 @@ def test_modal_submit_creates_pr_and_replies(client):
 # /check-escalations tests
 # ---------------------------------------------------------------------------
 
+
 def test_check_escalations_pings_for_stale_alerts(client, mock_db):
-    stale = [{"id": "inc-abc123", "policy_name": "ES Storage > 80%",
-               "fired_at": "2026-08-10T19:00:00+00:00", "severity": "critical", "status": "open"}]
+    stale = [
+        {
+            "id": "inc-abc123",
+            "policy_name": "ES Storage > 80%",
+            "fired_at": "2026-08-10T19:00:00+00:00",
+            "severity": "critical",
+            "status": "open",
+        }
+    ]
     oncall = {"user_id": "uid1", "until": "2026-08-15T23:59:59+00:00"}
 
-    with patch("app.get_stale_alerts", return_value=stale), \
-         patch("app.get_current_oncall", return_value=oncall), \
-         patch("app.get_user", return_value={"name": "Inseon", "discord_handle": "inthree3"}), \
-         patch("app.send_channel_message") as mock_send:
+    with (
+        patch("app.get_stale_alerts", return_value=stale),
+        patch("app.get_current_oncall", return_value=oncall),
+        patch("app.get_user", return_value={"name": "Inseon", "discord_handle": "inthree3"}),
+        patch("app.send_channel_message") as mock_send,
+    ):
         response = client.post("/check-escalations")
 
     assert response.status_code == 200
@@ -363,8 +381,10 @@ def test_check_escalations_pings_for_stale_alerts(client, mock_db):
 
 
 def test_check_escalations_no_stale_alerts_sends_nothing(client, mock_db):
-    with patch("app.get_stale_alerts", return_value=[]), \
-         patch("app.send_channel_message") as mock_send:
+    with (
+        patch("app.get_stale_alerts", return_value=[]),
+        patch("app.send_channel_message") as mock_send,
+    ):
         response = client.post("/check-escalations")
     assert response.status_code == 200
     mock_send.assert_not_called()

@@ -114,7 +114,8 @@ async def alert(request: Request):
             oncall_line = "no oncall set — run `/oncall set` to assign someone"
 
         runbook_section = (
-            runbook_content if found
+            runbook_content
+            if found
             else "No runbook found — run `/runbook add` to capture the fix."
         )
 
@@ -127,8 +128,7 @@ async def alert(request: Request):
 
         try:
             create_alert(
-                request.app.state.db, alert_id, condition_name,
-                "critical", found, started_at
+                request.app.state.db, alert_id, condition_name, "critical", found, started_at
             )
         except Exception:
             logger.exception("Firestore write failed for alert %s", alert_id)
@@ -152,6 +152,7 @@ async def alert(request: Request):
 # ---------------------------------------------------------------------------
 # Discord interaction helpers
 # ---------------------------------------------------------------------------
+
 
 def _interaction_response(rtype: int, content: str = "", **extra) -> dict:
     if rtype == _PONG:
@@ -227,8 +228,8 @@ async def _handle_command(request: Request, payload: dict) -> dict:
             target_user_id = opts["user"]
             resolved_users = payload["data"].get("resolved", {}).get("users", {})
             target_info = resolved_users.get(target_user_id, {})
-            target_name = (
-                target_info.get("global_name") or target_info.get("username", target_user_id)
+            target_name = target_info.get("global_name") or target_info.get(
+                "username", target_user_id
             )
 
             if "until" in opts:
@@ -249,8 +250,7 @@ async def _handle_command(request: Request, payload: dict) -> dict:
         if old is None:
             return _interaction_response(_MESSAGE, f"Alert `{alert_id}` not found.")
         return _interaction_response(
-            _MESSAGE,
-            f"✓ Acknowledged by **{display_name}** — escalation stopped."
+            _MESSAGE, f"✓ Acknowledged by **{display_name}** — escalation stopped."
         )
 
     if name == "resolve":
@@ -261,7 +261,7 @@ async def _handle_command(request: Request, payload: dict) -> dict:
         if not old.get("runbook_found", True):
             return _interaction_response(
                 _MESSAGE,
-                "✓ Resolved. No runbook matched this alert — run `/runbook add` to capture the fix."
+                "✓ Resolved. No runbook matched this alert — run `/runbook add` to capture the fix.",
             )
         return _interaction_response(_MESSAGE, "✓ Resolved.")
 
@@ -274,16 +274,46 @@ async def _handle_command(request: Request, payload: dict) -> dict:
                     "custom_id": "runbook_add_modal",
                     "title": "Add Runbook",
                     "components": [
-                        {"type": 1, "components": [{"type": 4, "custom_id": "policy_name",
-                            "label": "Alert policy name", "style": 1,
-                            "placeholder": "es-storage-high", "required": True}]},
-                        {"type": 1, "components": [{"type": 4, "custom_id": "title",
-                            "label": "Title", "style": 1,
-                            "placeholder": "ES Storage > 80%", "required": True}]},
-                        {"type": 1, "components": [{"type": 4, "custom_id": "content",
-                            "label": "Content (Markdown)", "style": 2,
-                            "placeholder": "## Likely cause\n...\n\n## Steps\n1. ...",
-                            "required": True, "max_length": 3000}]},
+                        {
+                            "type": 1,
+                            "components": [
+                                {
+                                    "type": 4,
+                                    "custom_id": "policy_name",
+                                    "label": "Alert policy name",
+                                    "style": 1,
+                                    "placeholder": "es-storage-high",
+                                    "required": True,
+                                }
+                            ],
+                        },
+                        {
+                            "type": 1,
+                            "components": [
+                                {
+                                    "type": 4,
+                                    "custom_id": "title",
+                                    "label": "Title",
+                                    "style": 1,
+                                    "placeholder": "ES Storage > 80%",
+                                    "required": True,
+                                }
+                            ],
+                        },
+                        {
+                            "type": 1,
+                            "components": [
+                                {
+                                    "type": 4,
+                                    "custom_id": "content",
+                                    "label": "Content (Markdown)",
+                                    "style": 2,
+                                    "placeholder": "## Likely cause\n...\n\n## Steps\n1. ...",
+                                    "required": True,
+                                    "max_length": 3000,
+                                }
+                            ],
+                        },
                     ],
                 },
             }

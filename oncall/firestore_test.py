@@ -59,16 +59,18 @@ def test_set_current_oncall_stores_utc_iso():
 def test_create_alert_stores_open_status():
     db = MagicMock()
     create_alert(db, "inc-001", "es-storage-high", "critical", True, NOW)
-    db.collection("oncall_alerts").document("inc-001").set.assert_called_once_with({
-        "policy_name": "es-storage-high",
-        "severity": "critical",
-        "fired_at": "2026-08-10T20:00:00+00:00",
-        "status": "open",
-        "acked_by": None,
-        "acked_at": None,
-        "resolved_at": None,
-        "runbook_found": True,
-    })
+    db.collection("oncall_alerts").document("inc-001").set.assert_called_once_with(
+        {
+            "policy_name": "es-storage-high",
+            "severity": "critical",
+            "fired_at": "2026-08-10T20:00:00+00:00",
+            "status": "open",
+            "acked_by": None,
+            "acked_at": None,
+            "resolved_at": None,
+            "runbook_found": True,
+        }
+    )
 
 
 def test_ack_alert_returns_none_when_not_found():
@@ -104,19 +106,23 @@ def test_get_stale_alerts_filters_by_threshold():
     old_doc = MagicMock()
     old_doc.id = "inc-001"
     old_doc.to_dict.return_value = {
-        "status": "open", "severity": "critical",
-        "fired_at": "2026-08-10T19:00:00+00:00", "policy_name": "es-storage-high",
+        "status": "open",
+        "severity": "critical",
+        "fired_at": "2026-08-10T19:00:00+00:00",
+        "policy_name": "es-storage-high",
     }
     recent_doc = MagicMock()
     recent_doc.id = "inc-002"
     recent_doc.to_dict.return_value = {
-        "status": "open", "severity": "critical",
-        "fired_at": "2026-08-10T20:30:00+00:00", "policy_name": "es-storage-high",
+        "status": "open",
+        "severity": "critical",
+        "fired_at": "2026-08-10T20:30:00+00:00",
+        "policy_name": "es-storage-high",
     }
-    (db.collection.return_value
-       .where.return_value
-       .where.return_value
-       .get.return_value) = [old_doc, recent_doc]
+    (db.collection.return_value.where.return_value.where.return_value.get.return_value) = [
+        old_doc,
+        recent_doc,
+    ]
 
     threshold = datetime(2026, 8, 10, 20, 15, 0, tzinfo=UTC)
     stale = get_stale_alerts(db, threshold)

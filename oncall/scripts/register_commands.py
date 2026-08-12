@@ -9,6 +9,7 @@ Run once after initial deploy, or whenever commands change:
 Uses guild commands (instant) rather than global commands (up to 1h propagation).
 Set GE_DISCORD_GUILD_ID to your server ID.
 """
+
 import os
 
 import httpx
@@ -55,8 +56,12 @@ COMMANDS = [
         "description": "Acknowledge a critical alert",
         "type": 1,
         "options": [
-            {"name": "alert_id", "description": "Alert ID to acknowledge", "type": 3,
-             "required": True},
+            {
+                "name": "alert_id",
+                "description": "Alert ID to acknowledge",
+                "type": 3,
+                "required": True,
+            },
         ],
     },
     {
@@ -64,8 +69,7 @@ COMMANDS = [
         "description": "Mark an alert as resolved",
         "type": 1,
         "options": [
-            {"name": "alert_id", "description": "Alert ID to resolve", "type": 3,
-             "required": True},
+            {"name": "alert_id", "description": "Alert ID to resolve", "type": 3, "required": True},
         ],
     },
     {

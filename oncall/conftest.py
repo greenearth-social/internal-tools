@@ -20,6 +20,7 @@ from app import app
 def mock_db():
     return MagicMock()
 
+
 @pytest.fixture()
 def client(mock_db):
     app.state.db = mock_db

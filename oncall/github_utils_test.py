@@ -72,6 +72,7 @@ def test_create_runbook_pr_file_content_format():
     mock_client = _mock_httpx_client(sha_resp, branch_resp, file_resp, pr_resp)
     with patch("github_utils.httpx.Client", return_value=mock_client):
         import base64
+
         create_runbook_pr("ghp_token", "my-alert", "My Alert Title", "Fix steps here.")
 
     file_call_json = mock_client.put.call_args[1]["json"]

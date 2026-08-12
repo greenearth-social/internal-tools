@@ -25,26 +25,35 @@ def create_runbook_pr(token: str, policy_name: str, title: str, content: str) ->
         sha = ref_resp.json()["object"]["sha"]
 
         # Create branch
-        branch_resp = client.post(f"/repos/{REPO}/git/refs", json={
-            "ref": f"refs/heads/{branch}",
-            "sha": sha,
-        })
+        branch_resp = client.post(
+            f"/repos/{REPO}/git/refs",
+            json={
+                "ref": f"refs/heads/{branch}",
+                "sha": sha,
+            },
+        )
         branch_resp.raise_for_status()
 
         # Create file
-        file_resp = client.put(f"/repos/{REPO}/contents/{file_path}", json={
-            "message": f"docs(oncall): add runbook for {slug}",
-            "content": encoded,
-            "branch": branch,
-        })
+        file_resp = client.put(
+            f"/repos/{REPO}/contents/{file_path}",
+            json={
+                "message": f"docs(oncall): add runbook for {slug}",
+                "content": encoded,
+                "branch": branch,
+            },
+        )
         file_resp.raise_for_status()
 
         # Create PR
-        pr_resp = client.post(f"/repos/{REPO}/pulls", json={
-            "title": f"runbook: add {slug}",
-            "head": branch,
-            "base": "main",
-            "body": f"Adds runbook for `{slug}` captured after incident.",
-        })
+        pr_resp = client.post(
+            f"/repos/{REPO}/pulls",
+            json={
+                "title": f"runbook: add {slug}",
+                "head": branch,
+                "base": "main",
+                "body": f"Adds runbook for `{slug}` captured after incident.",
+            },
+        )
         pr_resp.raise_for_status()
         return pr_resp.json()["html_url"]

@@ -24,19 +24,20 @@ def set_current_oncall(db, user_id: str, until: datetime) -> None:
 
 
 def create_alert(
-    db, alert_id: str, policy_name: str, severity: str,
-    runbook_found: bool, fired_at: datetime
+    db, alert_id: str, policy_name: str, severity: str, runbook_found: bool, fired_at: datetime
 ) -> None:
-    db.collection("oncall_alerts").document(alert_id).set({
-        "policy_name": policy_name,
-        "severity": severity,
-        "fired_at": fired_at.isoformat(),
-        "status": "open",
-        "acked_by": None,
-        "acked_at": None,
-        "resolved_at": None,
-        "runbook_found": runbook_found,
-    })
+    db.collection("oncall_alerts").document(alert_id).set(
+        {
+            "policy_name": policy_name,
+            "severity": severity,
+            "fired_at": fired_at.isoformat(),
+            "status": "open",
+            "acked_by": None,
+            "acked_at": None,
+            "resolved_at": None,
+            "runbook_found": runbook_found,
+        }
+    )
 
 
 def ack_alert(db, alert_id: str, user_id: str) -> dict | None:
@@ -44,11 +45,13 @@ def ack_alert(db, alert_id: str, user_id: str) -> dict | None:
     doc = ref.get()
     if not doc.exists:
         return None
-    ref.update({
-        "status": "acked",
-        "acked_by": user_id,
-        "acked_at": datetime.now(UTC).isoformat(),
-    })
+    ref.update(
+        {
+            "status": "acked",
+            "acked_by": user_id,
+            "acked_at": datetime.now(UTC).isoformat(),
+        }
+    )
     return doc.to_dict()
 
 
@@ -57,10 +60,12 @@ def resolve_alert(db, alert_id: str) -> dict | None:
     doc = ref.get()
     if not doc.exists:
         return None
-    ref.update({
-        "status": "resolved",
-        "resolved_at": datetime.now(UTC).isoformat(),
-    })
+    ref.update(
+        {
+            "status": "resolved",
+            "resolved_at": datetime.now(UTC).isoformat(),
+        }
+    )
     return doc.to_dict()
 
 
