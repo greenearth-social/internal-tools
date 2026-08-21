@@ -37,3 +37,22 @@ def test_parse_http_request_handles_run_app_host():
     assert record is not None
     assert record.host == "greenearth-api-prod-oef7fsaama-ue.a.run.app"
     assert record.endpoint == "/xrpc/app.bsky.feed.getFeedSkeleton"
+
+
+def test_build_filter_without_endpoint_filter():
+    filter_str = logs.build_filter(
+        "greenearth-api-prod", "2026-08-18T00:00:00Z", "2026-08-21T00:00:00Z"
+    )
+    assert filter_str == (
+        'resource.type="cloud_run_revision" '
+        'resource.labels.service_name="greenearth-api-prod" '
+        'timestamp>="2026-08-18T00:00:00Z" '
+        'timestamp<"2026-08-21T00:00:00Z"'
+    )
+
+
+def test_build_filter_with_endpoint_filter():
+    filter_str = logs.build_filter(
+        "greenearth-api-prod", "2026-08-18T00:00:00Z", "2026-08-21T00:00:00Z", "getFeedSkeleton"
+    )
+    assert filter_str.endswith('httpRequest.requestUrl:"getFeedSkeleton"')
