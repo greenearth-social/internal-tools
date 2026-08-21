@@ -6,3 +6,4 @@ __pycache__/
 .env
 devenv/fixtures/data.staging/
 devenv/fixtures/.regen/
+user-analysis/data/
