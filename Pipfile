@@ -6,6 +6,7 @@ name = "pypi"
 [packages]
 plotly = "*"
 pandas = "*"
+google-cloud-logging = "*"
 
 [dev-packages]
 pytest = "*"
