@@ -134,5 +134,7 @@ def test_quality_alias_skipped_when_the_corpus_is_empty(monkeypatch):
     calls = _capture_requests(monkeypatch, [])
     load_likes.update_posts_recent()
 
-    aliases = {a["add"]["alias"] for a in _alias_actions(calls)}
+    actions = _alias_actions(calls)
+    aliases = {a["add"]["alias"] for a in actions}
     assert aliases == {"posts_recent"}
+    assert actions[0]["add"]["indices"] == ["posts-*"]

@@ -145,12 +145,17 @@ def update_posts_recent() -> None:
     posts_recent must exclude posts-quality-*: those indexes match the posts-*
     pattern too, and sweeping them in would surface every quality post twice in
     the api's candidate generators (greenearth-social/ingex#442)."""
-    actions = [{"add": {"indices": ["posts-*", "-posts-quality-*"], "alias": "posts_recent"}}]
-
     # The quality corpus is built by ingex's backfill_quality_index command, which
-    # runs after a seed (if at all). Aliasing a wildcard that matches no index is
-    # an error, so only add it once something is there.
-    if request("GET", "/_cat/indices/posts-quality-*?format=json&h=index"):
+    # runs after a seed (if at all). Elasticsearch 9 rejects both a positive and
+    # a negative wildcard when that wildcard matches no index, so only exclude
+    # the quality pattern once something is there.
+    quality_indexes = request("GET", "/_cat/indices/posts-quality-*?format=json&h=index")
+    recent_indices = ["posts-*"]
+    if quality_indexes:
+        recent_indices.append("-posts-quality-*")
+
+    actions = [{"add": {"indices": recent_indices, "alias": "posts_recent"}}]
+    if quality_indexes:
         actions.append({"add": {"index": "posts-quality-*", "alias": "posts_recent_quality"}})
 
     request("POST", "/_aliases", json.dumps({"actions": actions}).encode())
