@@ -145,12 +145,23 @@ def update_posts_recent() -> None:
     posts_recent must exclude posts-quality-*: those indexes match the posts-*
     pattern too, and sweeping them in would surface every quality post twice in
     the api's candidate generators (greenearth-social/ingex#442)."""
-    actions = [{"add": {"indices": ["posts-*", "-posts-quality-*"], "alias": "posts_recent"}}]
+    # The quality corpus is built by ingex's backfill_quality_index command,
+    # which runs after a seed if at all — so on a fresh volume there is no
+    # posts-quality-* index yet.
+    #
+    # _aliases rejects *any* pattern matching no index, and an exclusion is no
+    # exception: "-posts-quality-*" 404s the whole request exactly like the
+    # positive pattern does. Both references have to be gated on the same
+    # check, or every first seed dies here with the aliases never created,
+    # which reads downstream as `no such index [posts_recent]` on every feed.
+    has_quality = bool(request("GET", "/_cat/indices/posts-quality-*?format=json&h=index"))
 
-    # The quality corpus is built by ingex's backfill_quality_index command, which
-    # runs after a seed (if at all). Aliasing a wildcard that matches no index is
-    # an error, so only add it once something is there.
-    if request("GET", "/_cat/indices/posts-quality-*?format=json&h=index"):
+    posts_recent_indices = ["posts-*"]
+    if has_quality:
+        posts_recent_indices.append("-posts-quality-*")
+
+    actions = [{"add": {"indices": posts_recent_indices, "alias": "posts_recent"}}]
+    if has_quality:
         actions.append({"add": {"index": "posts-quality-*", "alias": "posts_recent_quality"}})
 
     request("POST", "/_aliases", json.dumps({"actions": actions}).encode())

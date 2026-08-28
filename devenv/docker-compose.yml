@@ -450,6 +450,12 @@ services:
       # re-seed skip the fixture as already-processed.
       - GE_MEGASTREAM_STATE_FILE=/runtime/seed/.megastream_live_state.json
       - GE_INDEX_PERIOD=week
+      # Scored on the way in too, for the same reason as the embedding above:
+      # a post that arrives live should look to the api exactly like a seeded
+      # one.
+      - GE_PERSPECTIVE_HOST=${GE_DEV_PERSPECTIVE_HOST:-http://perspective-stub:8000}
+      - GE_PERSPECTIVE_API_KEY=${GE_PERSPECTIVE_API_KEY:-ge-dev-perspective}
+      - GE_PERSPECTIVE_QPS=${GE_DEV_PERSPECTIVE_QPS:-1000}
     env_file:
       - ${GE_DEV_RUNTIME:-./.runtime}/es_key_rw.env
     volumes:
@@ -549,6 +555,17 @@ services:
       - GE_INFERENCE_BASE_URL=${GE_DEV_INFERENCE_URL:-http://inference:8000}
       - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
       - GE_INDEX_PERIOD=week
+      # Perspective scoring at ingest (api#368). Points at the same stub the
+      # api uses, so a seeded index carries scores and the api's cached path
+      # is exercised locally rather than only in stage. `devctl up --live
+      # perspective` swaps in the real API for both.
+      #
+      # The stub answers instantly, so the QPS budget that matters in prod
+      # (a slice of a quota shared with serving) is set high enough here to
+      # never be the thing that slows a seed down.
+      - GE_PERSPECTIVE_HOST=${GE_DEV_PERSPECTIVE_HOST:-http://perspective-stub:8000}
+      - GE_PERSPECTIVE_API_KEY=${GE_PERSPECTIVE_API_KEY:-ge-dev-perspective}
+      - GE_PERSPECTIVE_QPS=${GE_DEV_PERSPECTIVE_QPS:-1000}
     env_file:
       - ${GE_DEV_RUNTIME:-./.runtime}/es_key_rw.env
     volumes:
