@@ -136,3 +136,22 @@ def test_quality_alias_skipped_when_the_corpus_is_empty(monkeypatch):
 
     aliases = {a["add"]["alias"] for a in _alias_actions(calls)}
     assert aliases == {"posts_recent"}
+
+
+def test_quality_exclusion_dropped_when_the_corpus_is_empty(monkeypatch):
+    """The exclusion has to be gated on the same check as the alias.
+
+    _aliases rejects any pattern that matches no index, and it makes no
+    exception for exclusions: sending "-posts-quality-*" on a fresh volume
+    404s the whole request. That took out both aliases on every first seed,
+    and the symptom surfaced far away — feeds failing with
+    `no such index [posts_recent]`.
+    """
+    calls = _capture_requests(monkeypatch, [])
+    load_likes.update_posts_recent()
+
+    recent = next(
+        a["add"] for a in _alias_actions(calls) if a["add"]["alias"] == "posts_recent"
+    )
+    assert recent["indices"] == ["posts-*"]
+    assert not any(i.startswith("-") for i in recent["indices"])
