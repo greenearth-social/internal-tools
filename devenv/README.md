@@ -503,9 +503,7 @@ it needs a public tunnel, not just a key.
    timestamp shifted forward by one uniform delta so the capture window ends
    an hour before now. Code anchored to `now` (recency windows, popularity
    decay) sees a full window of data; relative structure (inter-post spacing,
-   like-after-post ordering) is preserved exactly. It also appends one small,
-   checked-in post carrying Graze topic scores so inference-ingestion changes
-   can be verified even though the published fixture predates those scores.
+   like-after-post ordering) is preserved exactly.
 2. **seed-megastream** — runs the real `megastream_ingest` binary from your
    `ingex` checkout (`go run`, byte-identical code path to prod) against the
    rebased fixtures. Post-tower embeddings come from whichever inference
@@ -513,21 +511,6 @@ it needs a public tunnel, not just a key.
 3. **seed-likes** — bulk-loads likes (prod document identity: `_id=at_uri`,
    routing=`author_did`) and applies per-post `like_count`, which the
    popularity generator ranks on.
-
-The synthetic post's stable `at_uri` and expected scores are recorded under
-`topic_fixture` in `.runtime/seed/manifest.json`. Inspect the ingested document
-after a seed with:
-
-```bash
-./devctl es /posts/_search -X POST -H 'Content-Type: application/json' -d '{
-  "query": {
-    "term": {
-      "at_uri": "at://did:plc:topicfixture000000000000/app.bsky.feed.post/3kqj7tzzzzk2a"
-    }
-  },
-  "_source": ["at_uri", "content", "topic_scores"]
-}'
-```
 
 A seeded window drifts stale as real time moves on: the api's recency windows
 are anchored to *now* (popularity looks back 24h), so from about a day after a

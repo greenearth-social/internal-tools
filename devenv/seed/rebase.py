@@ -20,8 +20,6 @@ What gets shifted:
   timestamps inside `raw_post` JSON that megastream_ingest actually reads
   (`message.time_us`, `message.commit.record.createdAt`), and the filename
   timestamp (the spooler orders/filters files by it).
-- topic_post_fixture.json: one synthetic top-level post appended to the
-  rebased window so local seeds always exercise Graze topic ingestion.
 - likes.jsonl.gz: `created_at` / `indexed_at` per like.
 - like_counts.jsonl.gz: copied unchanged (no timestamps).
 - manifest.json: copied with a `rebased` block recording the shift.
@@ -48,7 +46,6 @@ from pathlib import Path
 FIXTURES_DIR = Path("/fixtures")
 OUT_DIR = Path("/runtime/seed")
 PROBE_ENV = Path("/runtime/probe.env")
-TOPIC_POST_FIXTURE = Path(__file__).with_name("topic_post_fixture.json")
 
 FILENAME_RE = re.compile(r"^(?P<prefix>.*_)(?P<date>\d{8})_(?P<time>\d{6})\.db\.zip$")
 
@@ -92,103 +89,6 @@ def shift_raw_post(raw: str, delta: dt.timedelta, delta_us: int) -> str:
     if isinstance(post.get("time_us"), (int, float)):
         post["time_us"] = int(post["time_us"]) + delta_us
     return json.dumps(post)
-
-
-def load_topic_post_fixture(path: Path = TOPIC_POST_FIXTURE) -> dict:
-    """Load and validate the small synthetic post added to every local seed."""
-    try:
-        fixture = json.loads(path.read_text())
-        topics = fixture["inferences"]["text"]["message.commit.record.text"]["topic"]
-    except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError) as exc:
-        sys.exit(f"FATAL: invalid topic post fixture {path}: {exc}")
-
-    for field in ("at_uri", "did", "text"):
-        if not isinstance(fixture.get(field), str) or not fixture[field]:
-            sys.exit(f"FATAL: topic post fixture {path} needs a non-empty {field}")
-    if not isinstance(topics, dict) or not topics:
-        sys.exit(f"FATAL: topic post fixture {path} needs at least one topic score")
-    for label, score in topics.items():
-        if (
-            not isinstance(label, str)
-            or not label
-            or isinstance(score, bool)
-            or not isinstance(score, (int, float))
-            or not 0 <= score <= 1
-        ):
-            sys.exit(f"FATAL: invalid topic score in {path}: {label!r}={score!r}")
-    return fixture
-
-
-def write_topic_post_fixture(fixture: dict, created_at: dt.datetime) -> Path:
-    """Write one production-shaped megastream archive carrying topic scores."""
-    at_uri = fixture["at_uri"]
-    did = fixture["did"]
-    time_us = int(created_at.timestamp() * 1_000_000)
-    filename = f"mega_jetstream_{created_at:%Y%m%d_%H%M%S}.db.zip"
-    zip_path = OUT_DIR / filename
-    db_path = OUT_DIR / filename.removesuffix(".zip")
-    if zip_path.exists() or db_path.exists():
-        sys.exit(f"FATAL: topic post fixture collides with {filename}")
-
-    raw_post = {
-        "at_uri": at_uri,
-        "did": did,
-        "time_us": time_us,
-        "message": {
-            "did": did,
-            "kind": "commit",
-            "time_us": time_us,
-            "commit": {
-                "operation": "create",
-                "collection": "app.bsky.feed.post",
-                "rkey": at_uri.rsplit("/", 1)[-1],
-                "record": {
-                    "$type": "app.bsky.feed.post",
-                    "text": fixture["text"],
-                    "createdAt": created_at.isoformat().replace("+00:00", "Z"),
-                },
-            },
-        },
-    }
-
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.execute(
-            """
-            CREATE TABLE enriched_posts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                at_uri TEXT CHECK(LENGTH(at_uri) <= 300),
-                did TEXT CHECK(LENGTH(did) <= 100),
-                time_us INTEGER,
-                raw_post TEXT CHECK(json_valid(raw_post)),
-                inferences TEXT CHECK(json_valid(inferences)),
-                enriched_metadata TEXT CHECK(json_valid(enriched_metadata)),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO enriched_posts"
-            " (at_uri, did, time_us, raw_post, inferences, enriched_metadata, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                at_uri,
-                did,
-                time_us,
-                json.dumps(raw_post),
-                json.dumps(fixture["inferences"]),
-                "{}",
-                created_at.strftime("%Y-%m-%d %H:%M:%S"),
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(db_path, db_path.name)
-    db_path.unlink()
-    return zip_path
 
 
 def rebase_db(src_zip: Path, delta: dt.timedelta, delta_us: int) -> Path:
@@ -282,19 +182,6 @@ def main() -> None:
         out_names.append(out.name)
         print(f"  {src.name} -> {out.name}")
 
-    # The published fixture predates Graze topics. Add one stable, synthetic
-    # top-level post just after the captured window so every local seed can
-    # verify the production ingestion path without republishing the large
-    # binary fixture. Keep its at_uri in the manifest for a one-command lookup.
-    topic_fixture = load_topic_post_fixture()
-    last_file_ts = max(parse_filename(name)[1] for name in out_names)
-    effective_window_end = (window_end + delta).replace(microsecond=0)
-    topic_created_at = max(last_file_ts, effective_window_end) + dt.timedelta(seconds=1)
-    topic_out = write_topic_post_fixture(topic_fixture, topic_created_at)
-    out_names.append(topic_out.name)
-    topic_scores = topic_fixture["inferences"]["text"]["message.commit.record.text"]["topic"]
-    print(f"  {topic_out.name}: synthetic topic post {topic_fixture['at_uri']}")
-
     # megastream_ingest with no saved state initializes its cursor to "now" and
     # skips pre-existing files (spool semantics). Pre-write a state file whose
     # cursor sits just before the earliest rebased file so the whole fixture
@@ -320,10 +207,6 @@ def main() -> None:
         "delta_seconds": delta_seconds,
         "seeded_at": now.isoformat(),
         "effective_window_end": (window_end + delta).isoformat(),
-    }
-    manifest["topic_fixture"] = {
-        "at_uri": topic_fixture["at_uri"],
-        "scores": topic_scores,
     }
     (OUT_DIR / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
