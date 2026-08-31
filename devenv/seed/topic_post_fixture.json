@@ -1,0 +1,16 @@
+{
+  "at_uri": "at://did:plc:topicfixture000000000000/app.bsky.feed.post/3kqj7tzzzzk2a",
+  "did": "did:plc:topicfixture000000000000",
+  "text": "Local dev fixture for verifying topic inference ingestion.",
+  "inferences": {
+    "text": {
+      "message.commit.record.text": {
+        "topic": {
+          "News & Social Concern": 0.73779296875,
+          "Science & Technology": 0.6943359375,
+          "Sports": 0.00861358642578125
+        }
+      }
+    }
+  }
+}

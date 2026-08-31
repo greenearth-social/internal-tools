@@ -84,8 +84,8 @@ def test_index_and_update_items_are_both_inspected():
 #
 # posts-quality-* also matches the posts-* pattern, so a careless alias action
 # would surface every quality post twice through posts_recent
-# (greenearth-social/ingex#442). Aliasing a wildcard that matches no index is
-# also an error, so the quality alias has to be conditional.
+# (greenearth-social/ingex#442). Elasticsearch also rejects a negative wildcard
+# when the excluded index doesn't exist, so actions use resolved concrete names.
 # --------------------------------------------------------------------------
 
 
@@ -94,7 +94,7 @@ def _capture_requests(monkeypatch, cat_result):
 
     def fake_request(method, path, body=None, ndjson=False):
         calls.append((method, path, body))
-        if path.startswith("/_cat/indices/posts-quality-"):
+        if path.startswith("/_cat/indices/posts-"):
             return cat_result
         return {}
 
@@ -112,27 +112,49 @@ def _alias_actions(calls):
 
 
 def test_posts_recent_excludes_the_quality_indexes(monkeypatch):
-    calls = _capture_requests(monkeypatch, [{"index": "posts-quality-2026-w32"}])
+    calls = _capture_requests(
+        monkeypatch,
+        [
+            {"index": "posts-quality-2026-w32"},
+            {"index": "posts-2026-w32"},
+            {"index": "posts-2026-w31"},
+        ],
+    )
     load_likes.update_posts_recent()
 
     actions = _alias_actions(calls)
     recent = next(a["add"] for a in actions if a["add"]["alias"] == "posts_recent")
-    assert recent["indices"] == ["posts-*", "-posts-quality-*"]
+    assert recent["indices"] == ["posts-2026-w31", "posts-2026-w32"]
 
 
 def test_quality_alias_added_when_the_corpus_exists(monkeypatch):
-    calls = _capture_requests(monkeypatch, [{"index": "posts-quality-2026-w32"}])
+    calls = _capture_requests(
+        monkeypatch,
+        [{"index": "posts-2026-w32"}, {"index": "posts-quality-2026-w32"}],
+    )
     load_likes.update_posts_recent()
 
-    aliases = {a["add"]["alias"] for a in _alias_actions(calls)}
+    actions = _alias_actions(calls)
+    aliases = {a["add"]["alias"] for a in actions}
     assert aliases == {"posts_recent", "posts_recent_quality"}
+    quality = next(a["add"] for a in actions if a["add"]["alias"] == "posts_recent_quality")
+    assert quality["indices"] == ["posts-quality-2026-w32"]
 
 
 def test_quality_alias_skipped_when_the_corpus_is_empty(monkeypatch):
     # A fresh environment has not run ingex's backfill_quality_index yet;
     # aliasing posts-quality-* would fail with index_not_found_exception.
-    calls = _capture_requests(monkeypatch, [])
+    calls = _capture_requests(monkeypatch, [{"index": "posts-2026-w32"}])
     load_likes.update_posts_recent()
 
     aliases = {a["add"]["alias"] for a in _alias_actions(calls)}
     assert aliases == {"posts_recent"}
+
+
+def test_missing_regular_posts_is_fatal(monkeypatch):
+    calls = _capture_requests(monkeypatch, [{"index": "posts-quality-2026-w32"}])
+
+    with pytest.raises(SystemExit, match="no posts-\\* indexes"):
+        load_likes.update_posts_recent()
+
+    assert all(path != "/_aliases" for _, path, _ in calls)
