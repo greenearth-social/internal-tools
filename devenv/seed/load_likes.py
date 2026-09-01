@@ -144,14 +144,21 @@ def update_posts_recent() -> None:
 
     posts_recent must exclude posts-quality-*: those indexes match the posts-*
     pattern too, and sweeping them in would surface every quality post twice in
-    the api's candidate generators (greenearth-social/ingex#442)."""
-    actions = [{"add": {"indices": ["posts-*", "-posts-quality-*"], "alias": "posts_recent"}}]
+    the api's candidate generators (greenearth-social/ingex#442).
 
-    # The quality corpus is built by ingex's backfill_quality_index command, which
-    # runs after a seed (if at all). Aliasing a wildcard that matches no index is
-    # an error, so only add it once something is there.
-    if request("GET", "/_cat/indices/posts-quality-*?format=json&h=index"):
-        actions.append({"add": {"index": "posts-quality-*", "alias": "posts_recent_quality"}})
+    Resolve concrete names before updating aliases. Elasticsearch treats a
+    nonexistent negative wildcard such as -posts-quality-* as a missing index,
+    so using wildcard exclusion makes a normal pre-backfill seed fail."""
+    rows = request("GET", "/_cat/indices/posts-*?format=json&h=index")
+    indexes = sorted(row["index"] for row in rows)
+    quality_indexes = [index for index in indexes if index.startswith("posts-quality-")]
+    post_indexes = [index for index in indexes if not index.startswith("posts-quality-")]
+    if not post_indexes:
+        sys.exit("FATAL: no posts-* indexes found after megastream seed")
+
+    actions = [{"add": {"indices": post_indexes, "alias": "posts_recent"}}]
+    if quality_indexes:
+        actions.append({"add": {"indices": quality_indexes, "alias": "posts_recent_quality"}})
 
     request("POST", "/_aliases", json.dumps({"actions": actions}).encode())
     print(f"aliases updated ({len(actions)} action(s))")
