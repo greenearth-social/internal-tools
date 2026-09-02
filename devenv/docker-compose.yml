@@ -590,6 +590,42 @@ services:
       - ./seed:/seedscripts:ro
       - ${GE_DEV_RUNTIME:-./.runtime}:/runtime
 
+  # Writes Firestore UserDocuments for the fixture personas (issue: multi-user
+  # fixture for ingex's followed_users_backfill job). Runs AFTER seed-rebase
+  # (needs /runtime/seed/manifest.json) and reuses the api's own image/venv so
+  # it can call app.lib.firestore.upsert_user directly instead of hand-rolling
+  # the UserDocument schema in a stdlib-only script (unlike seed-rebase/
+  # seed-likes, this one needs a real Firestore client — api/Pipfile already
+  # pins google-cloud-firestore, seed-rebase's bare python:3.13-slim image
+  # doesn't have one).
+  seed-firestore-users:
+    build: ./images/pydev
+    working_dir: /app
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        pipenv install --dev
+        exec pipenv run python /seedscripts/seed_firestore_users.py
+    profiles: ["tools"]
+    depends_on:
+      firebase:
+        condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PIPENV_VENV_IN_PROJECT=1
+      # See the api service's comment on this — a developer's .env in the api
+      # checkout would otherwise leak host-machine config into this container.
+      - PIPENV_DONT_LOAD_ENV=1
+      - GE_FIRESTORE_EMULATOR_HOST=firebase:18080
+      - GE_FIRESTORE_PROJECT=${GE_DEV_FIREBASE_PROJECT:-greenearth-471522}
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/api:/app
+      - api_venv:/app/.venv
+      - ./seed:/seedscripts:ro
+      - ${GE_DEV_RUNTIME:-./.runtime}:/runtime
+
 volumes:
   esdata:
   api_venv:
