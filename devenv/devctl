@@ -818,7 +818,7 @@ cmd_setup() {
   check_repos
   ensure_runtime
   echo "devctl: pulling and building images (first run takes a few minutes)..."
-  compose --profile tools build es-init api inference firebase frontend
+  compose --profile tools build es-init api inference firebase frontend seed-firestore-users
   compose --profile tools pull elasticsearch perspective-stub dev-auth seed-rebase seed-megastream --ignore-buildable
 
   have_models || cmd_fetch_models
@@ -1124,6 +1124,13 @@ cmd_seed() {
   compose run --rm seed-wipe
   echo "devctl: rebasing fixture timestamps..."
   compose run --rm seed-rebase
+  # Firestore UserDocuments for every fixture persona (not just the probe
+  # persona seed-rebase pointed .runtime/probe.env at) — so a freshly seeded
+  # instance has more than one Firestore-tracked user for things like ingex's
+  # followed_users_backfill job to walk. Needs /runtime/seed/manifest.json,
+  # which seed-rebase just wrote.
+  echo "devctl: seeding Firestore users for fixture personas..."
+  compose run --rm seed-firestore-users
   echo "devctl: ingesting posts via megastream_ingest (first run compiles the Go binary)..."
   compose run --rm seed-megastream
   echo "devctl: loading likes and like counts..."
