@@ -349,6 +349,10 @@ services:
       # perspective` swaps in the real API (and needs a real key).
       - GE_PERSPECTIVE_HOST=${GE_DEV_PERSPECTIVE_HOST:-http://perspective-stub:8000}
       - GE_PERSPECTIVE_API_KEY=${GE_PERSPECTIVE_API_KEY:-ge-dev-perspective}
+      # Anthropic key for POST /llm-query-vectors/fit (ingex#482). No local
+      # stand-in: the endpoint calls the real API, so set it in
+      # devenv.local.env to exercise that route; everything else runs without it.
+      - GE_ANTHROPIC_API_KEY=${GE_ANTHROPIC_API_KEY:-}
       - GE_TIMING_LOGS=${GE_DEV_TIMING_LOGS:-1}
     env_file:
       # Written by seed; devctl guarantees it exists before `up`. The ES key
