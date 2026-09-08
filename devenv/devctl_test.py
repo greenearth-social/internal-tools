@@ -119,9 +119,7 @@ def test_seed_backfills_quality_corpus_after_loading_like_counts(tmp_path):
     assert result.returncode == 0, result.stderr
     likes = calls.index("run --rm seed-likes")
     quality = calls.index("run --rm seed-quality")
-    aliases = calls.index(
-        "run --rm seed-likes python /seedscripts/load_likes.py --aliases-only"
-    )
+    aliases = calls.index("run --rm seed-likes python /seedscripts/load_likes.py --aliases-only")
     assert likes < quality < aliases
     assert "backfilling the two-tower quality corpus" in result.stdout
 
