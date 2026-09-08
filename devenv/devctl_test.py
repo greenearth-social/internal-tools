@@ -55,6 +55,8 @@ def test_firebase_ui_proxy_rewrites_named_instance_ports():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
 def run_seed_command(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess, list[str]]:
     """Run cmd_seed with external work stubbed, recording compose calls."""
     compose_log = tmp_path / "compose.log"
