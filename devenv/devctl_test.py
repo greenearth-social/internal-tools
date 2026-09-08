@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -13,6 +14,7 @@ import yaml
 DEVENV_DIR = Path(__file__).parent
 DEVCTL = DEVENV_DIR / "devctl"
 COMPOSE_FILE = DEVENV_DIR / "docker-compose.yml"
+FIREBASE_UI_PROXY_TEST = DEVENV_DIR / "firebase" / "ui-proxy_test.mjs"
 
 
 def shell_function(name: str) -> str:
@@ -42,6 +44,17 @@ def shell_function(name: str) -> str:
             break
     assert end is not None, f"no closing brace for {name}()"
     return "\n".join(lines[start : end + 1])
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_firebase_ui_proxy_rewrites_named_instance_ports():
+    result = subprocess.run(
+        ["node", "--test", str(FIREBASE_UI_PROXY_TEST)],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def write_executable(path: Path, contents: str) -> None:

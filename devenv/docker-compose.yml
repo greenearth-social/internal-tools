@@ -77,6 +77,15 @@ services:
       # and that checkout is shared by every instance — so name it per
       # instance rather than have two of them fight over one file.
       - GE_DEV_FIREBASE_CONFIG=${GE_DEV_FIREBASE_CONFIG:-firebase.devenv.json}
+      # The Emulator UI runs in the browser. Its /api/config response must
+      # advertise this instance's published host ports, not the fixed ports
+      # firebase-tools uses inside the container.
+      - GE_DEV_EMULATOR_HOST=${GE_DEV_EMULATOR_HOST:-127.0.0.1}
+      - GE_DEV_PORT_FIRESTORE=${GE_DEV_PORT_FIRESTORE:-8080}
+      - GE_DEV_PORT_FIREBASE_AUTH=${GE_DEV_PORT_FIREBASE_AUTH:-9099}
+      - GE_DEV_PORT_FUNCTIONS=${GE_DEV_PORT_FUNCTIONS:-5001}
+      - GE_DEV_PORT_FIREBASE_UI=${GE_DEV_PORT_FIREBASE_UI:-4000}
+      - GE_DEV_PORT_FIREBASE_UI_WS=${GE_DEV_PORT_FIREBASE_UI_WS:-9150}
       # --- consumed by functions/src at runtime ---
       # APP_ORIGIN derives the OAuth client_id and redirect_uri. Bluesky's
       # authorization server has to fetch the client metadata from it, so

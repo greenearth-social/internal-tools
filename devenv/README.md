@@ -548,9 +548,10 @@ Two adaptations are made at startup, both in `firebase/`:
   referenced paths sit beside the config), regenerated on every start and
   removed by `devctl down`/`nuke`.
 - **Port bridging.** The emulators bind loopback inside their container, which
-  Docker can't publish. socat re-exposes them, and the *host* ports are
-  exactly 8080/9099/5001 because the frontend's Firebase SDK hardcodes
-  `127.0.0.1` at those numbers and runs in your browser.
+  Docker can't publish. socat re-exposes the service ports. The Emulator UI is
+  exposed through a small proxy which rewrites `/api/config`, because the UI
+  runs in your browser and must receive a named instance's allocated host ports
+  (for example Firestore `8090`, not its container port `8080`).
 
 Firestore rules are genuinely enforced here (an unauthenticated read gets a
 403), unlike the bare emulator this replaced, which allowed everything.

@@ -5,8 +5,9 @@
 # suite, both handled here rather than by duplicating config:
 #
 # 1. The emulators bind loopback inside the container, which Docker can't
-#    publish (published ports arrive on eth0). socat re-exposes each on
-#    0.0.0.0 at port+10000.
+#    publish (published ports arrive on eth0). socat re-exposes the service
+#    ports on 0.0.0.0 at port+10000. A small HTTP proxy does the same for the
+#    Emulator UI while rewriting /api/config with browser-reachable host ports.
 #
 # 2. The frontend declares `firestore` as an array of named databases
 #    (greenearth-stage, greenearth-prod) for deployment. The Firestore
@@ -37,9 +38,10 @@ node /firebase/derive-config.mjs "$FRONTEND_DIR" "$DERIVED_CONFIG"
 socat TCP-LISTEN:18080,fork,reuseaddr TCP:127.0.0.1:8080 &
 socat TCP-LISTEN:19099,fork,reuseaddr TCP:127.0.0.1:9099 &
 socat TCP-LISTEN:15001,fork,reuseaddr TCP:127.0.0.1:5001 &
-# The Emulator UI (4000) and the Firestore data viewer's websocket
-# (9150) are browser-facing too, so they need the same treatment.
-socat TCP-LISTEN:14000,fork,reuseaddr TCP:127.0.0.1:4000 &
+# The Firestore data viewer's websocket (9150) is browser-facing too.
+# ui-proxy replaces the UI's former raw socat bridge because firebase-tools
+# advertises its fixed internal ports to the browser from /api/config.
+node /firebase/ui-proxy.mjs &
 socat TCP-LISTEN:19150,fork,reuseaddr TCP:127.0.0.1:9150 &
 
 # The Functions emulator loads functions/lib (package main), so the
