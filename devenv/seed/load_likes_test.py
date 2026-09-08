@@ -151,6 +151,15 @@ def test_quality_alias_skipped_when_the_corpus_is_empty(monkeypatch):
     assert aliases == {"posts_recent"}
 
 
+def test_quality_alias_can_be_required_after_backfill(monkeypatch):
+    calls = _capture_requests(monkeypatch, [{"index": "posts-2026-w32"}])
+
+    with pytest.raises(SystemExit, match="no posts-quality-\\* indexes"):
+        load_likes.update_posts_recent(require_quality=True)
+
+    assert all(path != "/_aliases" for _, path, _ in calls)
+
+
 def test_missing_regular_posts_is_fatal(monkeypatch):
     calls = _capture_requests(monkeypatch, [{"index": "posts-quality-2026-w32"}])
 
@@ -158,3 +167,39 @@ def test_missing_regular_posts_is_fatal(monkeypatch):
         load_likes.update_posts_recent()
 
     assert all(path != "/_aliases" for _, path, _ in calls)
+
+
+def test_aliases_only_skips_like_loading_and_refreshes_quality(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        load_likes,
+        "load_likes",
+        lambda: pytest.fail("aliases-only must not reload likes"),
+    )
+    monkeypatch.setattr(
+        load_likes,
+        "apply_like_counts",
+        lambda: pytest.fail("aliases-only must not reapply like counts"),
+    )
+    monkeypatch.setattr(
+        load_likes,
+        "update_posts_recent",
+        lambda *, require_quality=False: calls.append(("aliases", require_quality)),
+    )
+
+    def fake_request(method, path, body=None, ndjson=False):
+        calls.append((method, path))
+        if path.endswith("/_count"):
+            return {"count": 123}
+        return {}
+
+    monkeypatch.setattr(load_likes, "request", fake_request)
+
+    load_likes.main(["--aliases-only"])
+
+    assert calls == [
+        ("aliases", True),
+        ("POST", "/posts_recent_quality/_refresh"),
+        ("GET", "/posts_recent_quality/_count"),
+    ]

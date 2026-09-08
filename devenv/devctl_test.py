@@ -55,6 +55,97 @@ def test_firebase_ui_proxy_rewrites_named_instance_ports():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+def run_seed_command(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess, list[str]]:
+    """Run cmd_seed with external work stubbed, recording compose calls."""
+    compose_log = tmp_path / "compose.log"
+    script = "\n".join(
+        [
+            "set -u",
+            'die() { echo "devctl: $*" >&2; exit 1; }',
+            "check_docker() { :; }",
+            "ensure_runtime() { :; }",
+            "share_es() { return 1; }",
+            "have_fixtures() { return 0; }",
+            "fixtures_hint() { :; }",
+            'env_file_value() { [[ "$2" == GE_ELASTICSEARCH_API_KEY ]] && '
+            "printf test-rw-key || printf did:plc:test; }",
+            "check_model_fixture_compat() { :; }",
+            "resolve_live() { :; }",
+            "live_has() { return 1; }",
+            'compose() { printf "%s\\n" "$*" >>"$TEST_COMPOSE_LOG"; }',
+            "service_running() { return 1; }",
+            "export_api_es_env() { :; }",
+            shell_function("cmd_seed"),
+            'cmd_seed "$@"',
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-s", "--", *args],
+        input=script,
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "TEST_COMPOSE_LOG": str(compose_log),
+            "RUNTIME": str(tmp_path / "runtime"),
+        },
+    )
+    calls = compose_log.read_text().splitlines() if compose_log.exists() else []
+    return result, calls
+
+
+def test_seed_uses_plain_rebase_by_default(tmp_path):
+    result, calls = run_seed_command(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "run --rm seed-rebase" in calls
+    assert not any("GE_DEV_SYNTHETIC_TOPICS" in call for call in calls)
+
+
+def test_seed_forwards_synthetic_topics_only_to_rebase(tmp_path):
+    result, calls = run_seed_command(tmp_path, "--synthetic-topics")
+
+    assert result.returncode == 0, result.stderr
+    assert "run --rm -e GE_DEV_SYNTHETIC_TOPICS=1 seed-rebase" in calls
+    assert sum("GE_DEV_SYNTHETIC_TOPICS" in call for call in calls) == 1
+    assert "adding deterministic synthetic topic scores" in result.stdout
+
+
+def test_seed_backfills_quality_corpus_after_loading_like_counts(tmp_path):
+    result, calls = run_seed_command(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    likes = calls.index("run --rm seed-likes")
+    quality = calls.index("run --rm seed-quality")
+    aliases = calls.index(
+        "run --rm seed-likes python /seedscripts/load_likes.py --aliases-only"
+    )
+    assert likes < quality < aliases
+    assert "backfilling the two-tower quality corpus" in result.stdout
+
+
+def test_seed_rejects_unknown_arguments_before_doing_work(tmp_path):
+    result, calls = run_seed_command(tmp_path, "--not-a-seed-option")
+
+    assert result.returncode != 0
+    assert "unknown argument to seed: --not-a-seed-option" in result.stderr
+    assert calls == []
+
+
+def test_quality_seed_service_runs_ingex_backfill_with_rw_access():
+    compose = yaml.safe_load(COMPOSE_FILE.read_text())
+    service = compose["services"]["seed-quality"]
+
+    assert service["command"] == [
+        "go",
+        "run",
+        "./cmd/backfill_quality_index",
+        "--source-index",
+        "posts_recent",
+    ]
+    assert "GE_ELASTICSEARCH_URL=http://elasticsearch:9200" in service["environment"]
+    assert "${GE_DEV_RUNTIME:-./.runtime}/es_key_rw.env" in service["env_file"]
+    assert "${GE_DEV_REPO_ROOT:-../..}/ingex/ingest:/src" in service["volumes"]
 
 
 def write_executable(path: Path, contents: str) -> None:

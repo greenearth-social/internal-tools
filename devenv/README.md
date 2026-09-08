@@ -497,20 +497,63 @@ it needs a public tunnel, not just a key.
 
 ## Seeding and time rebasing
 
-`devctl seed` runs three one-shot containers:
+`devctl seed` runs the following one-shot stages:
 
 1. **seed-rebase** — copies fixtures into `.runtime/seed/` with every
    timestamp shifted forward by one uniform delta so the capture window ends
    an hour before now. Code anchored to `now` (recency windows, popularity
    decay) sees a full window of data; relative structure (inter-post spacing,
    like-after-post ordering) is preserved exactly.
-2. **seed-megastream** — runs the real `megastream_ingest` binary from your
+2. **seed-firestore-users** — creates local Firestore user documents for the
+   fixture personas, using the api's own document model and defaults.
+3. **seed-megastream** — runs the real `megastream_ingest` binary from your
    `ingex` checkout (`go run`, byte-identical code path to prod) against the
    rebased fixtures. Post-tower embeddings come from whichever inference
    service is running, which is why switching between them needs a re-seed.
-3. **seed-likes** — bulk-loads likes (prod document identity: `_id=at_uri`,
+4. **seed-likes** — bulk-loads likes (prod document identity: `_id=at_uri`,
    routing=`author_did`) and applies per-post `like_count`, which the
    popularity generator ranks on.
+5. **seed-quality** — runs ingex's real `backfill_quality_index` command after
+   the like counts are visible, creating the lean corpus queried by the
+   two-tower generator. The seed then points `posts_recent_quality` at that
+   corpus and refreshes it before restarting the API.
+
+The quality backfill is derived entirely from the seeded `posts_recent`
+documents and is safe to repeat. `devctl status` reports its document count,
+and `devctl doctor` warns when it is absent so an empty two-tower feed is not
+mistaken for missing user history.
+
+The published fixture predates some inference fields. To exercise politics
+topic ingestion and ranking without changing those downloaded archives, add an
+opt-in synthetic overlay while rebasing:
+
+```bash
+./devctl seed --synthetic-topics
+```
+
+Every rebased post that lacks a valid `News & Social Concern` score receives
+one of `0`, `0.25`, `0.5`, `0.75`, or `1`, derived deterministically from its
+AT URI. Existing inference data and valid real scores are preserved. The
+original files in `fixtures/data/` are mounted read-only and remain unchanged;
+only the disposable copies under `.runtime/seed/` contain the overlay. The
+rebased `manifest.json` records the strategy, injected/preserved counts, and
+score distribution so downstream results cannot be mistaken for real topic
+classifications.
+
+For index-template or ingestion work, use a dedicated instance rather than
+replacing the default environment's data:
+
+```bash
+./devctl up --name politics --dedicated-es
+./devctl --name politics seed --synthetic-topics
+./devctl --name politics es '/posts_recent/_search?size=3&pretty' \
+  -X POST -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"_source":["at_uri","topic_scores"]}'
+```
+
+`topic_scores` is deliberately stored in `_source` but not indexed, so an
+`exists` query cannot select it. A synthetic seed adds it to every valid post;
+sampling ordinary hits as above is sufficient to inspect the ingested shape.
 
 A seeded window drifts stale as real time moves on: the api's recency windows
 are anchored to *now* (popularity looks back 24h), so from about a day after a
