@@ -3,7 +3,8 @@
 #
 # Orchestrates the docker-compose stack in this directory. The key sequencing
 # it owns: es-init must complete (minting ES API keys into .runtime/) before
-# the api starts, and seeding runs rebase -> megastream ingest -> likes.
+# the api starts, and seeding runs rebase -> megastream ingest -> likes ->
+# quality-corpus backfill.
 #
 # Layout assumption: this repo (internal-tools) is checked out next to its
 # sibling repos (api, ingex, ...) under one parent directory, like the
@@ -1082,6 +1083,17 @@ EOF
 }
 
 cmd_seed() {
+  local synthetic_topics=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --synthetic-topics)
+      synthetic_topics=1
+      shift
+      ;;
+    *) die "unknown argument to seed: $1 (supported: --synthetic-topics)" ;;
+    esac
+  done
+
   check_docker
   ensure_runtime
   # A sharing instance has no cluster of its own and only a read-only key to
@@ -1123,7 +1135,12 @@ cmd_seed() {
   echo "devctl: wiping previously seeded data..."
   compose run --rm seed-wipe
   echo "devctl: rebasing fixture timestamps..."
-  compose run --rm seed-rebase
+  if [[ $synthetic_topics -eq 1 ]]; then
+    echo "devctl: adding deterministic synthetic topic scores to rebased copies..."
+    compose run --rm -e GE_DEV_SYNTHETIC_TOPICS=1 seed-rebase
+  else
+    compose run --rm seed-rebase
+  fi
   # Firestore UserDocuments for every fixture persona (not just the probe
   # persona seed-rebase pointed .runtime/probe.env at) — so a freshly seeded
   # instance has more than one Firestore-tracked user for things like ingex's
@@ -1135,6 +1152,14 @@ cmd_seed() {
   compose run --rm seed-megastream
   echo "devctl: loading likes and like counts..."
   compose run --rm seed-likes
+  # The fixture loader writes final like_count values directly, bypassing
+  # jetstream_ingest's threshold-crossing promotion into the lean two-tower
+  # corpus. Backfill it after counts are visible, then wire and refresh the
+  # alias so the first feed request can query it immediately.
+  echo "devctl: backfilling the two-tower quality corpus..."
+  compose run --rm seed-quality
+  echo "devctl: updating the quality-corpus alias..."
+  compose run --rm seed-likes python /seedscripts/load_likes.py --aliases-only
   local persona api_running=0
   persona="$(env_file_value "$RUNTIME/probe.env" GE_PROBE_USER_DID)"
   # Restart the api so it picks up the new persona from .runtime/probe.env —
@@ -2011,8 +2036,8 @@ cmd_status() {
   fi
   if share_es || [[ -s "$RUNTIME/es_key_ro.env" ]]; then
     local alias
-    for alias in posts likes inferences; do
-      printf "%-12s %s docs\n" "$alias" \
+    for alias in posts likes inferences posts_recent_quality; do
+      printf "%-21s %s docs\n" "$alias" \
         "$(es_curl "/${alias}/_count" | sed -n 's/.*"count":\([0-9]*\).*/\1/p')"
     done
   fi
@@ -2160,6 +2185,14 @@ print("%s posts / %s likes" % (format(c["posts"], ","), format(c["likes"], ","))
       d_warn "no posts indexed — feeds come back empty, not as errors" "$seed_fix"
     else
       d_ok "$posts posts indexed"
+    fi
+
+    local quality_posts
+    quality_posts="$(es_curl /posts_recent_quality/_count 2>/dev/null | sed -n 's/.*"count":\([0-9]*\).*/\1/p')"
+    if [[ -z "$quality_posts" || "$quality_posts" == "0" ]]; then
+      d_warn "no two-tower quality corpus indexed — two_tower returns no candidates" "$seed_fix"
+    else
+      d_ok "$quality_posts quality posts indexed"
     fi
 
     local age
@@ -2460,7 +2493,9 @@ Run the stack:
                      --dedicated-es                   own Elasticsearch, not shared
                      --repo-root <dir>                mount checkouts from another
                        working copy (sticks per instance; default: this repo's parent)
-  seed             load fixtures: rebase timestamps, ingest posts, load likes
+  seed             load fixtures: rebase, ingest posts/likes, backfill quality
+                     --synthetic-topics  add deterministic politics scores to
+                                         rebased copies (originals stay unchanged)
   restart <svc>    recreate one service, picking up code and config changes
   down             stop containers (data volumes survive)
   nuke             stop and delete everything (volumes, minted keys, seed state)

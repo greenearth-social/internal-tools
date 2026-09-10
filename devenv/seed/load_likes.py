@@ -15,6 +15,7 @@ Runs AFTER seed-megastream so the post docs exist.
 Runs on a stock python image; stdlib only.
 """
 
+import argparse
 import gzip
 import json
 import os
@@ -136,7 +137,7 @@ def apply_like_counts() -> None:
         print(f"  ({missing} posts not found — likely skipped by ingest; harmless in dev)")
 
 
-def update_posts_recent() -> None:
+def update_posts_recent() -> set[str]:
     """Point the posts_recent and posts_recent_quality aliases at the seeded
     posts indexes. In prod the update-recent-alias cronjob keeps them on the two
     (resp. three) most recent period indexes; dev data is small enough to alias
@@ -162,16 +163,41 @@ def update_posts_recent() -> None:
 
     request("POST", "/_aliases", json.dumps({"actions": actions}).encode())
     print(f"aliases updated ({len(actions)} action(s))")
+    return {action["add"]["alias"] for action in actions}
 
 
-def main() -> None:
-    load_likes()
-    apply_like_counts()
-    update_posts_recent()
-    for alias in ("posts", "likes"):
+def refresh_and_report(aliases: tuple[str, ...]) -> None:
+    for alias in aliases:
         request("POST", f"/{alias}/_refresh")
         count = request("GET", f"/{alias}/_count")["count"]
         print(f"{alias}: {count} docs")
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--aliases-only",
+        action="store_true",
+        help="refresh aliases after quality-corpus backfill without reloading likes",
+    )
+    args = parser.parse_args(argv)
+
+    if args.aliases_only:
+        aliases = update_posts_recent()
+        if "posts_recent_quality" in aliases:
+            refresh_and_report(("posts_recent_quality",))
+        else:
+            # A successful backfill creates no index if no posts qualify.
+            # Keep the other feeds usable and let devctl finish the seed.
+            print(
+                "WARNING: no quality corpus after backfill; continuing without posts_recent_quality"
+            )
+        return
+
+    load_likes()
+    apply_like_counts()
+    update_posts_recent()
+    refresh_and_report(("posts", "likes"))
 
 
 if __name__ == "__main__":

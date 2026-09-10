@@ -566,6 +566,28 @@ services:
       - gocache:/root/.cache/go-build
       - ${GE_DEV_RUNTIME:-./.runtime}:/runtime
 
+  # Builds the lean corpus used by the API's two-tower kNN search. Fixture
+  # likes are loaded in bulk rather than streamed through jetstream_ingest, so
+  # the normal threshold-crossing promotion path never runs during a seed.
+  seed-quality:
+    image: golang:1.25
+    profiles: ["tools"]
+    working_dir: /src
+    command:
+      ["go", "run", "./cmd/backfill_quality_index", "--source-index", "posts_recent"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
+      - GE_INDEX_PERIOD=week
+    env_file:
+      - ${GE_DEV_RUNTIME:-./.runtime}/es_key_rw.env
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/ingex/ingest:/src
+      - gomod:/go/pkg/mod
+      - gocache:/root/.cache/go-build
+
   # Wipes previously seeded data indexes so each seed is a fresh load.
   seed-wipe:
     image: python:3.13-slim

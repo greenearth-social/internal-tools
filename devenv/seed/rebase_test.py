@@ -140,6 +140,102 @@ def test_shift_raw_post_tolerates_missing_timestamp_fields():
 
 
 # --------------------------------------------------------------------------
+# synthetic topic overlay
+# --------------------------------------------------------------------------
+
+
+def test_synthetic_topic_scores_are_stable_and_cover_every_bucket():
+    uris = [f"at://did:plc:test/app.bsky.feed.post/{i}" for i in range(200)]
+    first = [rebase.synthetic_topic_score(uri) for uri in uris]
+    second = [rebase.synthetic_topic_score(uri) for uri in uris]
+
+    assert first == second
+    assert set(first) == set(rebase.SYNTHETIC_TOPIC_BUCKETS)
+
+
+def test_inject_synthetic_topic_score_preserves_other_inferences():
+    original = json.dumps(
+        {
+            "text_embeddings": {"all-MiniLM-L12-v2": "encoded-vector"},
+            "text": {
+                "message.commit.record.text": {
+                    "sentiment": {"positive": 0.8},
+                    "topic": {"Sports": 0.4},
+                }
+            },
+        }
+    )
+
+    updated, score, injected = rebase.inject_synthetic_topic_score(
+        original,
+        "at://did:plc:test/app.bsky.feed.post/3abc",
+    )
+
+    doc = json.loads(updated)
+    post_text = doc["text"]["message.commit.record.text"]
+    assert doc["text_embeddings"] == {"all-MiniLM-L12-v2": "encoded-vector"}
+    assert post_text["sentiment"] == {"positive": 0.8}
+    assert post_text["topic"]["Sports"] == 0.4
+    assert post_text["topic"][rebase.POLITICS_TOPIC_LABEL] == score
+    assert score in rebase.SYNTHETIC_TOPIC_BUCKETS
+    assert injected is True
+
+
+def test_inject_synthetic_topic_score_preserves_valid_existing_score():
+    original = json.dumps(
+        {
+            "text": {
+                "message.commit.record.text": {
+                    "topic": {rebase.POLITICS_TOPIC_LABEL: 0.73779296875}
+                }
+            }
+        }
+    )
+
+    updated, score, injected = rebase.inject_synthetic_topic_score(
+        original,
+        "at://did:plc:test/app.bsky.feed.post/3abc",
+    )
+
+    assert updated == original
+    assert score == 0.73779296875
+    assert injected is False
+
+
+def test_inject_synthetic_topic_score_replaces_an_invalid_existing_score():
+    original = json.dumps(
+        {
+            "text": {
+                "message.commit.record.text": {
+                    "topic": {rebase.POLITICS_TOPIC_LABEL: "not-a-score"}
+                }
+            }
+        }
+    )
+
+    updated, score, injected = rebase.inject_synthetic_topic_score(
+        original,
+        "at://did:plc:test/app.bsky.feed.post/3abc",
+    )
+
+    assert (
+        json.loads(updated)["text"]["message.commit.record.text"]["topic"][
+            rebase.POLITICS_TOPIC_LABEL
+        ]
+        == score
+    )
+    assert injected is True
+
+
+def test_inject_synthetic_topic_score_rejects_conflicting_shape():
+    with pytest.raises(ValueError, match=r"inferences\.text must be an object"):
+        rebase.inject_synthetic_topic_score(
+            json.dumps({"text": []}),
+            "at://did:plc:test/app.bsky.feed.post/3abc",
+        )
+
+
+# --------------------------------------------------------------------------
 # likes rebasing
 # --------------------------------------------------------------------------
 
@@ -197,7 +293,13 @@ def test_rebase_jsonl_skips_blank_lines(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _make_db_zip(path, created, time_us, sqlite_created="2026-07-22 10:00:00"):
+def _make_db_zip(
+    path,
+    created,
+    time_us,
+    sqlite_created="2026-07-22 10:00:00",
+    inferences="{}",
+):
     db_file = path.parent / "build.db"
     conn = sqlite3.connect(db_file)
     try:
@@ -220,7 +322,7 @@ def _make_db_zip(path, created, time_us, sqlite_created="2026-07-22 10:00:00"):
                 "did:plc:author0000000000000000",
                 time_us,
                 _raw_post(created, time_us),
-                "{}",
+                inferences,
                 "{}",
                 sqlite_created,
             ),
@@ -242,6 +344,18 @@ def _read_rows(zip_path, tmp_path):
     conn = sqlite3.connect(extracted)
     try:
         return conn.execute("SELECT time_us, raw_post, created_at FROM enriched_posts").fetchall()
+    finally:
+        conn.close()
+
+
+def _read_inferences(zip_path, tmp_path):
+    with zipfile.ZipFile(zip_path) as zf:
+        (member,) = [m for m in zf.namelist() if m.endswith(".db")]
+        extracted = tmp_path / "check-inferences.db"
+        extracted.write_bytes(zf.read(member))
+    conn = sqlite3.connect(extracted)
+    try:
+        return [row[0] for row in conn.execute("SELECT inferences FROM enriched_posts")]
     finally:
         conn.close()
 
@@ -277,6 +391,49 @@ def test_rebase_db_shifts_every_timestamp_column(tmp_path, monkeypatch):
     assert sqlite_created == "2026-07-23 10:00:00"
 
 
+def test_rebase_db_does_not_add_topics_by_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(rebase, "OUT_DIR", tmp_path / "out")
+    rebase.OUT_DIR.mkdir()
+    src = tmp_path / "mega_jetstream_20260722_100000.db.zip"
+    _make_db_zip(src, "2026-07-22T10:00:00Z", 1784714400000000)
+
+    out = rebase.rebase_db(src, DAY, int(DAY.total_seconds() * 1e6))
+
+    assert _read_inferences(out, tmp_path) == ["{}"]
+
+
+def test_rebase_db_adds_topics_only_to_the_output_copy(tmp_path, monkeypatch):
+    monkeypatch.setattr(rebase, "OUT_DIR", tmp_path / "out")
+    rebase.OUT_DIR.mkdir()
+    src = tmp_path / "mega_jetstream_20260722_100000.db.zip"
+    original_inferences = json.dumps({"text_embeddings": {"model": "vector"}})
+    _make_db_zip(
+        src,
+        "2026-07-22T10:00:00Z",
+        1784714400000000,
+        inferences=original_inferences,
+    )
+    original_archive = src.read_bytes()
+    stats = rebase.SyntheticTopicStats()
+
+    out = rebase.rebase_db(
+        src,
+        DAY,
+        int(DAY.total_seconds() * 1e6),
+        stats,
+    )
+
+    (updated_raw,) = _read_inferences(out, tmp_path)
+    updated = json.loads(updated_raw)
+    topics = updated["text"]["message.commit.record.text"]["topic"]
+    assert topics[rebase.POLITICS_TOPIC_LABEL] in rebase.SYNTHETIC_TOPIC_BUCKETS
+    assert updated["text_embeddings"] == {"model": "vector"}
+    assert stats.injected_posts == 1
+    assert stats.preserved_posts == 0
+    assert sum(stats.distribution.values()) == 1
+    assert src.read_bytes() == original_archive
+
+
 def test_rebase_db_accepts_a_bare_sqlite_file_named_db_zip(tmp_path, monkeypatch):
     # Megastream archives are sometimes uncompressed despite the extension;
     # ingest tolerates that, so the rebase has to as well.
@@ -303,3 +460,62 @@ def test_rebase_db_rejects_filenames_the_spooler_cannot_parse(tmp_path, monkeypa
 
     with pytest.raises(SystemExit):
         rebase.rebase_db(bad, DAY, 0)
+
+
+def test_main_records_synthetic_topic_metadata(tmp_path, monkeypatch):
+    fixtures_dir = tmp_path / "fixtures"
+    fixtures_dir.mkdir()
+    source = fixtures_dir / "mega_jetstream_20260722_100000.db.zip"
+    _make_db_zip(source, "2026-07-22T10:00:00Z", 1784714400000000)
+    source_before = source.read_bytes()
+    (fixtures_dir / "manifest.json").write_text(
+        json.dumps({"window_end": "2026-07-22T10:00:00Z", "personas": []})
+    )
+    out_dir = tmp_path / "out"
+    monkeypatch.setattr(rebase, "FIXTURES_DIR", fixtures_dir)
+    monkeypatch.setattr(rebase, "OUT_DIR", out_dir)
+    monkeypatch.setattr(rebase, "PROBE_ENV", tmp_path / "probe.env")
+    monkeypatch.setenv(rebase.SYNTHETIC_TOPICS_ENV, "1")
+
+    rebase.main()
+
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    metadata = manifest["synthetic_topics"]
+    fixture_uri = "at://did:plc:author0000000000000000/app.bsky.feed.post/3abc"
+    assert metadata == {
+        "enabled": True,
+        "strategy": rebase.SYNTHETIC_TOPIC_STRATEGY,
+        "label": rebase.POLITICS_TOPIC_LABEL,
+        "injected_posts": 1,
+        "preserved_posts": 0,
+        "distribution": {f"{rebase.synthetic_topic_score(fixture_uri):.2f}": 1},
+    }
+    (output_archive,) = out_dir.glob("*.db.zip")
+    (inferences,) = _read_inferences(output_archive, tmp_path)
+    assert (
+        rebase.POLITICS_TOPIC_LABEL
+        in json.loads(inferences)["text"]["message.commit.record.text"]["topic"]
+    )
+    assert source.read_bytes() == source_before
+
+
+def test_main_leaves_topics_and_manifest_unchanged_without_flag(tmp_path, monkeypatch):
+    fixtures_dir = tmp_path / "fixtures"
+    fixtures_dir.mkdir()
+    source = fixtures_dir / "mega_jetstream_20260722_100000.db.zip"
+    _make_db_zip(source, "2026-07-22T10:00:00Z", 1784714400000000)
+    (fixtures_dir / "manifest.json").write_text(
+        json.dumps({"window_end": "2026-07-22T10:00:00Z", "personas": []})
+    )
+    out_dir = tmp_path / "out"
+    monkeypatch.setattr(rebase, "FIXTURES_DIR", fixtures_dir)
+    monkeypatch.setattr(rebase, "OUT_DIR", out_dir)
+    monkeypatch.setattr(rebase, "PROBE_ENV", tmp_path / "probe.env")
+    monkeypatch.delenv(rebase.SYNTHETIC_TOPICS_ENV, raising=False)
+
+    rebase.main()
+
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    assert "synthetic_topics" not in manifest
+    (output_archive,) = out_dir.glob("*.db.zip")
+    assert _read_inferences(output_archive, tmp_path) == ["{}"]
