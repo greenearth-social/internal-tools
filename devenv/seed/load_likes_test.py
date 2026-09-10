@@ -151,15 +151,6 @@ def test_quality_alias_skipped_when_the_corpus_is_empty(monkeypatch):
     assert aliases == {"posts_recent"}
 
 
-def test_quality_alias_can_be_required_after_backfill(monkeypatch):
-    calls = _capture_requests(monkeypatch, [{"index": "posts-2026-w32"}])
-
-    with pytest.raises(SystemExit, match="no posts-quality-\\* indexes"):
-        load_likes.update_posts_recent(require_quality=True)
-
-    assert all(path != "/_aliases" for _, path, _ in calls)
-
-
 def test_missing_regular_posts_is_fatal(monkeypatch):
     calls = _capture_requests(monkeypatch, [{"index": "posts-quality-2026-w32"}])
 
@@ -169,8 +160,12 @@ def test_missing_regular_posts_is_fatal(monkeypatch):
     assert all(path != "/_aliases" for _, path, _ in calls)
 
 
-def test_aliases_only_skips_like_loading_and_refreshes_quality(monkeypatch):
+@pytest.mark.parametrize("quality_count", [None, 0, 123])
+def test_aliases_only_handles_populated_or_empty_quality_corpus(monkeypatch, capsys, quality_count):
     calls = []
+    indexes = [{"index": "posts-2026-w32"}]
+    if quality_count is not None:
+        indexes.append({"index": "posts-quality-2026-w32"})
 
     monkeypatch.setattr(
         load_likes,
@@ -182,24 +177,41 @@ def test_aliases_only_skips_like_loading_and_refreshes_quality(monkeypatch):
         "apply_like_counts",
         lambda: pytest.fail("aliases-only must not reapply like counts"),
     )
-    monkeypatch.setattr(
-        load_likes,
-        "update_posts_recent",
-        lambda *, require_quality=False: calls.append(("aliases", require_quality)),
-    )
 
     def fake_request(method, path, body=None, ndjson=False):
-        calls.append((method, path))
-        if path.endswith("/_count"):
-            return {"count": 123}
-        return {}
+        calls.append((method, path, body))
+        if method == "GET" and path == "/_cat/indices/posts-*?format=json&h=index":
+            return indexes
+        if method == "POST" and path == "/_aliases":
+            return {}
+        if quality_count is not None:
+            if method == "POST" and path == "/posts_recent_quality/_refresh":
+                return {}
+            if method == "GET" and path == "/posts_recent_quality/_count":
+                return {"count": quality_count}
+        pytest.fail(f"unexpected request: {method} {path}")
 
     monkeypatch.setattr(load_likes, "request", fake_request)
 
     load_likes.main(["--aliases-only"])
 
-    assert calls == [
-        ("aliases", True),
-        ("POST", "/posts_recent_quality/_refresh"),
-        ("GET", "/posts_recent_quality/_count"),
+    expected_calls = [
+        ("GET", "/_cat/indices/posts-*?format=json&h=index"),
+        ("POST", "/_aliases"),
     ]
+    actions = _alias_actions(calls)
+    assert actions[0] == {"add": {"indices": ["posts-2026-w32"], "alias": "posts_recent"}}
+    output = capsys.readouterr().out
+    if quality_count is None:
+        assert len(actions) == 1
+        assert "WARNING: no quality corpus after backfill" in output
+    else:
+        assert actions[1] == {
+            "add": {"indices": ["posts-quality-2026-w32"], "alias": "posts_recent_quality"}
+        }
+        expected_calls.extend(
+            [("POST", "/posts_recent_quality/_refresh"), ("GET", "/posts_recent_quality/_count")]
+        )
+        assert f"posts_recent_quality: {quality_count} docs" in output
+        assert "WARNING" not in output
+    assert [(method, path) for method, path, _ in calls] == expected_calls

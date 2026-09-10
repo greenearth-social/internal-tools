@@ -519,9 +519,10 @@ it needs a public tunnel, not just a key.
    corpus and refreshes it before restarting the API.
 
 The quality backfill is derived entirely from the seeded `posts_recent`
-documents and is safe to repeat. `devctl status` reports its document count,
-and `devctl doctor` warns when it is absent so an empty two-tower feed is not
-mistaken for missing user history.
+documents and is safe to repeat. If no posts qualify, seeding completes with
+a warning and leaves `posts_recent_quality` absent. `devctl status` reports
+its document count, and `devctl doctor` warns when it is absent so an empty
+two-tower feed is not mistaken for missing user history.
 
 The published fixture predates some inference fields. To exercise politics
 topic ingestion and ranking without changing those downloaded archives, add an

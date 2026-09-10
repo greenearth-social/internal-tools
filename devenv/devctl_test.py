@@ -57,12 +57,14 @@ def test_firebase_ui_proxy_rewrites_named_instance_ports():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def run_seed_command(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess, list[str]]:
+def run_seed_command(
+    tmp_path: Path, *args: str, fail_compose: str = "", api_running: bool = False
+) -> tuple[subprocess.CompletedProcess, list[str]]:
     """Run cmd_seed with external work stubbed, recording compose calls."""
     compose_log = tmp_path / "compose.log"
     script = "\n".join(
         [
-            "set -u",
+            "set -euo pipefail",
             'die() { echo "devctl: $*" >&2; exit 1; }',
             "check_docker() { :; }",
             "ensure_runtime() { :; }",
@@ -74,8 +76,9 @@ def run_seed_command(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedPr
             "check_model_fixture_compat() { :; }",
             "resolve_live() { :; }",
             "live_has() { return 1; }",
-            'compose() { printf "%s\\n" "$*" >>"$TEST_COMPOSE_LOG"; }',
-            "service_running() { return 1; }",
+            'compose() { printf "%s\\n" "$*" >>"$TEST_COMPOSE_LOG"; '
+            'if [[ "$*" == "$TEST_FAIL_COMPOSE" ]]; then return 17; fi; }',
+            'service_running() { [[ "$TEST_API_RUNNING" == 1 ]]; }',
             "export_api_es_env() { :; }",
             shell_function("cmd_seed"),
             'cmd_seed "$@"',
@@ -89,6 +92,8 @@ def run_seed_command(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedPr
         env={
             "PATH": os.environ["PATH"],
             "TEST_COMPOSE_LOG": str(compose_log),
+            "TEST_FAIL_COMPOSE": fail_compose,
+            "TEST_API_RUNNING": "1" if api_running else "0",
             "RUNTIME": str(tmp_path / "runtime"),
         },
     )
@@ -114,14 +119,27 @@ def test_seed_forwards_synthetic_topics_only_to_rebase(tmp_path):
 
 
 def test_seed_backfills_quality_corpus_after_loading_like_counts(tmp_path):
-    result, calls = run_seed_command(tmp_path)
+    result, calls = run_seed_command(tmp_path, api_running=True)
 
     assert result.returncode == 0, result.stderr
     likes = calls.index("run --rm seed-likes")
     quality = calls.index("run --rm seed-quality")
     aliases = calls.index("run --rm seed-likes python /seedscripts/load_likes.py --aliases-only")
-    assert likes < quality < aliases
+    restart = calls.index("up -d --force-recreate api")
+    assert likes < quality < aliases < restart
     assert "backfilling the two-tower quality corpus" in result.stdout
+
+
+def test_seed_stops_before_aliases_and_api_restart_when_quality_backfill_fails(tmp_path):
+    result, calls = run_seed_command(
+        tmp_path, fail_compose="run --rm seed-quality", api_running=True
+    )
+
+    assert result.returncode == 17, result.stdout + result.stderr
+    assert calls[-1] == "run --rm seed-quality"
+    assert not any("--aliases-only" in call for call in calls)
+    assert "up -d --force-recreate api" not in calls
+    assert "seed complete" not in result.stdout
 
 
 def test_seed_rejects_unknown_arguments_before_doing_work(tmp_path):

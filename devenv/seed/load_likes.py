@@ -137,7 +137,7 @@ def apply_like_counts() -> None:
         print(f"  ({missing} posts not found — likely skipped by ingest; harmless in dev)")
 
 
-def update_posts_recent(*, require_quality: bool = False) -> set[str]:
+def update_posts_recent() -> set[str]:
     """Point the posts_recent and posts_recent_quality aliases at the seeded
     posts indexes. In prod the update-recent-alias cronjob keeps them on the two
     (resp. three) most recent period indexes; dev data is small enough to alias
@@ -156,8 +156,6 @@ def update_posts_recent(*, require_quality: bool = False) -> set[str]:
     post_indexes = [index for index in indexes if not index.startswith("posts-quality-")]
     if not post_indexes:
         sys.exit("FATAL: no posts-* indexes found after megastream seed")
-    if require_quality and not quality_indexes:
-        sys.exit("FATAL: no posts-quality-* indexes found after quality backfill")
 
     actions = [{"add": {"indices": post_indexes, "alias": "posts_recent"}}]
     if quality_indexes:
@@ -185,8 +183,15 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.aliases_only:
-        update_posts_recent(require_quality=True)
-        refresh_and_report(("posts_recent_quality",))
+        aliases = update_posts_recent()
+        if "posts_recent_quality" in aliases:
+            refresh_and_report(("posts_recent_quality",))
+        else:
+            # A successful backfill creates no index if no posts qualify.
+            # Keep the other feeds usable and let devctl finish the seed.
+            print(
+                "WARNING: no quality corpus after backfill; continuing without posts_recent_quality"
+            )
         return
 
     load_likes()
