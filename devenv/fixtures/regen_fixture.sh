@@ -170,7 +170,7 @@ log "generation complete"
 # --- verify ---------------------------------------------------------------
 
 log "verifying the generated fixture..."
-python3 "$FIXTURES_DIR/verify_fixture.py" "$OUT_DIR" || die "verification failed"
+python3 "$FIXTURES_DIR/verify_fixture.py" "$OUT_DIR" --require-topic-scores || die "verification failed"
 
 log "fixture staged and verified: $OUT_DIR"
 

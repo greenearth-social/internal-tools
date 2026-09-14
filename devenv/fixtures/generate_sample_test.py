@@ -546,6 +546,13 @@ class _FakeEs:
     def _docs(self, index):
         return self.posts if index == "posts" else self.likes
 
+    @staticmethod
+    def _source(doc, fields):
+        # Honor the projection so forgetting a field in the generator is
+        # caught, including when hydrating posts outside the sample window.
+        roots = {field.split(".")[0] for field in fields}
+        return {key: value for key, value in doc.items() if key in roots}
+
     def search(self, index, body):
         if body.get("size") == 0 and "aggs" in body:
             terms = body["aggs"]["likers"]["terms"]
@@ -564,12 +571,18 @@ class _FakeEs:
                 }
             }
         hits = [d for d in self._docs(index) if _matches(d, body["query"])]
-        return {"hits": {"hits": [{"_source": d} for d in hits[: body["size"]]]}}
+        return {
+            "hits": {
+                "hits": [
+                    {"_source": self._source(d, body["_source"])} for d in hits[: body["size"]]
+                ]
+            }
+        }
 
     def scan(self, index, query, source, page_size=1000):
         for doc in self._docs(index):
             if _matches(doc, query):
-                yield {"_source": doc}
+                yield {"_source": self._source(doc, source)}
 
 
 def _prod_es_args(**overrides):
@@ -648,6 +661,26 @@ def test_no_dev_users_leaves_the_sample_untouched(tmp_path, monkeypatch):
 
     assert DEV_DID not in [like["author_did"] for like in likes]
     assert manifest["dev_users"] == []
+
+
+def test_prod_scores_survive_sampling_hydration_and_sqlite_round_trip(tmp_path, monkeypatch):
+    fake = _fake_cluster()
+    scores = {"News & Social Concern": 0.8, "Other": 0.0, "Sports": 1.0}
+    fake.posts[0]["topic_scores"] = scores
+    fake.posts[-1]["topic_scores"] = {"News & Social Concern": 0.25}
+    monkeypatch.setattr(gs, "EsClient", lambda: fake)
+
+    gs.run_prod_es(_prod_es_args(), tmp_path, DEV_USERS)
+    rows = gs.read_megastream_posts(tmp_path)
+    inferences = {row["at_uri"]: json.loads(row["inferences"]) for row in rows}
+    assert inferences[fake.posts[0]["at_uri"]]["text"] == {
+        "message.commit.record.text": {"topic": scores}
+    }
+    assert inferences[fake.posts[-1]["at_uri"]]["text"] == {
+        "message.commit.record.text": {"topic": {"News & Social Concern": 0.25}}
+    }
+    assert "text" not in inferences[fake.posts[1]["at_uri"]]
+    assert all(gs.EMBED_MODEL in inf["text_embeddings"] for inf in inferences.values())
 
 
 # --- megastream-files mode ------------------------------------------------
