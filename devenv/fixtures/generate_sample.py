@@ -482,6 +482,7 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path, dev_users: list[dict]) 
         "created_at",
         "like_count",
         "quote_post",
+        "topic_scores",
         EMBED_FIELD,
     ]
     hours = max(1, int((window_end - window_start).total_seconds() // 3600))
@@ -634,6 +635,11 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path, dev_users: list[dict]) 
     for doc in posts_by_uri.values():
         created = parse_iso(doc["created_at"])
         embedding = doc["embeddings"]["all_MiniLM_L12_v2"]
+        inferences: dict = {"text_embeddings": {EMBED_MODEL: encode_embedding(embedding)}}
+        # Reconstruct the upstream post-body analysis that megastream_ingest
+        # reads. Older hydrated posts can legitimately have no topic scores.
+        if doc.get("topic_scores"):
+            inferences["text"] = {"message.commit.record.text": {"topic": doc["topic_scores"]}}
         posts.append(
             {
                 "at_uri": doc["at_uri"],
@@ -646,9 +652,7 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path, dev_users: list[dict]) 
                     created,
                     doc.get("quote_post") or None,
                 ),
-                "inferences": json.dumps(
-                    {"text_embeddings": {EMBED_MODEL: encode_embedding(embedding)}}
-                ),
+                "inferences": json.dumps(inferences),
             }
         )
     like_counts = [

@@ -44,6 +44,25 @@ prod Elasticsearch access via kubectl (internal engineers only).
    cohort-densified likes, hydrated danglers, dev personas. See its
    docstring before changing parameters. Output lands in `fixtures/data/`.
 
+   The default production window is 48 hours ending two hours ago, rounded
+   down to the hour. The generator preserves Elasticsearch `topic_scores`
+   as `inferences.text["message.commit.record.text"].topic`, which ingex
+   converts back to scores when seeding. Older hydrated history posts can
+   legitimately lack scores.
+
+   Verify a fresh production capture before seeding or publishing:
+
+   ```bash
+   python3 fixtures/verify_fixture.py fixtures/data --require-topic-scores
+   ```
+
+   Verification reports the percentage of posts with scores and rejects
+   malformed scores or zero coverage. Omit `--require-topic-scores` when
+   checking legacy or offline captures that may have no scores; invalid
+   values still fail. `--offline` skips only persona DID lookups.
+   `fixtures/regen_fixture.sh` automates production capture into
+   `fixtures/data.staging` and requires score coverage during verification.
+
    Watch the dev-user lines near the end: the run reports how many of the
    accounts in `fixtures/dev_users.json` contributed likes, and warns about
    any that contributed none. Those accounts will get an empty, unpersonalized
