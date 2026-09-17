@@ -222,6 +222,7 @@ def test_like_counts_and_regular_posts_are_visible_before_backfill(monkeypatch):
         if path == "/_aliases":
             import json
 
+            assert body is not None
             assert json.loads(body)["actions"] == [
                 {"add": {"indices": ["posts-2026-w32"], "alias": "posts_recent"}}
             ]
