@@ -3,7 +3,7 @@
 #
 # Orchestrates the docker-compose stack in this directory. The key sequencing
 # it owns: es-init must complete (minting ES API keys into .runtime/) before
-# the api starts, and seeding runs rebase -> megastream ingest -> likes.
+# the api starts, and seeding runs rebase -> megastream ingest -> likes -> quality.
 #
 # Layout assumption: this repo (internal-tools) is checked out next to its
 # sibling repos (api, ingex, ...) under one parent directory, like the
@@ -1135,6 +1135,10 @@ cmd_seed() {
   compose run --rm seed-megastream
   echo "devctl: loading likes and like counts..."
   compose run --rm seed-likes
+  echo "devctl: backfilling the two-tower quality corpus..."
+  compose run --rm seed-quality
+  echo "devctl: publishing recent-post aliases..."
+  compose run --rm seed-likes python /seedscripts/load_likes.py --aliases-only
   local persona api_running=0
   persona="$(env_file_value "$RUNTIME/probe.env" GE_PROBE_USER_DID)"
   # Restart the api so it picks up the new persona from .runtime/probe.env —

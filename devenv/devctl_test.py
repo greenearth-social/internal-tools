@@ -46,6 +46,95 @@ def shell_function(name: str) -> str:
     return "\n".join(lines[start : end + 1])
 
 
+def run_seed(
+    tmp_path: Path, fail_command: str = ""
+) -> tuple[subprocess.CompletedProcess, list[str]]:
+    """Exercise real seed orchestration with fake services and no Docker."""
+    calls_path = tmp_path / "compose-calls"
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            'die() { echo "devctl: $*" >&2; exit 1; }',
+            "check_docker() { :; }",
+            "ensure_runtime() { :; }",
+            "share_es() { return 1; }",
+            "have_fixtures() { return 0; }",
+            "env_file_value() { echo test-value; }",
+            "check_model_fixture_compat() { :; }",
+            "resolve_live() { :; }",
+            "live_has() { return 1; }",
+            "service_running() { return 0; }",
+            "export_api_es_env() { :; }",
+            """compose() {
+  printf '%s\\n' "$*" >>"$TEST_CALLS"
+  if [[ "$*" == "$TEST_FAIL_COMMAND" ]]; then return 23; fi
+}""",
+            shell_function("cmd_seed"),
+            "cmd_seed",
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-s"],
+        input=script,
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "RUNTIME": str(tmp_path),
+            "TEST_CALLS": str(calls_path),
+            "TEST_FAIL_COMMAND": fail_command,
+        },
+    )
+    return result, calls_path.read_text().splitlines()
+
+
+def test_seed_backfills_quality_after_likes_before_publishing_aliases_and_restarting_api(tmp_path):
+    result, calls = run_seed(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert calls == [
+        "up -d --wait inference",
+        "run --rm seed-wipe",
+        "run --rm seed-rebase",
+        "run --rm seed-firestore-users",
+        "run --rm seed-megastream",
+        "run --rm seed-likes",
+        "run --rm seed-quality",
+        "run --rm seed-likes python /seedscripts/load_likes.py --aliases-only",
+        "up -d --force-recreate api",
+    ]
+    assert "seed complete" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "failed_command",
+    [
+        "run --rm seed-quality",
+        "run --rm seed-likes python /seedscripts/load_likes.py --aliases-only",
+    ],
+)
+def test_seed_stops_if_quality_backfill_or_alias_publication_fails(tmp_path, failed_command):
+    result, calls = run_seed(tmp_path, failed_command)
+
+    assert result.returncode == 23
+    assert calls[-1] == failed_command
+    assert "up -d --force-recreate api" not in calls
+    assert "seed complete" not in result.stdout
+
+
+def test_quality_backfill_uses_local_es_and_the_ingest_checkout():
+    services = yaml.safe_load(COMPOSE_FILE.read_text())["services"]
+    quality = services["seed-quality"]
+    ingest = services["seed-megastream"]
+
+    assert quality["command"] == ["go", "run", "./cmd/backfill_quality_index"]
+    assert "GE_ELASTICSEARCH_URL=http://elasticsearch:9200" in quality["environment"]
+    assert "GE_INDEX_PERIOD=week" in quality["environment"]
+    assert quality["env_file"] == ingest["env_file"]
+    assert "${GE_DEV_REPO_ROOT:-../..}/ingex/ingest:/src" in quality["volumes"]
+    assert "inference" not in quality.get("depends_on", {})
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_firebase_ui_proxy_rewrites_named_instance_ports():
     result = subprocess.run(

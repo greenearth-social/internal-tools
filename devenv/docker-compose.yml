@@ -599,6 +599,27 @@ services:
       - ./seed:/seedscripts:ro
       - ${GE_DEV_RUNTIME:-./.runtime}:/runtime
 
+  # Copies qualifying posts, including tower vectors from doc values, into
+  # the lean two-tower corpus. Runs after seed-likes refreshes its like counts;
+  # devctl then publishes and refreshes the posts_recent_quality alias.
+  seed-quality:
+    image: golang:1.25
+    profiles: ["tools"]
+    working_dir: /src
+    command: ["go", "run", "./cmd/backfill_quality_index"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - GE_ELASTICSEARCH_URL=http://elasticsearch:9200
+      - GE_INDEX_PERIOD=week
+    env_file:
+      - ${GE_DEV_RUNTIME:-./.runtime}/es_key_rw.env
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/ingex/ingest:/src
+      - gomod:/go/pkg/mod
+      - gocache:/root/.cache/go-build
+
   # Writes Firestore UserDocuments for the fixture personas (issue: multi-user
   # fixture for ingex's followed_users_backfill job). Runs AFTER seed-rebase
   # (needs /runtime/seed/manifest.json) and reuses the api's own image/venv so
