@@ -1,3 +1,5 @@
+from datetime import UTC
+
 import load_likes
 import pytest
 
@@ -96,6 +98,8 @@ def _capture_requests(monkeypatch, cat_result):
         calls.append((method, path, body))
         if path.startswith("/_cat/indices/posts-"):
             return cat_result
+        if path.endswith("/_count"):
+            return {"count": 0}
         return {}
 
     monkeypatch.setattr(load_likes, "request", fake_request)
@@ -158,3 +162,74 @@ def test_missing_regular_posts_is_fatal(monkeypatch):
         load_likes.update_posts_recent()
 
     assert all(path != "/_aliases" for _, path, _ in calls)
+
+
+def test_empty_quality_backfill_publishes_a_queryable_alias(monkeypatch):
+    from datetime import datetime
+
+    class FrozenDateTime:
+        @staticmethod
+        def now(tz):
+            assert tz is UTC
+            # ISO week belongs to the previous year at this boundary.
+            return datetime(2027, 1, 1, tzinfo=UTC)
+
+    monkeypatch.setattr(load_likes, "datetime", FrozenDateTime)
+    calls = _capture_requests(monkeypatch, [{"index": "posts-2026-w53"}])
+    load_likes.main(["--aliases-only"])
+
+    assert ("PUT", "/posts-quality-2026-w53", b"{}") in calls
+    actions = _alias_actions(calls)
+    quality = next(a["add"] for a in actions if a["add"]["alias"] == "posts_recent_quality")
+    assert quality["indices"] == ["posts-quality-2026-w53"]
+    paths = [path for _, path, _ in calls]
+    assert paths.index("/posts-quality-2026-w53") < paths.index("/_aliases")
+    assert paths.index("/_aliases") < paths.index("/posts_recent_quality/_refresh")
+    assert paths.index("/posts_recent_quality/_refresh") < paths.index(
+        "/posts_recent_quality/_count"
+    )
+
+
+def test_aliases_only_refreshes_existing_quality_corpus_without_reloading_likes(monkeypatch):
+    def must_not_reload():
+        pytest.fail("final alias publication must not reload likes or like counts")
+
+    monkeypatch.setattr(load_likes, "load_likes", must_not_reload)
+    monkeypatch.setattr(load_likes, "apply_like_counts", must_not_reload)
+    calls = _capture_requests(
+        monkeypatch,
+        [{"index": "posts-2026-w32"}, {"index": "posts-quality-2026-w32"}],
+    )
+    load_likes.main(["--aliases-only"])
+
+    assert not any(method == "PUT" for method, _, _ in calls)
+    actions = _alias_actions(calls)
+    quality = next(a["add"] for a in actions if a["add"]["alias"] == "posts_recent_quality")
+    assert quality["indices"] == ["posts-quality-2026-w32"]
+    assert ("POST", "/posts_recent_quality/_refresh", None) in calls
+    assert ("GET", "/posts_recent_quality/_count", None) in calls
+
+
+def test_like_counts_and_regular_posts_are_visible_before_backfill(monkeypatch):
+    events = []
+    monkeypatch.setattr(load_likes, "load_likes", lambda: events.append("likes"))
+    monkeypatch.setattr(load_likes, "apply_like_counts", lambda: events.append("counts"))
+
+    def fake_request(method, path, body=None, ndjson=False):
+        events.append(path)
+        if path.startswith("/_cat/indices/posts-"):
+            return [{"index": "posts-2026-w32"}]
+        if path == "/_aliases":
+            import json
+
+            assert json.loads(body)["actions"] == [
+                {"add": {"indices": ["posts-2026-w32"], "alias": "posts_recent"}}
+            ]
+        if path.endswith("/_count"):
+            return {"count": 1}
+        return {}
+
+    monkeypatch.setattr(load_likes, "request", fake_request)
+    load_likes.main([])
+
+    assert events.index("counts") < events.index("/_aliases") < events.index("/posts/_refresh")
