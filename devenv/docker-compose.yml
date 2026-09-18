@@ -362,6 +362,9 @@ services:
       # stand-in: the endpoint calls the real API, so set it in
       # devenv.local.env to exercise that route; everything else runs without it.
       - GE_ANTHROPIC_API_KEY=${GE_ANTHROPIC_API_KEY:-}
+      # Per-source time limit for feed building (api default 4 s). Raise it in
+      # devenv.local.env when a live search database answers slowly.
+      - GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=${GE_CANDIDATE_GENERATOR_TIMEOUT_SEC:-4}
       - GE_TIMING_LOGS=${GE_DEV_TIMING_LOGS:-1}
     env_file:
       # Written by seed; devctl guarantees it exists before `up`. The ES key
