@@ -52,7 +52,18 @@ echo "GE_DEV_ES_API_KEY=$(gcloud secrets versions access latest --secret=elastic
 echo "GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=15" >> devenv.local.env
 ```
 
-No access to Secret Manager? Ask Juan for the keys and paste them in by hand.
+No access to Secret Manager, or a command failed? Ask Juan for the keys, open
+`devenv.local.env` in an editor, and make sure it ends with these lines (no
+quotes, no spaces around `=`):
+
+```bash
+GE_ANTHROPIC_API_KEY=<the Anthropic key>
+GE_DEV_ES_API_KEY=<the read-only prod search key>
+GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=15
+```
+
+A failed `gcloud` command still leaves a line with nothing after the `=`.
+Delete that line: the last line for a name wins, so an empty one can blank out a good key.
 
 ## 4. Start it
 
