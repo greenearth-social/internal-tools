@@ -15,6 +15,7 @@ Runs AFTER seed-megastream so the post docs exist.
 Runs on a stock python image; stdlib only.
 """
 
+import argparse
 import gzip
 import json
 import os
@@ -22,6 +23,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 
 ES_URL = os.environ["GE_ELASTICSEARCH_URL"].rstrip("/")
@@ -136,7 +138,7 @@ def apply_like_counts() -> None:
         print(f"  ({missing} posts not found — likely skipped by ingest; harmless in dev)")
 
 
-def update_posts_recent() -> None:
+def update_posts_recent(*, ensure_quality: bool = False) -> None:
     """Point the posts_recent and posts_recent_quality aliases at the seeded
     posts indexes. In prod the update-recent-alias cronjob keeps them on the two
     (resp. three) most recent period indexes; dev data is small enough to alias
@@ -145,6 +147,10 @@ def update_posts_recent() -> None:
     posts_recent must exclude posts-quality-*: those indexes match the posts-*
     pattern too, and sweeping them in would surface every quality post twice in
     the api's candidate generators (greenearth-social/ingex#442).
+
+    After the quality backfill, ensure_quality also creates an empty quality
+    index when no posts qualify, so the api can query the alias without a 404.
+    Its weekly name selects the same posts-quality-* template as the backfill.
 
     Resolve concrete names before updating aliases. Elasticsearch treats a
     nonexistent negative wildcard such as -posts-quality-* as a missing index,
@@ -156,6 +162,12 @@ def update_posts_recent() -> None:
     if not post_indexes:
         sys.exit("FATAL: no posts-* indexes found after megastream seed")
 
+    if ensure_quality and not quality_indexes:
+        year, week, _ = datetime.now(UTC).isocalendar()
+        index = f"posts-quality-{year}-w{week:02d}"
+        request("PUT", f"/{index}", b"{}")
+        quality_indexes = [index]
+
     actions = [{"add": {"indices": post_indexes, "alias": "posts_recent"}}]
     if quality_indexes:
         actions.append({"add": {"indices": quality_indexes, "alias": "posts_recent_quality"}})
@@ -164,14 +176,31 @@ def update_posts_recent() -> None:
     print(f"aliases updated ({len(actions)} action(s))")
 
 
-def main() -> None:
-    load_likes()
-    apply_like_counts()
-    update_posts_recent()
-    for alias in ("posts", "likes"):
+def refresh_and_report(*aliases: str) -> None:
+    for alias in aliases:
         request("POST", f"/{alias}/_refresh")
         count = request("GET", f"/{alias}/_count")["count"]
         print(f"{alias}: {count} docs")
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--aliases-only",
+        action="store_true",
+        help="Publish and refresh recent-post aliases after quality backfill",
+    )
+    args = parser.parse_args(argv)
+    if args.aliases_only:
+        update_posts_recent(ensure_quality=True)
+        refresh_and_report("posts_recent", "posts_recent_quality")
+        return
+
+    load_likes()
+    apply_like_counts()
+    update_posts_recent()
+    # Make the updated like counts visible before the quality backfill scans.
+    refresh_and_report("posts", "likes")
 
 
 if __name__ == "__main__":

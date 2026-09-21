@@ -497,7 +497,7 @@ it needs a public tunnel, not just a key.
 
 ## Seeding and time rebasing
 
-`devctl seed` runs three one-shot containers:
+`devctl seed` wipes the previous seed, then runs these one-shot steps:
 
 1. **seed-rebase** — copies fixtures into `.runtime/seed/` with every
    timestamp shifted forward by one uniform delta so the capture window ends
@@ -511,6 +511,14 @@ it needs a public tunnel, not just a key.
 3. **seed-likes** — bulk-loads likes (prod document identity: `_id=at_uri`,
    routing=`author_did`) and applies per-post `like_count`, which the
    popularity generator ranks on.
+4. **seed-quality** — runs ingex's `backfill_quality_index` to copy eligible
+   posts and their tower vectors into `posts-quality-*`. It uses ingex's
+   quality threshold and retention defaults (currently 10 likes and 14 days).
+   The seed then publishes and refreshes `posts_recent_quality`, the alias
+   searched by two-tower retrieval. An empty, mapped quality index keeps this
+   alias queryable even when no seeded posts qualify.
+
+Fixture personas are also written to the Firestore emulator after rebasing.
 
 A seeded window drifts stale as real time moves on: the api's recency windows
 are anchored to *now* (popularity looks back 24h), so from about a day after a
