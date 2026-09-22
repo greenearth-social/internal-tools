@@ -346,6 +346,9 @@ services:
       # mode, where it points somewhere this environment doesn't run.
       - GE_INFERENCE_BASE_URL=${GE_DEV_INFERENCE_URL:-http://inference:8000}
       - GE_INFERENCE_API_KEY=${GE_DEV_INFERENCE_API_KEY:-ge-dev-inference}
+      # Exact normalized average artifact, loaded once by the API on startup.
+      # Local files under the API checkout are visible at /app/<relative path>.
+      - GE_AVERAGE_USER_EMBEDDING_URI=${GE_DEV_AVERAGE_USER_EMBEDDING_URI:-}
       # did:web the api answers as. Local by default; `devctl bsky up` recreates
       # the api with the ngrok tunnel host so bsky's AppView can resolve
       # /.well-known/did.json against it. `bsky down` restores the default.

@@ -442,6 +442,15 @@ container log. Set `GE_DEV_LIVE=inference` in `devenv.local.env` to make a
 choice stick without passing `--live` every time; otherwise a bare `devctl up`
 always returns to all-local.
 
+To enable the two-tower average-embedding prior, set
+`GE_DEV_AVERAGE_USER_EMBEDDING_URI` in `devenv.local.env` to an exact normalized
+version-1 artifact. A file inside the mounted API checkout is available at
+`/app/<relative path>`, for example
+`/app/outputs/average_user_embeddings/average_user_embedding_<run_id>.json`.
+Run `./devctl restart api` after changing it. Local files need no cloud credentials;
+the API loads once at startup, and an unavailable prior falls back to actual user
+embeddings (or no candidates when there is no usable history).
+
 ### What live mode will not do
 
 Nothing here writes to a deployed backend, and a few things enforce that
