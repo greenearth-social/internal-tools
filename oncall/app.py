@@ -383,9 +383,7 @@ def _reviewer_handles(db, submitter_user_id: str) -> list[str]:
 
 def _followup(interaction_token: str, content: str) -> None:
     try:
-        edit_original_interaction_response(
-            DISCORD_APPLICATION_ID, interaction_token, content
-        )
+        edit_original_interaction_response(DISCORD_APPLICATION_ID, interaction_token, content)
     except Exception:
         logger.exception("Failed to send Discord follow-up")
 

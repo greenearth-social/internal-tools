@@ -1,9 +1,7 @@
 from datetime import UTC, datetime
 
 
-def register_user(
-    db, user_id: str, name: str, discord_handle: str, github_handle: str
-) -> None:
+def register_user(db, user_id: str, name: str, discord_handle: str, github_handle: str) -> None:
     db.collection("oncall_users").document(user_id).set(
         {
             "name": name,

@@ -408,9 +408,7 @@ def test_finalize_happy_path_posts_success(mock_db):
         _run(_finalize(mock_db))
 
     mock_pr.assert_called_once()
-    mock_reviewers.assert_called_once_with(
-        os.environ["GE_GITHUB_TOKEN"], 42, ["ian-gh", "max-gh"]
-    )
+    mock_reviewers.assert_called_once_with(os.environ["GE_GITHUB_TOKEN"], 42, ["ian-gh", "max-gh"])
     mock_add.assert_called_once_with(
         os.environ["GE_GITHUB_TOKEN"],
         os.environ["GE_ONCALL_RUNBOOK_PROJECT_ID"],

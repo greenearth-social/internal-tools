@@ -153,9 +153,7 @@ def test_add_pr_to_project_returns_item_id():
 
 
 def test_add_pr_to_project_raises_on_graphql_errors():
-    graphql_resp = _make_response(
-        {"errors": [{"message": "Project not found"}], "data": None}
-    )
+    graphql_resp = _make_response({"errors": [{"message": "Project not found"}], "data": None})
     with patch("github_utils.httpx.post", return_value=graphql_resp):
         try:
             add_pr_to_project("ghp_token", "PVT_bad", "PR_bad")
