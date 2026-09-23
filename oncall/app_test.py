@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from unittest.mock import MagicMock, patch
@@ -314,6 +315,7 @@ RUNBOOK_ADD_PAYLOAD = {
 
 MODAL_SUBMIT_PAYLOAD = {
     "type": 5,
+    "token": "int_token_abc",
     "data": {
         "custom_id": "runbook_add_modal",
         "components": [
@@ -334,18 +336,71 @@ def test_runbook_add_returns_modal(client):
     assert data["data"]["custom_id"] == "runbook_add_modal"
 
 
-def test_modal_submit_creates_pr_and_replies(client):
-    with patch("app.create_runbook_pr", return_value="https://github.com/.../pull/42") as mock_pr:
+def test_modal_submit_returns_deferred_and_schedules_finalize(client):
+    with patch("app._schedule_finalize") as mock_sched:
         response = _post_interaction(client, MODAL_SUBMIT_PAYLOAD)
+
     assert response.status_code == 200
-    content = response.json()["data"]["content"]
-    assert "https://github.com/.../pull/42" in content
+    assert response.json() == {"type": 5}  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+    mock_sched.assert_called_once_with(
+        interaction_token="int_token_abc",
+        policy_name="es-storage-high",
+        title="ES Storage > 80%",
+        content="## Steps\n1. Check.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# _finalize_runbook_pr tests
+# ---------------------------------------------------------------------------
+
+import app as app_module  # noqa: E402
+
+
+def _run(coro):
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def _finalize():
+    return app_module._finalize_runbook_pr(
+        interaction_token="int_token_abc",
+        policy_name="es-storage-high",
+        title="ES Storage > 80%",
+        content="## Steps\n1. Check.",
+    )
+
+
+def test_finalize_happy_path_posts_success():
+    with (
+        patch(
+            "app.create_runbook_pr",
+            return_value="https://github.com/greenearth-social/internal-tools/pull/42",
+        ) as mock_pr,
+        patch("app.edit_original_interaction_response") as mock_edit,
+    ):
+        _run(_finalize())
+
     mock_pr.assert_called_once_with(
         os.environ["GE_GITHUB_TOKEN"],
         "es-storage-high",
         "ES Storage > 80%",
         "## Steps\n1. Check.",
     )
+    mock_edit.assert_called_once()
+    content = mock_edit.call_args.args[2]
+    assert content.startswith("✓ Runbook PR opened:")
+    assert "pull/42" in content
+
+
+def test_finalize_pr_creation_failure_reports_failure():
+    with (
+        patch("app.create_runbook_pr", side_effect=RuntimeError("boom")),
+        patch("app.edit_original_interaction_response") as mock_edit,
+    ):
+        _run(_finalize())
+
+    mock_edit.assert_called_once()
+    assert "Failed to open PR" in mock_edit.call_args.args[2]
 
 
 # ---------------------------------------------------------------------------

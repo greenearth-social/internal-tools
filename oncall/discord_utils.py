@@ -27,3 +27,19 @@ def send_channel_message(channel_id: str, bot_token: str, content: str) -> None:
         json={"content": content},
     )
     response.raise_for_status()
+
+
+def edit_original_interaction_response(
+    application_id: str, interaction_token: str, content: str
+) -> None:
+    """Edit the deferred response for a Discord interaction.
+
+    Used when a handler returns type 5 (deferred) and later needs to post
+    the actual result. The interaction token in the URL is the auth — no
+    Authorization header is required.
+    """
+    response = httpx.patch(
+        f"{DISCORD_API_BASE}/webhooks/{application_id}/{interaction_token}/messages/@original",
+        json={"content": content},
+    )
+    response.raise_for_status()

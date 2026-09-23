@@ -1,10 +1,16 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 
 import google.cloud.firestore as fs
-from discord_utils import format_ts, send_channel_message, verify_discord_request
+from discord_utils import (
+    edit_original_interaction_response,
+    format_ts,
+    send_channel_message,
+    verify_discord_request,
+)
 from fastapi import FastAPI, Request, Response
 from firestore import (
     ack_alert,
@@ -21,6 +27,7 @@ from runbooks import fetch_runbook
 
 logger = logging.getLogger(__name__)
 
+DISCORD_APPLICATION_ID = os.environ["GE_DISCORD_APPLICATION_ID"]
 DISCORD_BOT_TOKEN = os.environ["GE_DISCORD_BOT_TOKEN"]
 DISCORD_ONCALL_CHANNEL_ID = os.environ["GE_DISCORD_ONCALL_CHANNEL_ID"]
 DISCORD_PUBLIC_KEY = os.environ["GE_DISCORD_PUBLIC_KEY"]
@@ -35,6 +42,7 @@ _MODAL_SUBMIT = 5
 # Response types
 _PONG = 1
 _MESSAGE = 4
+_DEFERRED_MESSAGE = 5
 _MODAL = 9
 
 ESCALATION_THRESHOLD_MINUTES = 15
@@ -329,13 +337,42 @@ async def _handle_modal_submit(request: Request, payload: dict) -> dict:
         c["components"][0]["custom_id"]: c["components"][0]["value"]
         for c in payload["data"]["components"]
     }
-    policy_name = fields["policy_name"]
-    title = fields["title"]
-    content = fields["content"]
+    _schedule_finalize(
+        interaction_token=payload["token"],
+        policy_name=fields["policy_name"],
+        title=fields["title"],
+        content=fields["content"],
+    )
+    return {"type": _DEFERRED_MESSAGE}
 
+
+def _schedule_finalize(**kwargs) -> None:
+    """Kick off the background finalize task.
+
+    Wrapped in its own function so tests can patch this instead of
+    wrestling with asyncio.create_task and unawaited coroutines.
+    """
+    asyncio.create_task(_finalize_runbook_pr(**kwargs))
+
+
+def _followup(interaction_token: str, content: str) -> None:
+    try:
+        edit_original_interaction_response(
+            DISCORD_APPLICATION_ID, interaction_token, content
+        )
+    except Exception:
+        logger.exception("Failed to send Discord follow-up")
+
+
+async def _finalize_runbook_pr(
+    interaction_token: str,
+    policy_name: str,
+    title: str,
+    content: str,
+) -> None:
     try:
         pr_url = create_runbook_pr(GITHUB_TOKEN, policy_name, title, content)
-        return _interaction_response(_MESSAGE, f"✓ Runbook PR opened: {pr_url}")
+        _followup(interaction_token, f"✓ Runbook PR opened: {pr_url}")
     except Exception:
         logger.exception("Failed to create runbook PR")
-        return _interaction_response(_MESSAGE, "Failed to open PR — check logs.")
+        _followup(interaction_token, "Failed to open PR — check logs.")
