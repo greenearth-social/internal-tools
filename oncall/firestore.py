@@ -1,15 +1,26 @@
 from datetime import UTC, datetime
 
 
-def register_user(db, user_id: str, name: str, discord_handle: str) -> None:
+def register_user(
+    db, user_id: str, name: str, discord_handle: str, github_handle: str
+) -> None:
     db.collection("oncall_users").document(user_id).set(
-        {"name": name, "discord_handle": discord_handle}
+        {
+            "name": name,
+            "discord_handle": discord_handle,
+            "github_handle": github_handle,
+        }
     )
 
 
 def get_user(db, user_id: str) -> dict | None:
     doc = db.collection("oncall_users").document(user_id).get()
     return doc.to_dict() if doc.exists else None
+
+
+def list_registered_users(db) -> list[dict]:
+    docs = db.collection("oncall_users").get()
+    return [{"user_id": d.id, **d.to_dict()} for d in docs]
 
 
 def get_current_oncall(db) -> dict | None:

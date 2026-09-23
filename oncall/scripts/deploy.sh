@@ -23,7 +23,11 @@ gcloud run deploy "${SERVICE_NAME}" \
   --project "${GE_GCP_PROJECT_ID}" \
   --platform managed \
   --no-allow-unauthenticated \
-  --set-env-vars "GE_FIRESTORE_PROJECT_ID=greenearth-prod,GE_ONCALL_RUNBOOKS_BRANCH=main" \
+  --set-env-vars "GE_FIRESTORE_PROJECT_ID=greenearth-prod,\
+GE_ONCALL_RUNBOOKS_BRANCH=main,\
+GE_ONCALL_RUNBOOK_PROJECT_ID=PVT_kwDODjFtiM4BFpwX,\
+GE_ONCALL_RUNBOOK_STATUS_FIELD_ID=PVTSSF_lADODjFtiM4BFpwXzg27V8w,\
+GE_ONCALL_RUNBOOK_STATUS_INREVIEW_OPTION_ID=260c4616" \
   --update-secrets \
     "GE_DISCORD_APPLICATION_ID=discord-oncall-app-id:latest,\
 GE_DISCORD_PUBLIC_KEY=discord-oncall-public-key:latest,\

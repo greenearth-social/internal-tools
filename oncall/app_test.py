@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 from unittest.mock import MagicMock, patch
@@ -147,7 +146,10 @@ PING_PAYLOAD = {"type": 1}
 
 REGISTER_PAYLOAD = {
     "type": 2,
-    "data": {"name": "register"},
+    "data": {
+        "name": "register",
+        "options": [{"name": "github_handle", "value": "inseon-hwang"}],
+    },
     "member": {"user": {"id": "uid1", "username": "inthree3", "global_name": "Inseon"}},
 }
 
@@ -216,7 +218,8 @@ def test_register_stores_user_and_replies(client, mock_db):
     data = response.json()
     assert data["type"] == 4
     assert "Inseon" in data["data"]["content"]
-    mock_reg.assert_called_once_with(mock_db, "uid1", "Inseon", "inthree3")
+    assert "inseon-hwang" in data["data"]["content"]
+    mock_reg.assert_called_once_with(mock_db, "uid1", "Inseon", "inthree3", "inseon-hwang")
 
 
 def test_oncall_who_no_oncall_set(client, mock_db):
@@ -336,14 +339,16 @@ def test_runbook_add_returns_modal(client):
     assert data["data"]["custom_id"] == "runbook_add_modal"
 
 
-def test_modal_submit_returns_deferred_and_schedules_finalize(client):
+def test_modal_submit_returns_deferred_and_schedules_finalize(client, mock_db):
     with patch("app._schedule_finalize") as mock_sched:
         response = _post_interaction(client, MODAL_SUBMIT_PAYLOAD)
 
     assert response.status_code == 200
     assert response.json() == {"type": 5}  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
     mock_sched.assert_called_once_with(
+        db=mock_db,
         interaction_token="int_token_abc",
+        submitter_user_id="uid1",
         policy_name="es-storage-high",
         title="ES Storage > 80%",
         content="## Steps\n1. Check.",
@@ -354,53 +359,154 @@ def test_modal_submit_returns_deferred_and_schedules_finalize(client):
 # _finalize_runbook_pr tests
 # ---------------------------------------------------------------------------
 
+import asyncio  # noqa: E402
+
 import app as app_module  # noqa: E402
+
+_PR_RESULT = {
+    "html_url": "https://github.com/greenearth-social/internal-tools/pull/42",
+    "node_id": "PR_kwDO_abc",
+    "number": 42,
+}
+
+_USERS = [
+    {
+        "user_id": "uid1",
+        "name": "Inseon",
+        "discord_handle": "inthree3",
+        "github_handle": "inseon-hwang",
+    },
+    {"user_id": "uid2", "name": "Ian", "discord_handle": "raindrift", "github_handle": "ian-gh"},
+    {"user_id": "uid3", "name": "Max", "discord_handle": "maxdisc", "github_handle": "max-gh"},
+]
 
 
 def _run(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
 
 
-def _finalize():
+def _finalize(mock_db, submitter_user_id="uid1"):
     return app_module._finalize_runbook_pr(
+        db=mock_db,
         interaction_token="int_token_abc",
+        submitter_user_id=submitter_user_id,
         policy_name="es-storage-high",
         title="ES Storage > 80%",
         content="## Steps\n1. Check.",
     )
 
 
-def test_finalize_happy_path_posts_success():
+def test_finalize_happy_path_posts_success(mock_db):
     with (
-        patch(
-            "app.create_runbook_pr",
-            return_value="https://github.com/greenearth-social/internal-tools/pull/42",
-        ) as mock_pr,
+        patch("app.create_runbook_pr", return_value=_PR_RESULT) as mock_pr,
+        patch("app.list_registered_users", return_value=_USERS),
+        patch("app.request_pr_reviewers") as mock_reviewers,
+        patch("app.add_pr_to_project", return_value="PVTI_new") as mock_add,
+        patch("app.set_project_item_status") as mock_status,
         patch("app.edit_original_interaction_response") as mock_edit,
     ):
-        _run(_finalize())
+        _run(_finalize(mock_db))
 
-    mock_pr.assert_called_once_with(
+    mock_pr.assert_called_once()
+    mock_reviewers.assert_called_once_with(
+        os.environ["GE_GITHUB_TOKEN"], 42, ["ian-gh", "max-gh"]
+    )
+    mock_add.assert_called_once_with(
         os.environ["GE_GITHUB_TOKEN"],
-        "es-storage-high",
-        "ES Storage > 80%",
-        "## Steps\n1. Check.",
+        os.environ["GE_ONCALL_RUNBOOK_PROJECT_ID"],
+        "PR_kwDO_abc",
+    )
+    mock_status.assert_called_once_with(
+        os.environ["GE_GITHUB_TOKEN"],
+        os.environ["GE_ONCALL_RUNBOOK_PROJECT_ID"],
+        "PVTI_new",
+        os.environ["GE_ONCALL_RUNBOOK_STATUS_FIELD_ID"],
+        os.environ["GE_ONCALL_RUNBOOK_STATUS_INREVIEW_OPTION_ID"],
     )
     mock_edit.assert_called_once()
-    content = mock_edit.call_args.args[2]
-    assert content.startswith("✓ Runbook PR opened:")
-    assert "pull/42" in content
+    followup_content = mock_edit.call_args.args[2]
+    assert followup_content.startswith("✓ Runbook PR opened:")
+    assert _PR_RESULT["html_url"] in followup_content
 
 
-def test_finalize_pr_creation_failure_reports_failure():
+def test_finalize_excludes_submitter_from_reviewers(mock_db):
+    with (
+        patch("app.create_runbook_pr", return_value=_PR_RESULT),
+        patch("app.list_registered_users", return_value=_USERS),
+        patch("app.request_pr_reviewers") as mock_reviewers,
+        patch("app.add_pr_to_project", return_value="PVTI_new"),
+        patch("app.set_project_item_status"),
+        patch("app.edit_original_interaction_response"),
+    ):
+        _run(_finalize(mock_db, submitter_user_id="uid2"))  # Ian submits
+
+    mock_reviewers.assert_called_once_with(
+        os.environ["GE_GITHUB_TOKEN"], 42, ["inseon-hwang", "max-gh"]
+    )
+
+
+def test_finalize_pr_creation_failure_reports_failure(mock_db):
     with (
         patch("app.create_runbook_pr", side_effect=RuntimeError("boom")),
+        patch("app.request_pr_reviewers") as mock_reviewers,
+        patch("app.add_pr_to_project") as mock_add,
         patch("app.edit_original_interaction_response") as mock_edit,
     ):
-        _run(_finalize())
+        _run(_finalize(mock_db))
 
+    mock_reviewers.assert_not_called()
+    mock_add.assert_not_called()
     mock_edit.assert_called_once()
     assert "Failed to open PR" in mock_edit.call_args.args[2]
+
+
+def test_finalize_reviewer_failure_reported_but_pr_still_succeeds(mock_db):
+    with (
+        patch("app.create_runbook_pr", return_value=_PR_RESULT),
+        patch("app.list_registered_users", return_value=_USERS),
+        patch("app.request_pr_reviewers", side_effect=RuntimeError("no perms")),
+        patch("app.add_pr_to_project", return_value="PVTI_new"),
+        patch("app.set_project_item_status"),
+        patch("app.edit_original_interaction_response") as mock_edit,
+    ):
+        _run(_finalize(mock_db))
+
+    content = mock_edit.call_args.args[2]
+    assert _PR_RESULT["html_url"] in content
+    assert "reviewers" in content
+    assert content.startswith("⚠")
+
+
+def test_finalize_project_failure_reported_but_pr_still_succeeds(mock_db):
+    with (
+        patch("app.create_runbook_pr", return_value=_PR_RESULT),
+        patch("app.list_registered_users", return_value=_USERS),
+        patch("app.request_pr_reviewers"),
+        patch("app.add_pr_to_project", side_effect=RuntimeError("GraphQL boom")),
+        patch("app.set_project_item_status"),
+        patch("app.edit_original_interaction_response") as mock_edit,
+    ):
+        _run(_finalize(mock_db))
+
+    content = mock_edit.call_args.args[2]
+    assert _PR_RESULT["html_url"] in content
+    assert "project" in content
+
+
+def test_finalize_no_registered_users_skips_reviewer_request(mock_db):
+    """Solo submitter — reviewer pool empty after filtering out submitter."""
+    with (
+        patch("app.create_runbook_pr", return_value=_PR_RESULT),
+        patch("app.list_registered_users", return_value=[_USERS[0]]),
+        patch("app.request_pr_reviewers") as mock_reviewers,
+        patch("app.add_pr_to_project", return_value="PVTI_new"),
+        patch("app.set_project_item_status"),
+        patch("app.edit_original_interaction_response") as mock_edit,
+    ):
+        _run(_finalize(mock_db))
+
+    mock_reviewers.assert_not_called()
+    assert mock_edit.call_args.args[2].startswith("✓")
 
 
 # ---------------------------------------------------------------------------
