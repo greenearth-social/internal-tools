@@ -3,9 +3,14 @@ set -e
 
 GE_GCP_PROJECT_ID="${GE_GCP_PROJECT_ID:-greenearth-471522}"
 GE_GCP_REGION="${GE_GCP_REGION:-us-east1}"
-GE_ENVIRONMENT="${GE_ENVIRONMENT:-stage}"
 
-SERVICE_NAME="oncall-bot-${GE_ENVIRONMENT}"
+# The oncall bot is a single-instance internal tool. There is no stage
+# environment — secrets (`discord-oncall-*`, `oncall-github-token`) and the
+# Firestore project (`greenearth-prod`) are single-instance, not env-suffixed,
+# so a `-stage` service would just be a second live prod bot pointing at the
+# same state. If real stage isolation is ever needed, that's a bigger change
+# (separate Discord app, env-suffixed secrets, separate Firestore).
+SERVICE_NAME="oncall-bot-prod"
 GIT_SHA=$(git rev-parse --short HEAD)
 
 # Cloud Build's Python buildpack reads requirements.txt, not Pipfile, so
