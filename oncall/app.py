@@ -59,10 +59,12 @@ ESCALATION_THRESHOLD_MINUTES = 15
 
 @asynccontextmanager
 async def lifespan(application):
-    # ADC picks the ambient project (greenearth-471522 on Cloud Run) and the
-    # (default) Firestore database. Local dev routes to the emulator via
-    # GE_FIRESTORE_EMULATOR_HOST regardless of project.
-    application.state.db = fs.Client()
+    # Explicit project + database. Local dev routes to the emulator via
+    # GE_FIRESTORE_EMULATOR_HOST regardless of either value.
+    application.state.db = fs.Client(
+        project=os.environ["GE_FIRESTORE_PROJECT_ID"],
+        database=os.environ["GE_FIRESTORE_DATABASE_ID"],
+    )
     yield
 
 
