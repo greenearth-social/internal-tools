@@ -59,7 +59,12 @@ ESCALATION_THRESHOLD_MINUTES = 15
 
 @asynccontextmanager
 async def lifespan(application):
-    application.state.db = fs.Client(project=os.environ["GE_FIRESTORE_PROJECT_ID"])
+    # Explicit project + database. Local dev routes to the emulator via
+    # GE_FIRESTORE_EMULATOR_HOST regardless of either value.
+    application.state.db = fs.Client(
+        project=os.environ["GE_FIRESTORE_PROJECT_ID"],
+        database=os.environ["GE_FIRESTORE_DATABASE_ID"],
+    )
     yield
 
 
