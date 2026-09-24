@@ -1,0 +1,39 @@
+# Files here are NOT uploaded when the deploy runs `gcloud run deploy --source=.`.
+# Same syntax as .gitignore.
+
+.gcloudignore
+.git
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+
+# Tests (co-located with source in this project)
+*_test.py
+conftest.py
+
+# Environment files
+.env
+.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Pipenv lock — requirements.txt is generated at deploy time from Pipfile.lock,
+# so the lock itself doesn't need to be uploaded.
+Pipfile.lock
+
+# Runbooks are fetched at runtime from raw.githubusercontent.com
+# (see runbooks.py:fetch_runbook), not read from the container filesystem.
+runbooks/
+
+# Deploy tooling — Cloud Build doesn't need the script that invoked it.
+scripts/

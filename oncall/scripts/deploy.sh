@@ -6,24 +6,24 @@ GE_GCP_REGION="${GE_GCP_REGION:-us-east1}"
 GE_ENVIRONMENT="${GE_ENVIRONMENT:-stage}"
 
 SERVICE_NAME="oncall-bot-${GE_ENVIRONMENT}"
-IMAGE="gcr.io/${GE_GCP_PROJECT_ID}/${SERVICE_NAME}"
 GIT_SHA=$(git rev-parse --short HEAD)
 
-echo "[INFO] Building image ${IMAGE}:${GIT_SHA}"
-docker build --build-arg GIT_SHA="${GIT_SHA}" -t "${IMAGE}:${GIT_SHA}" -t "${IMAGE}:latest" .
+# Cloud Build's Python buildpack reads requirements.txt, not Pipfile, so
+# regenerate it from the current Pipfile.lock right before deploy. The file
+# is gitignored — it's a build artifact, not a source of truth.
+echo "[INFO] Generating requirements.txt from Pipfile.lock..."
+pipenv requirements > requirements.txt
 
-echo "[INFO] Pushing image"
-docker push "${IMAGE}:${GIT_SHA}"
-docker push "${IMAGE}:latest"
-
-echo "[INFO] Deploying to Cloud Run"
+echo "[INFO] Deploying ${SERVICE_NAME} from source (git sha: ${GIT_SHA})"
 gcloud run deploy "${SERVICE_NAME}" \
-  --image "${IMAGE}:${GIT_SHA}" \
+  --source=. \
   --region "${GE_GCP_REGION}" \
   --project "${GE_GCP_PROJECT_ID}" \
   --platform managed \
   --no-allow-unauthenticated \
-  --set-env-vars "GE_FIRESTORE_PROJECT_ID=greenearth-prod,\
+  --labels="git-sha=${GIT_SHA}" \
+  --set-env-vars "GE_GIT_SHA=${GIT_SHA},\
+GE_FIRESTORE_PROJECT_ID=greenearth-prod,\
 GE_ONCALL_RUNBOOKS_BRANCH=main,\
 GE_ONCALL_RUNBOOK_PROJECT_ID=PVT_kwDODjFtiM4BFpwX,\
 GE_ONCALL_RUNBOOK_STATUS_FIELD_ID=PVTSSF_lADODjFtiM4BFpwXzg27V8w,\
