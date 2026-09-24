@@ -294,6 +294,15 @@ services:
       - |
         set -e
         pipenv install --dev
+        # UX posts (the SETTINGS pin, survey, logged-out explainer) resolve
+        # from src/app/ux_posts_resolved.json, which is generated and
+        # gitignored, and the api reads it once at import. Refresh it on every
+        # start so it tracks the content in assets/ux_posts/. Public reads, no
+        # credentials. Offline, resolve fails before writing, so an existing
+        # manifest is kept; with none at all the posts render as the
+        # placeholder.
+        pipenv run python scripts/manage_ux_posts.py resolve ||
+          echo "devenv: couldn't resolve UX posts; keeping the existing manifest, if any" >&2
         # --loop asyncio matches prod (Procfile): uvloop has an fd-bookkeeping
         # race with aiohttp under connection churn (uvloop#646/#653) that the
         # api hit during load tests. Keep the two in sync so the dev env can

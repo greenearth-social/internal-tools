@@ -103,9 +103,17 @@ The tell: mock posts don't change after a re-seed.
 
 ## `devctl feed` shows "(not in Elasticsearch)" for an item
 
-A real dangling reference, reported honestly: `your-feed` pins a specific
-post that isn't in the fixture, and a cached feed can outlive a re-seed. Not
-a failure.
+A real dangling reference, usually a cached feed that outlived a re-seed. Not
+a failure. (UX posts — the pin, survey and logged-out posts — are recognized
+and shown as `[UX post: <name>]`, never as missing.)
+
+## A feed shows the placeholder post instead of the pin or survey
+
+The api couldn't resolve that UX post. Either the content in
+`api/assets/ux_posts/` is new and not published yet (expected until it
+deploys), or the api container couldn't reach Bluesky at startup and there's
+no manifest from an earlier start: `devctl logs api` shows
+`couldn't resolve UX posts`. Fix the network and `devctl restart api`.
 
 ## A named instance refuses to seed (or errors about the owner)
 

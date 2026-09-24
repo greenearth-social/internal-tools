@@ -857,10 +857,15 @@ instance name, same as passing `--name`), `GE_DEV_API_RELOAD=1` /
   `perspective-stub` answers it locally with deterministic hash-derived
   scores — stable per post, but not content analysis. Use
   `devctl up --live perspective` to score against the real API.
-- Feeds can reference posts outside the fixture — `your-feed` pins a specific
-  post, and a cached feed can outlive a re-seed — so `devctl feed` may show
-  "(not in Elasticsearch)" for an item. That's the viewer reporting a real
-  dangling reference, not a failure.
+- **UX posts are real Bluesky posts, not fixture data.** The api injects a
+  SETTINGS pin, a survey post and a logged-out explainer into feeds; they live
+  on `notify.mysky.social`, not in any index (prod's included). The api
+  container resolves their URIs on every start (`manage_ux_posts.py resolve`,
+  public reads), and `devctl feed` shows them as `[UX post: <name>]` with their
+  content from `api/assets/ux_posts/`. Offline with no manifest yet, they
+  render as the placeholder post.
+- `devctl feed` shows "(not in Elasticsearch)" only for a real dangling
+  reference — typically a cached feed that outlived a re-seed. Not a failure.
 - **Follow-driven generators work, but yield depends on the sample.**
   `followed_users` and `network_likes` resolve the requesting user's follows
   from the live AT Protocol network, so they need a persona whose DID is real
