@@ -1,10 +1,16 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 
 import google.cloud.firestore as fs
-from discord_utils import format_ts, send_channel_message, verify_discord_request
+from discord_utils import (
+    edit_original_interaction_response,
+    format_ts,
+    send_channel_message,
+    verify_discord_request,
+)
 from fastapi import FastAPI, Request, Response
 from firestore import (
     ack_alert,
@@ -12,20 +18,30 @@ from firestore import (
     get_current_oncall,
     get_stale_alerts,
     get_user,
+    list_registered_users,
     register_user,
     resolve_alert,
     set_current_oncall,
 )
-from github_utils import create_runbook_pr
+from github_utils import (
+    add_pr_to_project,
+    create_runbook_pr,
+    request_pr_reviewers,
+    set_project_item_status,
+)
 from runbooks import fetch_runbook
 
 logger = logging.getLogger(__name__)
 
+DISCORD_APPLICATION_ID = os.environ["GE_DISCORD_APPLICATION_ID"]
 DISCORD_BOT_TOKEN = os.environ["GE_DISCORD_BOT_TOKEN"]
 DISCORD_ONCALL_CHANNEL_ID = os.environ["GE_DISCORD_ONCALL_CHANNEL_ID"]
 DISCORD_PUBLIC_KEY = os.environ["GE_DISCORD_PUBLIC_KEY"]
 RUNBOOKS_BRANCH = os.environ.get("GE_ONCALL_RUNBOOKS_BRANCH", "main")
 GITHUB_TOKEN = os.environ["GE_GITHUB_TOKEN"]
+RUNBOOK_PROJECT_ID = os.environ["GE_ONCALL_RUNBOOK_PROJECT_ID"]
+RUNBOOK_STATUS_FIELD_ID = os.environ["GE_ONCALL_RUNBOOK_STATUS_FIELD_ID"]
+RUNBOOK_STATUS_INREVIEW_OPTION_ID = os.environ["GE_ONCALL_RUNBOOK_STATUS_INREVIEW_OPTION_ID"]
 
 # Interaction types
 _PING = 1
@@ -35,6 +51,7 @@ _MODAL_SUBMIT = 5
 # Response types
 _PONG = 1
 _MESSAGE = 4
+_DEFERRED_MESSAGE = 5
 _MODAL = 9
 
 ESCALATION_THRESHOLD_MINUTES = 15
@@ -200,9 +217,12 @@ async def _handle_command(request: Request, payload: dict) -> dict:
     display_name = user.get("global_name") or username
 
     if name == "register":
-        register_user(db, user_id, display_name, username)
+        opts = {o["name"]: o["value"] for o in payload["data"].get("options", [])}
+        github_handle = opts["github_handle"]
+        register_user(db, user_id, display_name, username, github_handle)
         return _interaction_response(
-            _MESSAGE, f"Registered **{display_name}** in the oncall system."
+            _MESSAGE,
+            f"Registered **{display_name}** (GitHub: `{github_handle}`) in the oncall system.",
         )
 
     if name == "oncall":
@@ -329,13 +349,90 @@ async def _handle_modal_submit(request: Request, payload: dict) -> dict:
         c["components"][0]["custom_id"]: c["components"][0]["value"]
         for c in payload["data"]["components"]
     }
-    policy_name = fields["policy_name"]
-    title = fields["title"]
-    content = fields["content"]
+    submitter = payload.get("member", {}).get("user") or payload.get("user", {})
+    _schedule_finalize(
+        db=request.app.state.db,
+        interaction_token=payload["token"],
+        submitter_user_id=submitter.get("id", ""),
+        policy_name=fields["policy_name"],
+        title=fields["title"],
+        content=fields["content"],
+    )
+    return {"type": _DEFERRED_MESSAGE}
 
+
+def _schedule_finalize(**kwargs) -> None:
+    """Kick off the background finalize task.
+
+    Wrapped in its own function so tests can patch this instead of
+    wrestling with asyncio.create_task and unawaited coroutines.
+    """
+    asyncio.create_task(_finalize_runbook_pr(**kwargs))
+
+
+def _reviewer_handles(db, submitter_user_id: str) -> list[str]:
+    handles = []
+    for user in list_registered_users(db):
+        if user["user_id"] == submitter_user_id:
+            continue
+        handle = user.get("github_handle")
+        if handle:
+            handles.append(handle)
+    return handles
+
+
+def _followup(interaction_token: str, content: str) -> None:
     try:
-        pr_url = create_runbook_pr(GITHUB_TOKEN, policy_name, title, content)
-        return _interaction_response(_MESSAGE, f"✓ Runbook PR opened: {pr_url}")
+        edit_original_interaction_response(DISCORD_APPLICATION_ID, interaction_token, content)
+    except Exception:
+        logger.exception("Failed to send Discord follow-up")
+
+
+async def _finalize_runbook_pr(
+    db,
+    interaction_token: str,
+    submitter_user_id: str,
+    policy_name: str,
+    title: str,
+    content: str,
+) -> None:
+    try:
+        pr = create_runbook_pr(GITHUB_TOKEN, policy_name, title, content)
     except Exception:
         logger.exception("Failed to create runbook PR")
-        return _interaction_response(_MESSAGE, "Failed to open PR — check logs.")
+        _followup(interaction_token, "Failed to open PR — check logs.")
+        return
+
+    pr_url = pr["html_url"]
+    warnings: list[str] = []
+
+    reviewers = _reviewer_handles(db, submitter_user_id)
+    if reviewers:
+        try:
+            request_pr_reviewers(GITHUB_TOKEN, pr["number"], reviewers)
+        except Exception:
+            logger.exception("Failed to request reviewers for PR %s", pr_url)
+            warnings.append("couldn't attach reviewers")
+
+    try:
+        item_id = add_pr_to_project(GITHUB_TOKEN, RUNBOOK_PROJECT_ID, pr["node_id"])
+        set_project_item_status(
+            GITHUB_TOKEN,
+            RUNBOOK_PROJECT_ID,
+            item_id,
+            RUNBOOK_STATUS_FIELD_ID,
+            RUNBOOK_STATUS_INREVIEW_OPTION_ID,
+        )
+    except Exception:
+        logger.exception("Failed to attach PR %s to project", pr_url)
+        warnings.append("couldn't attach to project")
+
+    if warnings:
+        message = (
+            f"⚠ Runbook PR opened: {pr_url} — but "
+            + " and ".join(warnings)
+            + ". Please fix manually."
+        )
+    else:
+        message = f"✓ Runbook PR opened: {pr_url}"
+    _followup(interaction_token, message)

@@ -7,6 +7,7 @@ from firestore import (
     get_current_oncall,
     get_stale_alerts,
     get_user,
+    list_registered_users,
     register_user,
     resolve_alert,
     set_current_oncall,
@@ -26,16 +27,56 @@ def _mock_db_with_doc(data: dict | None):
 
 def test_register_user_sets_document():
     db = MagicMock()
-    register_user(db, "user123", "Inseon", "inthree3")
+    register_user(db, "user123", "Inseon", "inthree3", "inseon-hwang")
     db.collection("oncall_users").document("user123").set.assert_called_once_with(
-        {"name": "Inseon", "discord_handle": "inthree3"}
+        {
+            "name": "Inseon",
+            "discord_handle": "inthree3",
+            "github_handle": "inseon-hwang",
+        }
     )
 
 
 def test_get_user_returns_dict_when_exists():
-    db = _mock_db_with_doc({"name": "Inseon", "discord_handle": "inthree3"})
+    db = _mock_db_with_doc(
+        {"name": "Inseon", "discord_handle": "inthree3", "github_handle": "inseon-hwang"}
+    )
     result = get_user(db, "user123")
-    assert result == {"name": "Inseon", "discord_handle": "inthree3"}
+    assert result == {
+        "name": "Inseon",
+        "discord_handle": "inthree3",
+        "github_handle": "inseon-hwang",
+    }
+
+
+def test_list_registered_users_returns_all_docs():
+    db = MagicMock()
+    doc_a = MagicMock()
+    doc_a.id = "uid-a"
+    doc_a.to_dict.return_value = {
+        "name": "Ian",
+        "discord_handle": "raindrift",
+        "github_handle": "ian-gh",
+    }
+    doc_b = MagicMock()
+    doc_b.id = "uid-b"
+    doc_b.to_dict.return_value = {
+        "name": "Max",
+        "discord_handle": "maxdisc",
+        "github_handle": "max-gh",
+    }
+    db.collection.return_value.get.return_value = [doc_a, doc_b]
+
+    users = list_registered_users(db)
+    assert users == [
+        {
+            "user_id": "uid-a",
+            "name": "Ian",
+            "discord_handle": "raindrift",
+            "github_handle": "ian-gh",
+        },
+        {"user_id": "uid-b", "name": "Max", "discord_handle": "maxdisc", "github_handle": "max-gh"},
+    ]
 
 
 def test_get_user_returns_none_when_missing():

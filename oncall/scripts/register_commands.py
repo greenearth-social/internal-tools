@@ -23,6 +23,14 @@ COMMANDS = [
         "name": "register",
         "description": "Link your Discord account to the oncall system",
         "type": 1,
+        "options": [
+            {
+                "name": "github_handle",
+                "description": "Your GitHub username (used for runbook PR reviewer requests)",
+                "type": 3,
+                "required": True,
+            },
+        ],
     },
     {
         "name": "oncall",

@@ -12,6 +12,9 @@ os.environ.setdefault("GE_DISCORD_ONCALL_CHANNEL_ID", "test_channel")
 os.environ.setdefault("GE_FIRESTORE_PROJECT_ID", "test-project")
 os.environ.setdefault("GE_GITHUB_TOKEN", "test_github_token")
 os.environ.setdefault("GE_ONCALL_RUNBOOKS_BRANCH", "main")
+os.environ.setdefault("GE_ONCALL_RUNBOOK_PROJECT_ID", "PVT_test_project")
+os.environ.setdefault("GE_ONCALL_RUNBOOK_STATUS_FIELD_ID", "PVTSSF_test_status")
+os.environ.setdefault("GE_ONCALL_RUNBOOK_STATUS_INREVIEW_OPTION_ID", "test_option")
 
 from app import app
 
