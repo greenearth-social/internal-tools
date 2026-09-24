@@ -25,7 +25,6 @@ gcloud run deploy "${SERVICE_NAME}" \
   --no-allow-unauthenticated \
   --labels="git-sha=${GIT_SHA}" \
   --set-env-vars "GE_GIT_SHA=${GIT_SHA},\
-GE_FIRESTORE_PROJECT_ID=greenearth-prod,\
 GE_ONCALL_RUNBOOKS_BRANCH=main,\
 GE_ONCALL_RUNBOOK_PROJECT_ID=PVT_kwDODjFtiM4BFpwX,\
 GE_ONCALL_RUNBOOK_STATUS_FIELD_ID=PVTSSF_lADODjFtiM4BFpwXzg27V8w,\
