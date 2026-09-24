@@ -359,10 +359,6 @@ services:
       # the api with the ngrok tunnel host so bsky's AppView can resolve
       # /.well-known/did.json against it. `bsky down` restores the default.
       - GE_FEED_GENERATOR_DID=${GE_DEV_FEED_GENERATOR_DID:-did:web:localhost}
-      # UX post URIs come from the manifest the command above resolves. This
-      # overrides individual ones (a JSON object of name -> URI);
-      # PIPENV_DONT_LOAD_ENV=1 means api/.env can't do it here.
-      - GE_UX_POST_URIS=${GE_DEV_UX_POST_URIS:-}
       - GE_METRICS_EXPORT_INTERVAL_SEC=86400
       # The "your-feed" pipeline runs the `perspective` ranker, which calls
       # Google's Perspective API and hard-fails without a key. Default to the
