@@ -6,10 +6,7 @@ GE_GCP_REGION="${GE_GCP_REGION:-us-east1}"
 
 # The oncall bot is a single-instance internal tool. There is no stage
 # environment — secrets (`discord-oncall-*`, `oncall-github-token`) and the
-# Firestore project (`greenearth-prod`) are single-instance, not env-suffixed,
-# so a `-stage` service would just be a second live prod bot pointing at the
-# same state. If real stage isolation is ever needed, that's a bigger change
-# (separate Discord app, env-suffixed secrets, separate Firestore).
+# Firestore project (`greenearth-prod`) are single-instance
 SERVICE_NAME="oncall-bot-prod"
 GIT_SHA=$(git rev-parse --short HEAD)
 
