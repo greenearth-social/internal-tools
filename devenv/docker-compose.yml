@@ -371,6 +371,10 @@ services:
       # stand-in: the endpoint calls the real API, so set it in
       # devenv.local.env to exercise that route; everything else runs without it.
       - GE_ANTHROPIC_API_KEY=${GE_ANTHROPIC_API_KEY:-}
+      # Opens the prompt-fit endpoint to every local user; the devenv has no
+      # PostHog, so without this the llm-cg flag gate returns 403 for everyone.
+      # The api refuses to start with it set in stage/prod.
+      - GE_LLM_CG_OPEN=${GE_LLM_CG_OPEN:-true}
       # Per-source time limit for feed building (api default 4 s). Raise it in
       # devenv.local.env when a live search database answers slowly.
       - GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=${GE_CANDIDATE_GENERATOR_TIMEOUT_SEC:-4}
