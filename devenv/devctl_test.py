@@ -538,6 +538,41 @@ def test_compose_tunnels_into_the_gateway_and_starts_neither_by_default():
     assert "ports" not in gateway
 
 
+def run_ensure_session_key(tmp_path: Path, **env: str) -> subprocess.CompletedProcess:
+    script = "\n".join([shell_function("bsky_ensure_session_key"), "bsky_ensure_session_key"])
+    return subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "BSKY_OAUTH_DIR": str(tmp_path), **env},
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_session_key_is_generated_when_missing_even_if_other_keys_exist(tmp_path):
+    (tmp_path / "state-key").write_text("a" * 64)
+    result = run_ensure_session_key(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert re.fullmatch(r"[0-9a-f]{64}", (tmp_path / "session-key").read_text().strip())
+
+
+def test_existing_session_key_is_never_rotated(tmp_path):
+    (tmp_path / "session-key").write_text("b" * 64)
+    assert run_ensure_session_key(tmp_path).returncode == 0
+    assert (tmp_path / "session-key").read_text() == "b" * 64
+
+
+def test_compose_forwards_the_session_key_to_firebase():
+    compose = yaml.safe_load(COMPOSE_FILE.read_text())
+    env = compose["services"]["firebase"]["environment"]
+    assert any(e.startswith("OAUTH_SESSION_ENCRYPTION_KEY=") for e in env)
+
+
+def test_compose_forwards_the_oauth_revoke_url_to_api():
+    compose = yaml.safe_load(COMPOSE_FILE.read_text())
+    env = compose["services"]["api"]["environment"]
+    assert any(e.startswith("GE_OAUTH_REVOKE_URL=") for e in env)
+
+
 @pytest.mark.parametrize("environment_name", ["stage", "prod"])
 def test_tunnel_selects_and_pins_the_environment_cluster(tmp_path, environment_name):
     result = run_tunnel(tmp_path, environment_name)

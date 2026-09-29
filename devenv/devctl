@@ -1377,11 +1377,25 @@ bsky_up() {
   bsky_print_summary "$handle" "$host" "$did" "$oauth_ok"
 }
 
+# Generate (once) the AES key that encrypts stored OAuth grants. Independent of
+# the other keys' early return so already-bootstrapped environments get one
+# too. Never rotated.
+bsky_ensure_session_key() {
+  mkdir -p "$BSKY_OAUTH_DIR"
+  [[ -s "$BSKY_OAUTH_DIR/session-key" ]] && return 0
+  if command -v openssl >/dev/null; then
+    openssl rand -hex 32 >"$BSKY_OAUTH_DIR/session-key"
+  else
+    python3 -c 'import secrets; print(secrets.token_hex(32))' >"$BSKY_OAUTH_DIR/session-key"
+  fi
+}
+
 # Generate (once) and cache a dev ES256 keypair + AES state key, unless the
 # developer already exported an explicit BLUESKY_OAUTH_* set (an escape hatch
 # for externally-managed keys). Returns non-zero — caller warns — if the keys
 # can't be produced, e.g. the firebase container isn't up.
 bsky_ensure_oauth_keys() {
+  [[ -n "${OAUTH_SESSION_ENCRYPTION_KEY:-}" ]] || bsky_ensure_session_key
   if [[ -n "${BLUESKY_OAUTH_CLIENT_KID:-}" && -n "${BLUESKY_OAUTH_CLIENT_PRIVATE_KEY:-}" &&
     -n "${BLUESKY_OAUTH_PUBLIC_JWKS:-}" && -n "${OAUTH_STATE_ENCRYPTION_KEY:-}" ]]; then
     return 0
@@ -1419,14 +1433,16 @@ base = pathlib.Path(sys.argv[1])
   return 0
 }
 
-# Export the BLUESKY_OAUTH_* / OAUTH_STATE_ENCRYPTION_KEY vars for a firebase
-# restart, from an explicit env set if present, else the cached dev keypair.
+# Export the BLUESKY_OAUTH_* / OAUTH_STATE_ENCRYPTION_KEY /
+# OAUTH_SESSION_ENCRYPTION_KEY vars for a firebase restart, from an explicit
+# env set if present, else the cached dev keypair.
 bsky_export_oauth_env() {
   [[ -z "${BLUESKY_OAUTH_CLIENT_KID:-}" ]] || return 0
   export BLUESKY_OAUTH_CLIENT_KID="$(cat "$BSKY_OAUTH_DIR/kid")"
   export BLUESKY_OAUTH_CLIENT_PRIVATE_KEY="$(cat "$BSKY_OAUTH_DIR/private-key.json")"
   export BLUESKY_OAUTH_PUBLIC_JWKS="$(cat "$BSKY_OAUTH_DIR/public-jwks.json")"
   export OAUTH_STATE_ENCRYPTION_KEY="$(cat "$BSKY_OAUTH_DIR/state-key")"
+  export OAUTH_SESSION_ENCRYPTION_KEY="${OAUTH_SESSION_ENCRYPTION_KEY:-$(cat "$BSKY_OAUTH_DIR/session-key")}"
 }
 
 # True when the running firebase already has the given APP_ORIGIN and client kid
