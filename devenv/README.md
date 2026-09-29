@@ -665,9 +665,9 @@ The api container reaches the emulator's `oauthRevoke` function the same way
 defaulted in `docker-compose.yml` to
 `http://firebase:15001/${GE_DEV_FIREBASE_PROJECT:-greenearth-471522}/us-central1/oauthRevoke`.
 Override it in `devenv.local.env` only to point at a different function
-variant or project/region. Until the `oauthRevoke` function itself ships
-(frontend PR 5 in the api#519 stack), the api maps the connection failure to
-a `failed` outcome.
+variant or project/region. If the functions emulator has no `oauthRevoke`
+(an older frontend checkout), the api maps the connection failure to a
+`failed` outcome.
 
 ### Seeing real data in the transparency UI
 

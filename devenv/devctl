@@ -1435,26 +1435,37 @@ base = pathlib.Path(sys.argv[1])
 
 # Export the BLUESKY_OAUTH_* / OAUTH_STATE_ENCRYPTION_KEY /
 # OAUTH_SESSION_ENCRYPTION_KEY vars for a firebase restart, from an explicit
-# env set if present, else the cached dev keypair.
+# env set if present, else the cached dev keypair. The session key is exported
+# first because it is generated even when the client keys are explicit.
 bsky_export_oauth_env() {
+  export OAUTH_SESSION_ENCRYPTION_KEY="${OAUTH_SESSION_ENCRYPTION_KEY:-$(cat "$BSKY_OAUTH_DIR/session-key")}"
   [[ -z "${BLUESKY_OAUTH_CLIENT_KID:-}" ]] || return 0
   export BLUESKY_OAUTH_CLIENT_KID="$(cat "$BSKY_OAUTH_DIR/kid")"
   export BLUESKY_OAUTH_CLIENT_PRIVATE_KEY="$(cat "$BSKY_OAUTH_DIR/private-key.json")"
   export BLUESKY_OAUTH_PUBLIC_JWKS="$(cat "$BSKY_OAUTH_DIR/public-jwks.json")"
   export OAUTH_STATE_ENCRYPTION_KEY="$(cat "$BSKY_OAUTH_DIR/state-key")"
-  export OAUTH_SESSION_ENCRYPTION_KEY="${OAUTH_SESSION_ENCRYPTION_KEY:-$(cat "$BSKY_OAUTH_DIR/session-key")}"
 }
 
-# True when the running firebase already has the given APP_ORIGIN and client kid
-# loaded — i.e. its functions are already configured for this tunnel, so it can
-# be reused rather than recreated (which would wipe the emulator's data).
+# True when the running firebase already has the given APP_ORIGIN, client kid
+# and the exported OAUTH_SESSION_ENCRYPTION_KEY loaded — i.e. its functions are
+# already configured for this tunnel, so it can be reused rather than recreated
+# (which would wipe the emulator's data). A container started before the
+# session key existed must be recreated, or login fails closed. The key is
+# compared by sha256 on each side, so it never reaches output or argv.
 bsky_firebase_has_env() {
-  local want_origin="$1" want_kid="$2" cur_origin cur_kid
-  [[ -n "$want_kid" ]] || return 1
+  local want_origin="$1" want_kid="$2" cur_origin cur_kid cur_key_hash want_key_hash
+  [[ -n "$want_kid" && -n "${OAUTH_SESSION_ENCRYPTION_KEY:-}" ]] || return 1
   service_running firebase || return 1
   cur_origin="$(compose exec -T firebase printenv APP_ORIGIN 2>/dev/null || true)"
   cur_kid="$(compose exec -T firebase printenv BLUESKY_OAUTH_CLIENT_KID 2>/dev/null || true)"
-  [[ "$cur_origin" == "$want_origin" && "$cur_kid" == "$want_kid" ]]
+  cur_key_hash="$(compose exec -T firebase node -e '
+const key = process.env.OAUTH_SESSION_ENCRYPTION_KEY || "";
+if (key) process.stdout.write(require("crypto").createHash("sha256").update(key).digest("hex"));
+' 2>/dev/null || true)"
+  want_key_hash="$(printf '%s' "$OAUTH_SESSION_ENCRYPTION_KEY" |
+    python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest(), end="")')"
+  [[ "$cur_origin" == "$want_origin" && "$cur_kid" == "$want_kid" &&
+    -n "$cur_key_hash" && "$cur_key_hash" == "$want_key_hash" ]]
 }
 
 # Recreate the frontend (and, only when needed, firebase) with the tunnel as the

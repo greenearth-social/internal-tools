@@ -584,6 +584,121 @@ def test_compose_points_the_firebase_functions_at_the_apis_firestore_database():
     assert "GE_FIRESTORE_DATABASE=(default)" in env
 
 
+SESSION_KEY = "c" * 64
+
+
+def export_oauth_env(tmp_path: Path, **env: str) -> dict[str, str]:
+    for name, value in {
+        "kid": "cached-kid",
+        "private-key.json": "{}",
+        "public-jwks.json": "{}",
+        "state-key": "d" * 64,
+        "session-key": SESSION_KEY,
+    }.items():
+        (tmp_path / name).write_text(value)
+    script = "\n".join(
+        [
+            shell_function("bsky_export_oauth_env"),
+            "bsky_export_oauth_env",
+            'printf "%s\\n" "$BLUESKY_OAUTH_CLIENT_KID" "${OAUTH_SESSION_ENCRYPTION_KEY:-}"',
+        ]
+    )
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("BLUESKY_", "OAUTH_"))}
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={**base, "BSKY_OAUTH_DIR": str(tmp_path), **env},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    kid, session_key = result.stdout.splitlines()
+    return {"kid": kid, "session_key": session_key}
+
+
+def test_export_oauth_env_exports_the_session_key_even_with_an_explicit_client_kid(tmp_path):
+    exported = export_oauth_env(tmp_path, BLUESKY_OAUTH_CLIENT_KID="explicit-kid")
+    assert exported == {"kid": "explicit-kid", "session_key": SESSION_KEY}
+
+
+def test_export_oauth_env_keeps_an_explicit_session_key(tmp_path):
+    exported = export_oauth_env(tmp_path, OAUTH_SESSION_ENCRYPTION_KEY="e" * 64)
+    assert exported == {"kid": "cached-kid", "session_key": "e" * 64}
+
+
+def firebase_has_env(container_env: dict[str, str], **env: str) -> subprocess.CompletedProcess:
+    """Run bsky_firebase_has_env against a fake firebase container.
+
+    The fake ``compose exec -T firebase CMD...`` runs CMD on the host with
+    only ``container_env`` set, so the production printenv/node probes run for
+    real against what the "container" was started with.
+    """
+    script = "\n".join(
+        [
+            "service_running() { [[ $1 == firebase ]]; }",
+            'compose() { shift 3; env -i PATH="$PATH" $TEST_CONTAINER_ENV "$@"; }',
+            shell_function("bsky_firebase_has_env"),
+            'bsky_firebase_has_env "$1" "$2"',
+        ]
+    )
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("BLUESKY_", "OAUTH_"))}
+    return subprocess.run(
+        ["bash", "-s", "--", "https://tunnel.test", "kid-1"],
+        input=script,
+        env={
+            **base,
+            "TEST_CONTAINER_ENV": " ".join(f"{k}={v}" for k, v in container_env.items()),
+            **env,
+        },
+        capture_output=True,
+        text=True,
+    )
+
+
+MATCHING_CONTAINER = {
+    "APP_ORIGIN": "https://tunnel.test",
+    "BLUESKY_OAUTH_CLIENT_KID": "kid-1",
+    "OAUTH_SESSION_ENCRYPTION_KEY": SESSION_KEY,
+}
+
+needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+
+
+@needs_node
+def test_firebase_is_reused_when_origin_kid_and_session_key_all_match():
+    result = firebase_has_env(MATCHING_CONTAINER, OAUTH_SESSION_ENCRYPTION_KEY=SESSION_KEY)
+    assert result.returncode == 0, result.stderr
+    assert SESSION_KEY not in result.stdout + result.stderr
+
+
+@needs_node
+@pytest.mark.parametrize(
+    "container_key",
+    [None, "", "f" * 64],
+    ids=["started-before-session-keys", "empty", "different-key"],
+)
+def test_firebase_is_recreated_when_its_session_key_is_missing_or_different(container_key):
+    container = {k: v for k, v in MATCHING_CONTAINER.items() if k != "OAUTH_SESSION_ENCRYPTION_KEY"}
+    if container_key is not None:
+        container["OAUTH_SESSION_ENCRYPTION_KEY"] = container_key
+    result = firebase_has_env(container, OAUTH_SESSION_ENCRYPTION_KEY=SESSION_KEY)
+    assert result.returncode == 1
+    assert SESSION_KEY not in result.stdout + result.stderr
+
+
+@needs_node
+def test_firebase_is_recreated_when_no_session_key_is_exported():
+    assert firebase_has_env(MATCHING_CONTAINER).returncode == 1
+
+
+@needs_node
+def test_firebase_reuse_check_still_compares_origin_and_kid():
+    other_origin = {**MATCHING_CONTAINER, "APP_ORIGIN": "https://other.test"}
+    other_kid = {**MATCHING_CONTAINER, "BLUESKY_OAUTH_CLIENT_KID": "kid-2"}
+    for container in (other_origin, other_kid):
+        result = firebase_has_env(container, OAUTH_SESSION_ENCRYPTION_KEY=SESSION_KEY)
+        assert result.returncode == 1
+
+
 @pytest.mark.parametrize("environment_name", ["stage", "prod"])
 def test_tunnel_selects_and_pins_the_environment_cluster(tmp_path, environment_name):
     result = run_tunnel(tmp_path, environment_name)
