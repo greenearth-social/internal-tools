@@ -573,6 +573,17 @@ def test_compose_forwards_the_oauth_revoke_url_to_api():
     assert any(e.startswith("GE_OAUTH_REVOKE_URL=") for e in env)
 
 
+def test_compose_points_the_firebase_functions_at_the_apis_firestore_database():
+    # The functions choose their Firestore database from GE_FIRESTORE_DATABASE,
+    # else `greenearth-prod` when the prod-named OAUTH_SESSION_ENCRYPTION_KEY is
+    # bound (which devenv always does) — while the api reads GE_FIRESTORE_DATABASE
+    # else its own code default, "(default)". Without this, functions and api
+    # write/read different databases and a saved grant is invisible to the api.
+    compose = yaml.safe_load(COMPOSE_FILE.read_text())
+    env = compose["services"]["firebase"]["environment"]
+    assert "GE_FIRESTORE_DATABASE=(default)" in env
+
+
 @pytest.mark.parametrize("environment_name", ["stage", "prod"])
 def test_tunnel_selects_and_pins_the_environment_cluster(tmp_path, environment_name):
     result = run_tunnel(tmp_path, environment_name)

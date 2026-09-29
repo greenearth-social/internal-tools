@@ -103,6 +103,15 @@ services:
       # Encrypts stored OAuth grants (refresh tokens) — devctl generates and
       # exports this once, unrotated, from $BSKY_OAUTH_DIR/session-key.
       - OAUTH_SESSION_ENCRYPTION_KEY=${OAUTH_SESSION_ENCRYPTION_KEY:-}
+      # The functions pick a Firestore database from this, else
+      # `greenearth-prod` when the prod-named OAUTH_SESSION_ENCRYPTION_KEY is
+      # bound — which devenv always does. The api service below sets no
+      # GE_FIRESTORE_DATABASE of its own, so it reads its code default,
+      # "(default)" (api/src/app/lib/firestore.py); pin the functions to that
+      # same literal so a saved grant is where the api's revoke/delete_user
+      # flow (PR 6/7) actually looks. If the api ever gets an explicit
+      # GE_FIRESTORE_DATABASE here too, change both to one shared variable.
+      - GE_FIRESTORE_DATABASE=(default)
     ports:
       - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_FIRESTORE:-8080}:18080"
       - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_FIREBASE_AUTH:-9099}:19099"
