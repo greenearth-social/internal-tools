@@ -100,6 +100,18 @@ services:
       - BLUESKY_OAUTH_CLIENT_PRIVATE_KEY_STAGE=${BLUESKY_OAUTH_CLIENT_PRIVATE_KEY_STAGE:-}
       - BLUESKY_OAUTH_PUBLIC_JWKS=${BLUESKY_OAUTH_PUBLIC_JWKS:-}
       - OAUTH_STATE_ENCRYPTION_KEY=${OAUTH_STATE_ENCRYPTION_KEY:-}
+      # Encrypts stored OAuth grants (refresh tokens) — devctl generates and
+      # exports this once, unrotated, from $BSKY_OAUTH_DIR/session-key.
+      - OAUTH_SESSION_ENCRYPTION_KEY=${OAUTH_SESSION_ENCRYPTION_KEY:-}
+      # The functions pick a Firestore database from this, else
+      # `greenearth-prod` when the prod-named OAUTH_SESSION_ENCRYPTION_KEY is
+      # bound — which devenv always does. The api service below sets no
+      # GE_FIRESTORE_DATABASE of its own, so it reads its code default,
+      # "(default)" (api/src/app/lib/firestore.py); pin the functions to that
+      # same literal so a saved grant is where the api's revoke/delete_user
+      # flow (PR 6/7) actually looks. If the api ever gets an explicit
+      # GE_FIRESTORE_DATABASE here too, change both to one shared variable.
+      - GE_FIRESTORE_DATABASE=(default)
     ports:
       - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_FIRESTORE:-8080}:18080"
       - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_FIREBASE_AUTH:-9099}:19099"
@@ -382,6 +394,14 @@ services:
       # devenv.local.env when a live search database answers slowly.
       - GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=${GE_CANDIDATE_GENERATOR_TIMEOUT_SEC:-4}
       - GE_TIMING_LOGS=${GE_DEV_TIMING_LOGS:-1}
+      # POST /api/oauth/revoke calls the functions emulator's oauthRevoke
+      # function directly (bypassing Hosting rewrites, same as dev-auth's
+      # upstream) rather than through Hosting, since /api/** never routes back
+      # into Hosting. us-central1 and the prod-named function (not
+      # oauthRevokeStage) match the prod-named OAUTH_SESSION_ENCRYPTION_KEY
+      # the firebase service is given above. Override in devenv.local.env to
+      # point at a different function while working on it.
+      - GE_OAUTH_REVOKE_URL=${GE_OAUTH_REVOKE_URL:-http://firebase:15001/${GE_DEV_FIREBASE_PROJECT:-greenearth-471522}/us-central1/oauthRevoke}
     env_file:
       # Written by seed; devctl guarantees it exists before `up`. The ES key
       # deliberately isn't here — see GE_ELASTICSEARCH_API_KEY above.
