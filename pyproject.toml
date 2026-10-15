@@ -4,7 +4,7 @@
 # (pytest prepends each test file's directory to sys.path). "importmode=prepend"
 # is the default that makes that work; stated here so it isn't changed by
 # accident.
-testpaths = ["velocity", "devenv"]
+testpaths = ["velocity", "devenv", "traffic-audit"]
 
 [tool.ruff]
 line-length = 100
@@ -30,7 +30,7 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.pyright]
-include = ["velocity", "devenv"]
+include = ["velocity", "devenv", "traffic-audit"]
 # dev-auth adds firebase/ to sys.path at runtime (the directory is mounted into
 # its container), so tell the checker where those modules come from instead of
 # silencing the import. dev-auth itself is listed for a different reason: its
