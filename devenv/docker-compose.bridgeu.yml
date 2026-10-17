@@ -1,0 +1,77 @@
+# BridgEU services (internal-tools#68), layered onto docker-compose.yml by
+# devctl — same compose project, so up/down/logs/nuke and --name instances
+# cover both halves without anything special.
+#
+# Mysky (everything in docker-compose.yml) runs on GCP; BridgEU runs on
+# Hetzner, and the only thing that crosses between the two is HTTP calls into
+# the mysky api with an API key. This file reproduces that boundary with
+# networks rather than by convention: BridgEU services sit only on the
+# `bridgeu` network, and the one mysky service that also joins it is the api,
+# as `mysky-api`. So `elasticsearch` and `firebase` don't even resolve from a
+# BridgEU container — reaching for them directly fails here the same way it
+# would in production.
+#
+# Every BridgEU service belongs on the `bridgeu` network and nothing else.
+# Something both sides run (a Jetstream follower, say) gets two services, one
+# per file, each wired to its own side's stores.
+#
+# The checkout is optional: devctl starts these only when bridg-eu is present
+# under the repo root.
+
+services:
+  bridgeu-api:
+    build: ./images/pydev
+    working_dir: /app
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        pipenv install --dev
+        exec pipenv run uvicorn src.app.main:app --host 0.0.0.0 --port 8000 ${GE_DEV_API_RELOAD:+--reload}
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PIPENV_VENV_IN_PROJECT=1
+      # As with the mysky api: the checkout may carry a developer's .env, and
+      # pipenv would load it over this environment. The app reads .env too,
+      # but there the environment already wins.
+      - PIPENV_DONT_LOAD_ENV=1
+      # did:web:localhost, like the mysky api's local default. Nothing here
+      # publishes feed records, so the publisher is a well-formed placeholder.
+      - BRIDGEU_HOSTNAME=${GE_DEV_BRIDGEU_HOSTNAME:-localhost}
+      - BRIDGEU_PUBLISHER_DID=${GE_DEV_BRIDGEU_PUBLISHER_DID:-did:plc:bridgeudevpublisher}
+    networks:
+      - bridgeu
+    ports:
+      - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_BRIDGEU_API:-8400}:8000"
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/bridg-eu:/app
+      - bridgeu_api_venv:/app/.venv
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\"",
+        ]
+      interval: 60s
+      # First start installs dependencies before uvicorn listens.
+      start_period: 300s
+      start_interval: 2s
+      timeout: 5s
+      retries: 24
+
+  # The mysky api, also reachable from the BridgEU side — the one door between
+  # the two. `default` has to be named explicitly: listing any network replaces
+  # the implicit one rather than adding to it.
+  api:
+    networks:
+      default: {}
+      bridgeu:
+        aliases:
+          - mysky-api
+
+networks:
+  bridgeu:
+
+volumes:
+  bridgeu_api_venv:

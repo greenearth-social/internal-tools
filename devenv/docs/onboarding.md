@@ -44,6 +44,13 @@ git clone https://github.com/greenearth-social/internal-tools.git
 environment serves already-trained models and only needs that repo if you're
 retraining.
 
+So is `bridg-eu` (private, in the eurosky-social org). If you work on BridgEU,
+clone it alongside the rest and `devctl up` runs its services too:
+
+```bash
+git clone git@github.com:eurosky-social/bridg-eu.git
+```
+
 If your checkouts live somewhere else, set `GE_DEV_REPO_ROOT=<parent dir>` in
 `internal-tools/devenv/devenv.local.env`.
 

@@ -1,5 +1,5 @@
 ---
-description: Run and inspect the Green Earth local dev environment (Elasticsearch, api, inference, Firebase emulators, frontend) with devctl. Use when working on api, ingex, inference-service or frontend and you need to start the stack, run tests inside it, seed data, look at a feed, or read service logs.
+description: Run and inspect the Green Earth local dev environment (Elasticsearch, api, inference, Firebase emulators, frontend, and the BridgEU services) with devctl. Use when working on api, ingex, inference-service, frontend or bridg-eu and you need to start the stack, run tests inside it, seed data, look at a feed, or read service logs.
 ---
 
 # The Green Earth dev environment
@@ -7,7 +7,8 @@ description: Run and inspect the Green Earth local dev environment (Elasticsearc
 `devenv/devctl` runs the whole stack locally: Elasticsearch seeded with a real
 sample of Bluesky, the api, inference-service serving the real trained towers,
 the Firebase emulators, and the frontend. It needs no credentials — fixtures
-and models come from public GitHub releases.
+and models come from public GitHub releases. When `bridg-eu` is checked out
+next to the other repos, it also runs the BridgEU services (see below).
 
 Everything goes through `devctl`. Run it from `internal-tools/devenv/`, or by
 absolute path from anywhere.
@@ -38,13 +39,13 @@ names the fix for what it finds.
 repo's test suite, use `devctl test`, which knows each repo's runner:
 
 ```bash
-devctl test               # every suite: api, inference, ingex, frontend
+devctl test               # every suite: api, inference, ingex, frontend, bridgeu
 devctl test api           # just one repo
 devctl test ingex         # Go tests; needs nothing running
 ```
 
-`api`, `inference` and `frontend` tests run in the live containers, so the
-stack must be up (`devctl test` says so if it isn't). `ingex` runs in a
+`api`, `inference`, `frontend` and `bridgeu` tests run in the live containers,
+so the stack must be up (`devctl test` says so if it isn't). `ingex` runs in a
 throwaway Go container and needs no running stack. `devctl test` exits nonzero
 if any suite fails and names which.
 
@@ -59,7 +60,25 @@ devctl exec frontend npm run typecheck
 devctl exec inference pipenv run pytest -x
 ```
 
-Service names: `api`, `frontend`, `inference`, `elasticsearch`, `firebase`.
+Service names: `api`, `frontend`, `inference`, `elasticsearch`, `firebase`,
+`bridgeu-api`.
+
+## BridgEU
+
+BridgEU services (`bridgeu-api` for now) run on their own network, and the
+only mysky service they can reach is the api, at `http://mysky-api:8000`.
+Elasticsearch and Firebase don't resolve from there. That's deliberate: in
+production BridgEU is on another cloud and talks to mysky only through the
+api with an API key. When BridgEU code needs mysky data, add or call an api
+endpoint rather than wiring BridgEU to a mysky store. A component both sides
+run gets one service per side. Definitions live in
+`devenv/docker-compose.bridgeu.yml`.
+
+```bash
+devctl test bridgeu
+devctl exec bridgeu-api pipenv run pyright
+devctl restart bridgeu-api      # after editing bridg-eu code
+```
 
 ## The normal loop
 
