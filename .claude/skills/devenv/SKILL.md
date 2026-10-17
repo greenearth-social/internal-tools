@@ -80,6 +80,16 @@ devctl exec bridgeu-api pipenv run pyright
 devctl restart bridgeu-api      # after editing bridg-eu code
 ```
 
+BridgEU feeds come from the api's `/slate/generate`. `bridgeu-api` calls the
+local api with a key `devctl up` issues it, and accepts the api's dev session
+in place of a Bluesky JWT. Render a BridgEU feed as the seeded persona with
+`devctl feed --bridgeu` (default feed `mysky`; other `devctl feed` options
+apply, `--json` for the raw skeleton).
+
+`devctl up --live mysky --live-env prod` points it at the prod api instead,
+with a real key in `GE_DEV_MYSKY_API_KEY` (devenv.local.env). Only do that when
+the user asks: it generates real feeds on prod.
+
 ## The normal loop
 
 ```bash
@@ -87,6 +97,7 @@ devctl up                       # start (or bring back) the stack
 devctl seed                     # load the fixture — needed once per fresh volume
 devctl feed                     # render your-feed in the terminal as the persona
 devctl feed popularity --limit 5
+devctl feed --bridgeu           # a BridgEU feed instead (needs bridg-eu)
 devctl logs api                 # recent logs, then exits
 devctl logs -t api              # follow instead
 devctl restart api              # after editing api code
