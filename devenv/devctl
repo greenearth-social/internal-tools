@@ -158,6 +158,7 @@ resolve_ports() {
   FIREBASE_UI_PORT="$GE_DEV_PORT_FIREBASE_UI"
   FRONTEND_PORT="$GE_DEV_PORT_FRONTEND"
   NGROK_PORT="$GE_DEV_PORT_NGROK"
+  BRIDGEU_API_PORT="$GE_DEV_PORT_BRIDGEU_API"
 }
 
 # Only shown for named instances: on the default one it's noise, since those
@@ -205,8 +206,21 @@ MODELS_ASSET="ge-dev-models.tar"
 # from the artifacts and prints what to set here.
 MODELS_TAG="${GE_DEV_MODELS_TAG:-models-1bf1ea3c-177899dd}"
 
+# Both halves of the stack, as one compose project: mysky (docker-compose.yml)
+# and BridgEU (docker-compose.bridgeu.yml), which only reaches mysky through
+# its api. See the header of the BridgEU file.
 compose() {
-  docker compose -f "$DEVENV_DIR/docker-compose.yml" --project-directory "$DEVENV_DIR" "$@"
+  docker compose -f "$DEVENV_DIR/docker-compose.yml" -f "$DEVENV_DIR/docker-compose.bridgeu.yml" \
+    --project-directory "$DEVENV_DIR" "$@"
+}
+
+# BridgEU lives in another GitHub org, so not every checkout of this stack has
+# it. Its services run when it's there and are skipped, with a note, when not.
+BRIDGEU_REPO="bridg-eu"
+BRIDGEU_CLONE_URL="git@github.com:eurosky-social/bridg-eu.git"
+
+have_bridgeu() {
+  [[ -e "$GE_DEV_REPO_ROOT/$BRIDGEU_REPO/.git" ]]
 }
 
 # --- helpers shared across commands ----------------------------------------
@@ -285,6 +299,8 @@ check_repos() {
   # Only needed to retrain or republish models, not to run the environment.
   [[ -e "$GE_DEV_REPO_ROOT/engagement-prediction/.git" ]] ||
     echo "devctl: note: optional repo not checked out: $GE_DEV_REPO_ROOT/engagement-prediction" >&2
+  have_bridgeu ||
+    echo "devctl: note: $BRIDGEU_REPO not checked out, so the BridgEU services won't run: $GE_DEV_REPO_ROOT/$BRIDGEU_REPO" >&2
 }
 
 # The Go module and build caches are declared external so that they survive
@@ -818,7 +834,9 @@ cmd_setup() {
   check_repos
   ensure_runtime
   echo "devctl: pulling and building images (first run takes a few minutes)..."
-  compose --profile tools build es-init api inference firebase frontend seed-firestore-users
+  local builds=(es-init api inference firebase frontend seed-firestore-users)
+  have_bridgeu && builds+=(bridgeu-api)
+  compose --profile tools build "${builds[@]}"
   compose --profile tools pull elasticsearch perspective-stub dev-auth seed-rebase seed-megastream --ignore-buildable
 
   have_models || cmd_fetch_models
@@ -1018,7 +1036,17 @@ cmd_up() {
     compose run --rm es-init
     export_api_es_env
   fi
-  "${api_up[@]}" api frontend
+  # BridgEU doesn't depend_on the mysky api: it talks to it over HTTP, the way
+  # it will across clouds, so it has to cope with the api not being up yet.
+  local app_services=(api frontend)
+  if have_bridgeu; then
+    app_services+=(bridgeu-api)
+  else
+    # A container left from a repo root that had the checkout would otherwise
+    # go on serving code this instance no longer mounts.
+    compose stop bridgeu-api >/dev/null 2>&1 || true
+  fi
+  "${api_up[@]}" "${app_services[@]}"
   cat <<EOF
 devctl: environment is up$(instance_label).
   frontend      http://127.0.0.1:${FRONTEND_PORT}    (first start installs deps; watch: devctl logs -t frontend)
@@ -1041,6 +1069,9 @@ EOF
     echo "  inference     LIVE $GE_DEV_INFERENCE_URL"
   else
     echo "  inference     $(models_tag)    (watch: devctl logs -t inference)"
+  fi
+  if have_bridgeu; then
+    echo "  bridgeu-api   http://127.0.0.1:${BRIDGEU_API_PORT}    (BridgEU; reaches the api as http://mysky-api:8000)"
   fi
   live_has es && echo "  ** the api is reading LIVE Elasticsearch: $GE_DEV_ES_URL"
   live_has perspective && echo "  ** the api is calling the LIVE Perspective API"
@@ -1929,7 +1960,7 @@ cmd_pull() {
   done
   command -v git >/dev/null || die "git is required for devctl pull"
 
-  local repos=(api ingex frontend inference-service internal-tools engagement-prediction)
+  local repos=(api ingex frontend inference-service internal-tools engagement-prediction "$BRIDGEU_REPO")
   local off_main=() failed=0
   local repo path branch result
   printf '%-22s %-26s %s\n' "REPO" "BRANCH" "RESULT"
@@ -2075,6 +2106,12 @@ cmd_doctor() {
   else
     d_ok "sibling repos present under $GE_DEV_REPO_ROOT"
   fi
+  if have_bridgeu; then
+    d_ok "$BRIDGEU_REPO present"
+  else
+    d_warn "$BRIDGEU_REPO not checked out — the BridgEU services won't run" \
+      "git clone $BRIDGEU_CLONE_URL \"$GE_DEV_REPO_ROOT/$BRIDGEU_REPO\" (optional)"
+  fi
 
   if have_models; then
     d_ok "models $(models_tag)"
@@ -2184,6 +2221,16 @@ print("%s posts / %s likes" % (format(c["posts"], ","), format(c["likes"], ","))
         "first start installs dependencies — watch: devctl logs -t api"
     fi
   fi
+  if service_running bridgeu-api; then
+    local code
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:${BRIDGEU_API_PORT}/health" 2>/dev/null || true)"
+    if [[ "$code" == "200" ]]; then
+      d_ok "bridgeu-api answering on port $BRIDGEU_API_PORT"
+    else
+      d_warn "bridgeu-api isn't answering on port $BRIDGEU_API_PORT (HTTP ${code:-000})" \
+        "first start installs dependencies — watch: devctl logs -t bridgeu-api"
+    fi
+  fi
 
   doctor_summary
 }
@@ -2251,7 +2298,8 @@ cmd_ports() {
   if [[ "${1:-}" == "--ssh" ]]; then
     local flags="" port
     for port in "$FRONTEND_PORT" "$API_PORT" "$ES_PORT" "$FIRESTORE_PORT" \
-      "$AUTH_PORT" "$FUNCTIONS_PORT" "$FIREBASE_UI_PORT" "$GE_DEV_PORT_FIREBASE_UI_WS"; do
+      "$AUTH_PORT" "$FUNCTIONS_PORT" "$FIREBASE_UI_PORT" "$GE_DEV_PORT_FIREBASE_UI_WS" \
+      "$BRIDGEU_API_PORT"; do
       flags+="-L ${port}:127.0.0.1:${port} "
     done
     echo "${flags% }"
@@ -2283,6 +2331,7 @@ firestore     $FIRESTORE_PORT
 firebase_auth $AUTH_PORT
 functions     $FUNCTIONS_PORT
 firebase_ui   $FIREBASE_UI_PORT
+bridgeu-api   $BRIDGEU_API_PORT
 EOF
 }
 
@@ -2371,13 +2420,14 @@ cmd_restart() {
 # no long-running service, so it gets an ephemeral container over the same
 # bind-mounted source and shared caches the ingest uses. `devctl exec` covers
 # anything finer (a single file, a -k filter, -v) — see `devctl help`.
-TEST_SUITES="api inference ingex frontend"
+TEST_SUITES="api inference ingex frontend bridgeu"
 
 run_test_suite() {
   case "$1" in
   api) compose_exec api pipenv run pytest ;;
   inference) compose_exec inference pipenv run pytest ;;
   frontend) compose_exec frontend npm run test:unit ;;
+  bridgeu) compose_exec bridgeu-api pipenv run pytest ;;
   ingex)
     local t=""
     [[ -t 1 ]] && t="-t" || true
@@ -2401,7 +2451,14 @@ cmd_test() {
   ensure_go_caches
 
   local suites=("$@")
-  [[ ${#suites[@]} -gt 0 ]] || suites=($TEST_SUITES)
+  if [[ ${#suites[@]} -eq 0 ]]; then
+    suites=($TEST_SUITES)
+    # "Every suite" means every suite this checkout can run.
+    if ! have_bridgeu; then
+      suites=(${suites[@]/bridgeu/})
+      echo "devctl: skipping bridgeu ($BRIDGEU_REPO not checked out)" >&2
+    fi
+  fi
 
   local s
   for s in "${suites[@]}"; do
@@ -2419,6 +2476,11 @@ cmd_test() {
     case "$s" in
     api | inference | frontend)
       service_running "$s" || need_up+=("$s")
+      ;;
+    bridgeu)
+      have_bridgeu || die "the bridgeu suite needs $BRIDGEU_REPO checked out:
+        git clone $BRIDGEU_CLONE_URL \"$GE_DEV_REPO_ROOT/$BRIDGEU_REPO\""
+      service_running bridgeu-api || need_up+=("$s")
       ;;
     esac
   done
@@ -2455,12 +2517,13 @@ Setup (first run):
   fetch-models     download the pinned trained models (no account or auth needed)
 
 Run the stack:
-  up               start the stack (ES + Firebase emulators + inference + api)
+  up               start the stack (ES + Firebase emulators + inference + api,
+                   and the BridgEU services when bridg-eu is checked out)
                      --live es,inference,perspective  use deployed services
                      --live-env stage|prod            which deployment (default stage)
                      --with-ingest                    also ingest live posts+likes
                        (--with-megastream / --with-jetstream for one half)
-                     --watch                          reload api/inference on edit
+                     --watch                          reload api/inference/bridgeu-api on edit
                      --dedicated-es                   own Elasticsearch, not shared
                      --repo-root <dir>                mount checkouts from another
                        working copy (sticks per instance; default: this repo's parent)
@@ -2471,7 +2534,7 @@ Run the stack:
 
 Work with it:
   test [svc]       run a repo's tests inside the env, or all with no arg
-                     (api, inference, ingex, frontend)
+                     (api, inference, ingex, frontend, bridgeu)
   exec <svc> ...   run any command in a service (e.g. exec api pipenv run pytest)
   feed [feed]      view a hydrated feed in the terminal (default: your-feed;
                    --user <did>, --limit, --pages, --json for raw skeleton)
@@ -2482,8 +2545,9 @@ Work with it:
   doctor           check everything and name the fix — run this first when
                    the environment misbehaves
   logs [svc...]    print recent logs and exit (-t follows instead)
-  pull             fetch + fast-forward every sibling checkout and flag any on a
-                   branch other than main (--repo-root <dir> for another copy)
+  pull             fetch + fast-forward every sibling checkout (bridg-eu too) and
+                   flag any on a branch other than main (--repo-root <dir> for
+                   another copy)
 
 Serve on real Bluesky (opt-in; ngrok runs as a container — just an authtoken):
   bsky up          tunnel this env to Bluesky and publish its feeds; the same

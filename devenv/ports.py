@@ -42,6 +42,9 @@ BASE_PORTS = {
     # Emulator UI (4000) isn't a multiple of STRIDE — see the collision note above
     # and test_no_cross_service_collisions.
     "NGROK": 4041,
+    # BridgEU's api (docker-compose.bridgeu.yml). A hundred above the mysky
+    # api, which is clear of its whole offset range.
+    "BRIDGEU_API": 8400,
 }
 
 STRIDE = 10

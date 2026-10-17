@@ -12,6 +12,10 @@ Code stays on your host filesystem: the sibling `api` and `ingex` checkouts are
 bind-mounted into containers, so you edit with your normal editor and commit
 with your normal git, while everything executes inside containers.
 
+When [bridg-eu](https://github.com/eurosky-social/bridg-eu) is checked out
+alongside them, the same project also runs the BridgEU services, walled off
+from everything except the api — see [BridgEU](#bridgeu).
+
 ## Prerequisites
 
 - Docker (with Compose v2)
@@ -96,13 +100,13 @@ runs through `devctl`.
 with no argument:
 
 ```bash
-./devctl test               # api, inference, ingex, frontend
+./devctl test               # api, inference, ingex, frontend, bridgeu
 ./devctl test api           # one repo
 ./devctl test ingex         # Go tests, in a throwaway container — no stack needed
 ```
 
-`api`, `inference` and `frontend` run in the live containers (so the stack has
-to be up); `ingex` gets an ephemeral Go container over the same bind-mounted
+`api`, `inference`, `frontend` and `bridgeu` run in the live containers (so the
+stack has to be up); `ingex` gets an ephemeral Go container over the same bind-mounted
 source the ingest uses. It exits nonzero and names the suite if anything fails.
 
 For anything finer — a single file, a `-k` filter, a linter, a one-off script —
@@ -823,6 +827,42 @@ The whole api is reachable this way, as the old api tunnel was — handy for api
 development, not just for serving the feed. Everything it exposes is public
 while the session is up, so mind the security note above.
 
+## BridgEU
+
+BridgEU is a separate product with its own repo (`eurosky-social/bridg-eu`,
+private) and its own infrastructure: mysky runs on GCP, BridgEU on Hetzner.
+The two talk only through the mysky api, over HTTP with an API key. The dev
+environment keeps that boundary instead of flattening it:
+
+- BridgEU's services are defined in `docker-compose.bridgeu.yml`, which devctl
+  layers onto the main file — one compose project, so `up`, `down`, `logs`,
+  `status`, `nuke` and `--name` instances cover both.
+- They sit on their own `bridgeu` network. The mysky api is the only mysky
+  service that also joins it, as **`http://mysky-api:8000`**. Elasticsearch,
+  Firebase and the rest don't resolve from a BridgEU container at all, so code
+  that reaches past the api fails here the way it would in production.
+- Anything both sides run (e.g. a Jetstream follower built from the same
+  binary) runs twice, one service per side, each with its own side's stores.
+
+It's optional, because the repo is private to another org. With the checkout
+next to the others (`git clone git@github.com:eurosky-social/bridg-eu.git`),
+`devctl up` starts `bridgeu-api` too; without it devctl notes the missing
+checkout and runs mysky alone.
+
+```bash
+./devctl test bridgeu                                   # its pytest suite
+./devctl exec bridgeu-api pipenv run ruff check .
+./devctl exec bridgeu-api pipenv run pyright
+./devctl restart bridgeu-api                            # after editing (or up --watch)
+./devctl logs bridgeu-api
+curl http://127.0.0.1:8400/health
+```
+
+`bridgeu-api` answers as `did:web:localhost` with a placeholder publisher DID;
+`GE_DEV_BRIDGEU_HOSTNAME` and `GE_DEV_BRIDGEU_PUBLISHER_DID` in
+`devenv.local.env` override them. Its datastores and fixtures will be added
+here as those components are chosen.
+
 ## Service endpoints (defaults)
 
 | Service | Address | Notes |
@@ -838,6 +878,7 @@ while the session is up, so mind the security note above.
 | perspective-stub | internal only | stands in for Google's Perspective API |
 | megastream-ingest | internal only | `--with-ingest`; live posts from the archives |
 | jetstream-ingest | internal only | `--with-ingest`; live likes from the public firehose |
+| bridgeu-api | `http://127.0.0.1:8400` | only with bridg-eu checked out; see [BridgEU](#bridgeu) |
 
 These are the default instance's ports; a named instance's are these plus its
 offset (`devctl ports --name <n>`). Everything binds `127.0.0.1` only —
@@ -847,7 +888,8 @@ see [docs/remote.md](docs/remote.md).
 
 Override the bases in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 `GE_DEV_PORT_ES`, `GE_DEV_PORT_FIRESTORE`, `GE_DEV_PORT_FRONTEND`,
-`GE_DEV_PORT_FIREBASE_AUTH`, `GE_DEV_PORT_FUNCTIONS`, `GE_DEV_PORT_FIREBASE_UI`.
+`GE_DEV_PORT_FIREBASE_AUTH`, `GE_DEV_PORT_FUNCTIONS`, `GE_DEV_PORT_FIREBASE_UI`,
+`GE_DEV_PORT_BRIDGEU_API`.
 Other settings in the same file: `GE_DEV_ES_HEAP`, `GE_DEV_INSTANCE` (default
 instance name, same as passing `--name`), `GE_DEV_API_RELOAD=1` /
 `GE_DEV_INFERENCE_RELOAD=1` (what `--watch` sets),

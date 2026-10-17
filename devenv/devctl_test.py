@@ -14,6 +14,7 @@ import yaml
 DEVENV_DIR = Path(__file__).parent
 DEVCTL = DEVENV_DIR / "devctl"
 COMPOSE_FILE = DEVENV_DIR / "docker-compose.yml"
+BRIDGEU_COMPOSE_FILE = DEVENV_DIR / "docker-compose.bridgeu.yml"
 FIREBASE_UI_PROXY_TEST = DEVENV_DIR / "firebase" / "ui-proxy_test.mjs"
 
 
@@ -536,6 +537,87 @@ def test_compose_tunnels_into_the_gateway_and_starts_neither_by_default():
     # The gateway is only reachable from the compose network: the tunnel is the
     # one way in, so nothing is exposed on the host when no session is up.
     assert "ports" not in gateway
+
+
+def test_bridgeu_services_reach_mysky_only_through_the_api():
+    """BridgEU talks to mysky over the api's HTTP surface and nothing else.
+
+    In production the two run on different clouds; here the network layout is
+    what keeps a BridgEU service from quietly depending on mysky's
+    Elasticsearch or Firestore. Mysky services stay on the default network
+    (they declare none), BridgEU services sit only on `bridgeu`, and the api is
+    the single service on both.
+    """
+    mysky = yaml.safe_load(COMPOSE_FILE.read_text())["services"]
+    bridgeu = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["services"]
+
+    assert all("networks" not in svc for svc in mysky.values())
+
+    api = bridgeu.pop("api")
+    assert set(api) == {"networks"}, "the BridgEU file only adds the api to its network"
+    assert set(api["networks"]) == {"default", "bridgeu"}
+    assert api["networks"]["bridgeu"]["aliases"] == ["mysky-api"]
+
+    assert bridgeu, "expected at least one BridgEU service"
+    for name, svc in bridgeu.items():
+        assert name.startswith("bridgeu-"), name
+        assert name not in mysky, f"{name} would merge into a mysky service"
+        assert svc["networks"] == ["bridgeu"], name
+        assert "depends_on" not in svc or set(svc["depends_on"]) <= set(bridgeu), name
+        env = " ".join(svc.get("environment", []))
+        for mysky_store in ("elasticsearch", "firebase:"):
+            assert mysky_store not in env, f"{name} addresses {mysky_store} directly"
+
+
+def run_test_command(
+    tmp_path: Path, *args: str, bridgeu: bool
+) -> tuple[subprocess.CompletedProcess, list[str]]:
+    """Run cmd_test with every suite and service stubbed out, recording calls."""
+    calls_path = tmp_path / "suite-calls"
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            'die() { echo "devctl: $*" >&2; exit 1; }',
+            "check_docker() { :; }",
+            "ensure_go_caches() { :; }",
+            "service_running() { return 0; }",
+            f"have_bridgeu() {{ return {0 if bridgeu else 1}; }}",
+            'run_test_suite() { echo "$1" >>"$TEST_CALLS"; }',
+            "BRIDGEU_REPO=bridg-eu; BRIDGEU_CLONE_URL=x; GE_DEV_REPO_ROOT=/r",
+            f'TEST_SUITES="{shell_constant("TEST_SUITES")}"',
+            shell_function("cmd_test"),
+            'cmd_test "$@"',
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-s", "--", *args],
+        input=script,
+        text=True,
+        capture_output=True,
+        env={"PATH": os.environ["PATH"], "TEST_CALLS": str(calls_path)},
+    )
+    calls = calls_path.read_text().split() if calls_path.exists() else []
+    return result, calls
+
+
+def test_all_suites_include_bridgeu_when_checked_out(tmp_path):
+    result, calls = run_test_command(tmp_path, bridgeu=True)
+    assert result.returncode == 0, result.stderr
+    assert calls == ["api", "inference", "ingex", "frontend", "bridgeu"]
+
+
+def test_all_suites_skip_bridgeu_without_the_checkout(tmp_path):
+    result, calls = run_test_command(tmp_path, bridgeu=False)
+    assert result.returncode == 0, result.stderr
+    assert calls == ["api", "inference", "ingex", "frontend"]
+    assert "skipping bridgeu" in result.stderr
+
+
+def test_bridgeu_suite_names_the_missing_checkout(tmp_path):
+    result, calls = run_test_command(tmp_path, "bridgeu", bridgeu=False)
+    assert result.returncode == 1
+    assert calls == []
+    assert "needs bridg-eu checked out" in result.stderr
 
 
 @pytest.mark.parametrize("environment_name", ["stage", "prod"])
