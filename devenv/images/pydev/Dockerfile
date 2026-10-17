@@ -5,9 +5,8 @@
 # volume (/app/.venv), so the image never needs rebuilding when code or deps
 # change. git is required because Pipfiles pin the `shared` package from
 # engagement-prediction as a git dependency.
-# inference-service pins python 3.11 (its Pipfile requires it, and the torch
-# build it serves has no 3.13 wheel), while the api tracks 3.13. Same image,
-# different tag.
+# Every service runs 3.13 today; the arg is there so one that falls behind
+# (or moves ahead) can build its own tag of the same image.
 ARG PYTHON_VERSION=3.13
 FROM python:${PYTHON_VERSION}-slim
 
