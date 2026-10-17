@@ -213,14 +213,20 @@ services:
     build:
       context: ./images/pydev
       args:
-        PYTHON_VERSION: "3.11"
+        PYTHON_VERSION: "3.13"
+    # Tagged with the Python version so that changing it is self-healing:
+    # compose only builds a missing image, and never rebuilds an existing one
+    # because a build arg changed, so an untagged image would keep serving the
+    # old interpreter until someone thought to run `devctl setup`.
+    image: ${GE_DEV_NAME:-ge-dev}-inference:py3.13
     working_dir: /srv
     # See inference/start.sh — `devctl setup` runs the same script with
     # --install-only to pre-warm the venv volume.
     command: ["bash", "/inference/start.sh"]
     environment:
       - PYTHONUNBUFFERED=1
-      - GE_DEV_TORCH_VERSION=${GE_DEV_TORCH_VERSION:-2.5.1}
+      # Empty means start.sh picks one per architecture.
+      - GE_DEV_TORCH_VERSION=${GE_DEV_TORCH_VERSION:-}
       - GE_DEV_INFERENCE_RELOAD=${GE_DEV_INFERENCE_RELOAD:-}
       - PIPENV_VENV_IN_PROJECT=1
       # As with the api: the checkout may carry a developer's own .env pointing
