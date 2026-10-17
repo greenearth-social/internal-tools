@@ -702,6 +702,36 @@ services:
       - ./seed:/seedscripts:ro
       - ${GE_DEV_RUNTIME:-./.runtime}:/runtime
 
+  # Makes the local api accept the API key bridgeu-api calls it with — the
+  # local stand-in for a mysky admin issuing BridgEU its key. Mysky-side (it
+  # writes the api's Firestore), so it lives here rather than in the BridgEU
+  # file. devctl runs it on every `up`; see seed/issue_bridgeu_api_key.py.
+  issue-bridgeu-key:
+    build: ./images/pydev
+    working_dir: /app
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        pipenv install --dev
+        exec pipenv run python /seedscripts/issue_bridgeu_api_key.py
+    profiles: ["tools"]
+    depends_on:
+      firebase:
+        condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PIPENV_VENV_IN_PROJECT=1
+      - PIPENV_DONT_LOAD_ENV=1
+      - GE_FIRESTORE_EMULATOR_HOST=firebase:18080
+      - GE_FIRESTORE_PROJECT=${GE_DEV_FIREBASE_PROJECT:-greenearth-471522}
+      - GE_DEV_BRIDGEU_MYSKY_API_KEY=${GE_DEV_BRIDGEU_MYSKY_API_KEY:-}
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/api:/app
+      - api_venv:/app/.venv
+      - ./seed:/seedscripts:ro
+
 volumes:
   esdata:
   api_venv:

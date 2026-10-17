@@ -428,6 +428,7 @@ chasing:
 ./devctl up --live inference                # deployed inference-service
 ./devctl up --live es,inference             # several at once
 ./devctl up --live inference --live-env prod
+./devctl up --live mysky --live-env prod    # BridgEU calls the prod mysky api
 ```
 
 `--live-env` picks stage (default) or prod; `devctl` knows the endpoints, so
@@ -439,6 +440,7 @@ you don't have to. Each service needs its key in `devenv.local.env`
 | `es` | `GE_DEV_ES_API_KEY` | must be read-only; this is enforced |
 | `inference` | `GE_DEV_INFERENCE_API_KEY` | |
 | `perspective` | `GE_PERSPECTIVE_API_KEY` | real quota, be careful |
+| `mysky` | `GE_DEV_MYSKY_API_KEY` | for `bridgeu-api`, see [BridgEU](#bridgeu); prod only unless `GE_DEV_BRIDGEU_MYSKY_API_URL` is set |
 
 `devctl up` checks each one is reachable and the key works before starting
 anything, so a bad key fails immediately instead of becoming a 500 in a
@@ -862,6 +864,49 @@ curl http://127.0.0.1:8400/health
 `GE_DEV_BRIDGEU_HOSTNAME` and `GE_DEV_BRIDGEU_PUBLISHER_DID` in
 `devenv.local.env` override them. Its datastores and fixtures will be added
 here as those components are chosen.
+
+### BridgEU feeds
+
+BridgEU's feeds come from the mysky api's `POST /slate/generate`. Locally,
+`bridgeu-api` calls the local api at `http://mysky-api:8000` with a fixed,
+well-known API key, which `devctl up` makes the local api accept by writing it
+to the Firestore emulator (`issue-bridgeu-key`). The emulator forgets it when
+recreated, so `devctl restart firebase` writes it again.
+
+A feed request needs a signed-in user. Real Bluesky sends a JWT signed with the
+user's key, which nothing local can mint, so `bridgeu-api` accepts the same dev
+session as the mysky api (`X-Dev-Session` plus `X-Dev-Session-DID`).
+`devctl feed --bridgeu` uses it to render a BridgEU feed as the seeded persona,
+the same way `devctl feed` renders a mysky one:
+
+```bash
+./devctl feed --bridgeu                       # BridgEU's mysky feed
+./devctl feed --bridgeu --limit 10 --pages 2  # other feed options work as usual
+./devctl feed --bridgeu --json                # the raw skeleton, feedContext included
+```
+
+There's no per-post pipeline detail: BridgEU's feeds come through the slate
+API, which doesn't write the snapshots `devctl feed` reads that from. With curl:
+
+```bash
+persona=$(sed -n 's/^GE_PROBE_USER_DID=//p' .runtime/probe.env)
+curl -s -H 'X-Dev-Session: ge-dev-session' -H "X-Dev-Session-DID: $persona" \
+  --get --data-urlencode 'feed=at://did:plc:bridgeudevpublisher/app.bsky.feed.generator/mysky' \
+  -d limit=10 http://127.0.0.1:8400/xrpc/app.bsky.feed.getFeedSkeleton
+```
+
+To try BridgEU against the production mysky api, put a real mysky API key
+(issued with the api's `scripts/apikeys.py`) in `devenv.local.env` as
+`GE_DEV_MYSKY_API_KEY` and run `devctl up --live mysky --live-env prod`.
+`devctl` checks the key before starting anything. The persona's DID is a real
+Bluesky account, so the prod api serves it a real feed. There's no public stage
+api to default to. To reach some other api, set `GE_DEV_BRIDGEU_MYSKY_API_URL`,
+which only applies with `--live mysky`.
+
+The dev session only works while `bridgeu-api` answers as `localhost`: bridg-eu
+refuses to start with it under any other hostname. If you set
+`GE_DEV_BRIDGEU_HOSTNAME`, also set `GE_DEV_BRIDGEU_SESSION_SECRET=` (empty) to
+turn the dev session off.
 
 ## Service endpoints (defaults)
 
