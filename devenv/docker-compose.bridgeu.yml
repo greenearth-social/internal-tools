@@ -40,6 +40,19 @@ services:
       # publishes feed records, so the publisher is a well-formed placeholder.
       - BRIDGEU_HOSTNAME=${GE_DEV_BRIDGEU_HOSTNAME:-localhost}
       - BRIDGEU_PUBLISHER_DID=${GE_DEV_BRIDGEU_PUBLISHER_DID:-did:plc:bridgeudevpublisher}
+      # Feeds come from the mysky api. devctl exports both: the local api and
+      # the key it issued (issue-bridgeu-key in docker-compose.yml), or under
+      # `--live mysky` a deployed api and GE_DEV_MYSKY_API_KEY. Like the api's
+      # ES key, the key has no default here, so a recreate that skipped devctl
+      # fails at startup instead of 401ing on every feed request.
+      - BRIDGEU_MYSKY_API_URL=${GE_DEV_BRIDGEU_MYSKY_API_URL:-http://mysky-api:8000}
+      - BRIDGEU_MYSKY_API_KEY=${GE_DEV_BRIDGEU_MYSKY_API_KEY:-}
+      # The same development session the mysky api accepts: X-Dev-Session plus
+      # X-Dev-Session-DID stand in for the Bluesky JWT a local caller can't
+      # mint. bridg-eu refuses it unless BRIDGEU_HOSTNAME is localhost, so
+      # overriding the hostname means setting GE_DEV_BRIDGEU_SESSION_SECRET=
+      # (empty, which the `-` without `:` keeps empty).
+      - BRIDGEU_DEV_SESSION_SECRET=${GE_DEV_BRIDGEU_SESSION_SECRET-ge-dev-session}
     networks:
       - bridgeu
     ports:

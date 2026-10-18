@@ -489,7 +489,17 @@ devctl: the newest indexed post is ${age}h old — the data has drifted out of
 EOF
 }
 
-LIVE_SERVICES="es inference perspective"
+# `mysky` is the odd one out: not something the api calls, but the mysky api
+# itself as BridgEU sees it. Live, bridgeu-api calls a deployed api with a real
+# partner key instead of the local api with the key devctl issues it.
+LIVE_SERVICES="es inference perspective mysky"
+
+# The key bridgeu-api calls the local api with. Deliberately fixed and public:
+# it only ever opens the local api, which carries no data of its own, and a
+# well-known value means nothing has to be minted and handed between the two
+# sides. issue_bridgeu_key makes the local api accept it.
+BRIDGEU_LOCAL_MYSKY_API_KEY="gea_bridgeu0devenvlocalkeynotasecretdevenvlocalkeynotasecret"
+BRIDGEU_LOCAL_MYSKY_API_URL="http://mysky-api:8000"
 
 live_has() {
   case ",${GE_DEV_LIVE}," in
@@ -509,6 +519,9 @@ live_url() {
   # behind an internal load balancer, so there's no address a container could
   # dial directly. host.docker.internal is the host running kubectl.
   es:*) echo "https://host.docker.internal:${GE_DEV_ES_TUNNEL_PORT:-9200}" ;;
+  # The stage api has no public hostname; GE_DEV_BRIDGEU_MYSKY_API_URL can
+  # point at one you can reach.
+  mysky:prod) echo "https://api.greenearth.social" ;;
   esac
 }
 
@@ -517,6 +530,7 @@ live_key_var() {
   inference) echo GE_DEV_INFERENCE_API_KEY ;;
   perspective) echo GE_PERSPECTIVE_API_KEY ;;
   es) echo GE_DEV_ES_API_KEY ;;
+  mysky) echo GE_DEV_MYSKY_API_KEY ;;
   esac
 }
 
@@ -549,6 +563,20 @@ resolve_live() {
   fi
   live_has perspective && export GE_DEV_PERSPECTIVE_HOST="$(live_url perspective)"
   live_has es && export GE_DEV_ES_URL="$(live_url es)"
+
+  # Exported either way, because bridgeu-api's compose entry has no default
+  # key. GE_DEV_BRIDGEU_MYSKY_API_URL overrides only the live target (a stage
+  # api, say): the local key opens nothing but the local api.
+  if live_has mysky; then
+    export GE_DEV_BRIDGEU_MYSKY_API_URL="${GE_DEV_BRIDGEU_MYSKY_API_URL:-$(live_url mysky)}"
+    [[ -n "$GE_DEV_BRIDGEU_MYSKY_API_URL" ]] ||
+      die "--live mysky has no known $GE_DEV_LIVE_ENV endpoint — use --live-env prod,
+        or set GE_DEV_BRIDGEU_MYSKY_API_URL in devenv.local.env"
+    export GE_DEV_BRIDGEU_MYSKY_API_KEY="$GE_DEV_MYSKY_API_KEY"
+  else
+    export GE_DEV_BRIDGEU_MYSKY_API_URL="$BRIDGEU_LOCAL_MYSKY_API_URL"
+    export GE_DEV_BRIDGEU_MYSKY_API_KEY="$BRIDGEU_LOCAL_MYSKY_API_KEY"
+  fi
 
   if [[ "$GE_DEV_LIVE_ENV" == "prod" && -n "$GE_DEV_LIVE" ]]; then
     echo "devctl: WARNING — using PROD services: $GE_DEV_LIVE" >&2
@@ -601,8 +629,32 @@ preflight_live() {
     esac
     check_es_key_readonly
   fi
+  # GET /candidates/generators is the cheapest call that checks the key: it
+  # generates nothing.
+  if live_has mysky; then
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+      -H "X-API-Key: ${GE_DEV_BRIDGEU_MYSKY_API_KEY}" \
+      "$GE_DEV_BRIDGEU_MYSKY_API_URL/candidates/generators" 2>/dev/null || true)"
+    case "$code" in
+    200) echo "devctl: live mysky api OK ($GE_DEV_BRIDGEU_MYSKY_API_URL)" ;;
+    401 | 403) die "live mysky api rejected GE_DEV_MYSKY_API_KEY (HTTP $code)" ;;
+    000) die "live mysky api unreachable at $GE_DEV_BRIDGEU_MYSKY_API_URL" ;;
+    *) die "live mysky api returned HTTP $code from $GE_DEV_BRIDGEU_MYSKY_API_URL/candidates/generators" ;;
+    esac
+  fi
   # Perspective isn't probed: every call costs quota, and a bad key surfaces
   # immediately as a failed feed rather than something subtle.
+}
+
+# Make the local api accept the key bridgeu-api calls it with. Firestore
+# emulator data doesn't survive a recreate, so this runs on every `up` and
+# after `restart firebase`. Nothing to do under --live mysky (bridgeu-api isn't
+# calling the local api) or without the bridg-eu checkout.
+issue_bridgeu_key() {
+  have_bridgeu && ! live_has mysky || return 0
+  echo "devctl: issuing BridgEU's local mysky api key..."
+  compose run --rm issue-bridgeu-key >/dev/null ||
+    die "couldn't issue BridgEU's mysky api key — see: devctl logs firebase"
 }
 
 # `--live es` points a *development* environment at a deployed cluster, and
@@ -1004,6 +1056,10 @@ cmd_up() {
     have_models || { models_hint; exit 1; }
     check_model_fixture_compat
   fi
+  if live_has mysky && ! have_bridgeu; then
+    die "--live mysky points bridgeu-api at a deployed api, but $BRIDGEU_REPO isn't checked out:
+        $GE_DEV_REPO_ROOT/$BRIDGEU_REPO"
+  fi
   preflight_live
 
   # Checked before anything starts: without these the container just fails its
@@ -1023,6 +1079,9 @@ cmd_up() {
   # --wait because the api no longer depends_on the swappable ones, so this is
   # what guarantees they're serving before it starts.
   compose up -d --remove-orphans --wait "${local_services[@]}"
+  # Before the api starts: on a first run both would otherwise install the
+  # api's dependencies into the same volume at once.
+  issue_bridgeu_key
   # A sharing instance runs no cluster of its own, so there's nothing to
   # initialize and the api's key is the owner's (already exported). Its api
   # also can't `depends_on: elasticsearch` — that service isn't started here —
@@ -1073,6 +1132,7 @@ EOF
   if have_bridgeu; then
     echo "  bridgeu-api   http://127.0.0.1:${BRIDGEU_API_PORT}    (BridgEU; reaches the api as http://mysky-api:8000)"
   fi
+  live_has mysky && echo "  ** bridgeu-api is calling the LIVE mysky api: $GE_DEV_BRIDGEU_MYSKY_API_URL"
   live_has es && echo "  ** the api is reading LIVE Elasticsearch: $GE_DEV_ES_URL"
   live_has perspective && echo "  ** the api is calling the LIVE Perspective API"
   if [[ $megastream -eq 1 ]]; then
@@ -1202,14 +1262,79 @@ cmd_feed() {
   #   devctl feed
   #   devctl feed your-feed --user did:plc:... --limit 50 --pages 2
   #   devctl feed --json                 # raw getFeedSkeleton, the old output
+  #   devctl feed --bridgeu              # a BridgEU feed (default: mysky)
   #
-  # All arguments pass through to scripts/feed_view.py (feed defaults to
+  # All other arguments pass through to scripts/feed_view.py (feed defaults to
   # your-feed). See feed_view.py --help for the full flag set.
+  local bridgeu=0 args=() arg
+  for arg in "$@"; do
+    if [[ "$arg" == "--bridgeu" ]]; then bridgeu=1; else args+=("$arg"); fi
+  done
   service_running api ||
     die "the api isn't running — start it with: devctl up$(name_flag)"
   # The symptom of stale data is exactly this command coming back empty.
   warn_stale_data
-  compose_exec api pipenv run python scripts/feed_view.py "$@"
+  if [[ $bridgeu -eq 0 ]]; then
+    compose_exec api pipenv run python scripts/feed_view.py ${args[@]+"${args[@]}"}
+    return
+  fi
+
+  have_bridgeu ||
+    die "--bridgeu needs $BRIDGEU_REPO checked out: git clone $BRIDGEU_CLONE_URL \"$GE_DEV_REPO_ROOT/$BRIDGEU_REPO\""
+  service_running bridgeu-api ||
+    die "bridgeu-api isn't running — start it with: devctl up$(name_flag)"
+  # The viewer still runs in the api container (it has the ES key to hydrate
+  # posts with), and reaches bridgeu-api over the bridgeu network the api is
+  # on. Identity and secret are read from bridgeu-api itself, so overrides in
+  # devenv.local.env can't drift from what it's actually running with.
+  local publisher secret
+  publisher="$(compose exec -T bridgeu-api printenv BRIDGEU_PUBLISHER_DID | tr -d '\r')"
+  secret="$(compose exec -T bridgeu-api printenv BRIDGEU_DEV_SESSION_SECRET | tr -d '\r' || true)"
+  [[ -n "$secret" ]] ||
+    die "bridgeu-api has its dev session turned off (GE_DEV_BRIDGEU_SESSION_SECRET is empty),
+        so there's no way to request a feed from it as a persona"
+  if live_has mysky; then
+    echo "devctl: note — bridgeu-api is calling the LIVE mysky api, so its posts mostly" >&2
+    echo "        aren't in this environment's index and won't hydrate." >&2
+  fi
+  local viewer_args=()
+  bridgeu_feed_args "$publisher" ${args[@]+"${args[@]}"}
+  compose_exec -e "GE_DEV_SESSION_SECRET=$secret" api \
+    pipenv run python scripts/feed_view.py "${viewer_args[@]}"
+}
+
+# The feed_view.py arguments for a BridgEU feed, into viewer_args. The feed
+# goes as a full AT URI under BridgEU's publisher, because a bare name means a
+# mysky feed to the viewer (it even aliases `mysky` to your-feed). BridgEU
+# serves mysky's slates without writing the api's feed snapshots, so there is
+# no pipeline detail to wait for: --no-pipeline.
+BRIDGEU_DEFAULT_FEED="mysky"
+bridgeu_feed_args() {
+  local publisher="$1" feed=""
+  shift
+  viewer_args=(--api-url "http://bridgeu-api:8000" --no-pipeline)
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    # feed_view.py's options that take a value, so the value isn't mistaken
+    # for the feed.
+    --user | --limit | --cursor | --pages | --api-url | --publisher)
+      viewer_args+=("$1" "${2:-}")
+      shift 2 || shift
+      ;;
+    -*)
+      viewer_args+=("$1")
+      shift
+      ;;
+    *)
+      [[ -z "$feed" ]] || die "feed given twice: $feed and $1"
+      feed="$1"
+      shift
+      ;;
+    esac
+  done
+  feed="${feed:-$BRIDGEU_DEFAULT_FEED}"
+  [[ "$feed" == at://* ]] || feed="at://$publisher/app.bsky.feed.generator/$feed"
+  viewer_args=("$feed" "${viewer_args[@]}")
 }
 
 configure_tunnel_context() {
@@ -2412,6 +2537,8 @@ cmd_restart() {
   resolve_live
   export_api_es_env
   compose up -d --no-deps --force-recreate "$@"
+  # A recreated emulator has forgotten the key.
+  [[ " $* " != *" firebase "* ]] || issue_bridgeu_key
   echo "devctl: restarted$(instance_label): $*"
 }
 
@@ -2519,7 +2646,8 @@ Setup (first run):
 Run the stack:
   up               start the stack (ES + Firebase emulators + inference + api,
                    and the BridgEU services when bridg-eu is checked out)
-                     --live es,inference,perspective  use deployed services
+                     --live <svc>[,<svc>...]          use deployed services
+                       (es, inference, perspective; mysky for bridgeu-api)
                      --live-env stage|prod            which deployment (default stage)
                      --with-ingest                    also ingest live posts+likes
                        (--with-megastream / --with-jetstream for one half)
@@ -2537,7 +2665,8 @@ Work with it:
                      (api, inference, ingex, frontend, bridgeu)
   exec <svc> ...   run any command in a service (e.g. exec api pipenv run pytest)
   feed [feed]      view a hydrated feed in the terminal (default: your-feed;
-                   --user <did>, --limit, --pages, --json for raw skeleton)
+                   --user <did>, --limit, --pages, --json for raw skeleton;
+                   --bridgeu for a BridgEU feed, default: mysky)
   es <path>        query this instance's Elasticsearch (read-only key, e.g.
                    devctl es /posts/_count)
   login [did]      print a sign-in URL for the frontend as the seeded persona

@@ -606,6 +606,221 @@ def test_bridgeu_services_reach_mysky_only_through_the_api():
             assert mysky_store not in env, f"{name} addresses {mysky_store} directly"
 
 
+def test_bridgeu_local_mysky_key_is_a_well_formed_api_key():
+    # gea_ + 8-char key id + 48-char secret: the api's parse_key_id rejects
+    # anything else, which would surface as every BridgEU feed request 401ing.
+    key = shell_constant("BRIDGEU_LOCAL_MYSKY_API_KEY")
+    assert key.startswith("gea_")
+    assert len(key) == 60
+
+
+def test_bridgeu_key_issuer_is_a_mysky_side_tool():
+    """The key lives in the api's Firestore, so the job writing it is mysky's."""
+    mysky = yaml.safe_load(COMPOSE_FILE.read_text())["services"]
+    issuer = mysky["issue-bridgeu-key"]
+    assert issuer["profiles"] == ["tools"]
+    assert "GE_DEV_BRIDGEU_MYSKY_API_KEY=${GE_DEV_BRIDGEU_MYSKY_API_KEY:-}" in issuer["environment"]
+
+    bridgeu_api = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["services"]["bridgeu-api"]
+    assert "BRIDGEU_MYSKY_API_KEY=${GE_DEV_BRIDGEU_MYSKY_API_KEY:-}" in bridgeu_api["environment"]
+
+
+def run_resolve_live(live: str, live_env: str = "stage", **env: str) -> subprocess.CompletedProcess:
+    """Run resolve_live for a live selection and print the BridgEU mysky target."""
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            'die() { echo "devctl: $*" >&2; exit 1; }',
+            f'LIVE_SERVICES="{shell_constant("LIVE_SERVICES")}"',
+            f'BRIDGEU_LOCAL_MYSKY_API_KEY="{shell_constant("BRIDGEU_LOCAL_MYSKY_API_KEY")}"',
+            f'BRIDGEU_LOCAL_MYSKY_API_URL="{shell_constant("BRIDGEU_LOCAL_MYSKY_API_URL")}"',
+            shell_function("live_has"),
+            shell_function("live_url"),
+            shell_function("live_key_var"),
+            shell_function("resolve_live"),
+            "resolve_live",
+            'echo "$GE_DEV_BRIDGEU_MYSKY_API_URL $GE_DEV_BRIDGEU_MYSKY_API_KEY"',
+        ]
+    )
+    return subprocess.run(
+        ["bash", "-s"],
+        input=script,
+        text=True,
+        capture_output=True,
+        env={"PATH": os.environ["PATH"], "GE_DEV_LIVE": live, "GE_DEV_LIVE_ENV": live_env, **env},
+    )
+
+
+def test_bridgeu_calls_the_local_api_with_the_local_key_by_default():
+    result = run_resolve_live("inference", GE_DEV_INFERENCE_API_KEY="k")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == [
+        "http://mysky-api:8000",
+        shell_constant("BRIDGEU_LOCAL_MYSKY_API_KEY"),
+    ]
+
+
+def test_bridgeu_ignores_a_live_url_override_when_mysky_is_local():
+    result = run_resolve_live("", GE_DEV_BRIDGEU_MYSKY_API_URL="https://elsewhere.example")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split()[0] == "http://mysky-api:8000"
+
+
+def test_live_mysky_calls_the_prod_api_with_the_real_key():
+    result = run_resolve_live("mysky", "prod", GE_DEV_MYSKY_API_KEY="gea_real")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["https://api.greenearth.social", "gea_real"]
+
+
+def test_live_mysky_needs_a_key():
+    result = run_resolve_live("mysky", "prod")
+    assert result.returncode == 1
+    assert "GE_DEV_MYSKY_API_KEY" in result.stderr
+
+
+def test_live_mysky_has_no_stage_default():
+    result = run_resolve_live("mysky", "stage", GE_DEV_MYSKY_API_KEY="gea_real")
+    assert result.returncode == 1
+    assert "GE_DEV_BRIDGEU_MYSKY_API_URL" in result.stderr
+
+
+def test_live_mysky_url_override():
+    result = run_resolve_live(
+        "mysky",
+        "stage",
+        GE_DEV_MYSKY_API_KEY="gea_real",
+        GE_DEV_BRIDGEU_MYSKY_API_URL="https://stage-api.example",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["https://stage-api.example", "gea_real"]
+
+
+@pytest.mark.parametrize(
+    ("bridgeu", "live", "issued"),
+    [(True, "", True), (True, "mysky", False), (False, "", False)],
+)
+def test_bridgeu_key_is_issued_only_for_a_local_mysky(tmp_path, bridgeu, live, issued):
+    calls_path = tmp_path / "compose-calls"
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            'die() { echo "devctl: $*" >&2; exit 1; }',
+            f"have_bridgeu() {{ return {0 if bridgeu else 1}; }}",
+            'compose() { printf "%s\\n" "$*" >>"$TEST_CALLS"; }',
+            shell_function("live_has"),
+            shell_function("issue_bridgeu_key"),
+            "issue_bridgeu_key",
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-s"],
+        input=script,
+        text=True,
+        capture_output=True,
+        env={"PATH": os.environ["PATH"], "GE_DEV_LIVE": live, "TEST_CALLS": str(calls_path)},
+    )
+    assert result.returncode == 0, result.stderr
+    calls = calls_path.read_text().splitlines() if calls_path.exists() else []
+    assert calls == (["run --rm issue-bridgeu-key"] if issued else [])
+
+
+def run_feed(tmp_path: Path, *args: str, bridgeu_secret: str = "ge-dev-session"):
+    """Run cmd_feed with docker stubbed out, recording what it would execute."""
+    calls_path = tmp_path / "feed-calls"
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            'die() { echo "devctl: $*" >&2; exit 1; }',
+            "service_running() { return 0; }",
+            "have_bridgeu() { return 0; }",
+            "warn_stale_data() { :; }",
+            "live_has() { return 1; }",
+            "name_flag() { :; }",
+            "BRIDGEU_REPO=bridg-eu; BRIDGEU_CLONE_URL=x; GE_DEV_REPO_ROOT=/r",
+            """compose() {
+  case "$*" in
+  *"printenv BRIDGEU_PUBLISHER_DID") echo did:plc:bridgeupub ;;
+  *"printenv BRIDGEU_DEV_SESSION_SECRET") [[ -z "$TEST_SECRET" ]] || echo "$TEST_SECRET" ;;
+  esac
+}""",
+            'compose_exec() { printf "%s\\n" "$@" >"$TEST_CALLS"; }',
+            f'BRIDGEU_DEFAULT_FEED="{shell_constant("BRIDGEU_DEFAULT_FEED")}"',
+            shell_function("bridgeu_feed_args"),
+            shell_function("cmd_feed"),
+            'cmd_feed "$@"',
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-s", "--", *args],
+        input=script,
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "TEST_CALLS": str(calls_path),
+            "TEST_SECRET": bridgeu_secret,
+        },
+    )
+    calls = calls_path.read_text().splitlines() if calls_path.exists() else []
+    return result, calls
+
+
+VIEWER = ["pipenv", "run", "python", "scripts/feed_view.py"]
+BRIDGEU_VIEWER = ["-e", "GE_DEV_SESSION_SECRET=ge-dev-session", "api", *VIEWER]
+
+
+def test_feed_defaults_to_mysky_feeds_on_the_api(tmp_path):
+    result, calls = run_feed(tmp_path, "--limit", "5")
+    assert result.returncode == 0, result.stderr
+    assert calls == ["api", *VIEWER, "--limit", "5"]
+
+
+def test_bridgeu_feed_defaults_to_its_mysky_feed(tmp_path):
+    result, calls = run_feed(tmp_path, "--bridgeu")
+    assert result.returncode == 0, result.stderr
+    assert calls == [
+        *BRIDGEU_VIEWER,
+        "at://did:plc:bridgeupub/app.bsky.feed.generator/mysky",
+        "--api-url",
+        "http://bridgeu-api:8000",
+        "--no-pipeline",
+    ]
+
+
+def test_bridgeu_feed_names_a_feed_among_viewer_options(tmp_path):
+    # --user's value is not the feed; the bare word after it is.
+    result, calls = run_feed(
+        tmp_path, "--user", "did:plc:me", "other", "--bridgeu", "--limit", "3", "--json"
+    )
+    assert result.returncode == 0, result.stderr
+    assert calls == [
+        *BRIDGEU_VIEWER,
+        "at://did:plc:bridgeupub/app.bsky.feed.generator/other",
+        "--api-url",
+        "http://bridgeu-api:8000",
+        "--no-pipeline",
+        "--user",
+        "did:plc:me",
+        "--limit",
+        "3",
+        "--json",
+    ]
+
+
+def test_bridgeu_feed_passes_a_full_uri_through(tmp_path):
+    uri = "at://did:plc:else/app.bsky.feed.generator/x"
+    result, calls = run_feed(tmp_path, "--bridgeu", uri)
+    assert result.returncode == 0, result.stderr
+    assert calls[len(BRIDGEU_VIEWER)] == uri
+
+
+def test_bridgeu_feed_needs_the_dev_session(tmp_path):
+    result, calls = run_feed(tmp_path, "--bridgeu", bridgeu_secret="")
+    assert result.returncode == 1
+    assert "dev session turned off" in result.stderr
+    assert calls == []
+
+
 def run_test_command(
     tmp_path: Path, *args: str, bridgeu: bool
 ) -> tuple[subprocess.CompletedProcess, list[str]]:
