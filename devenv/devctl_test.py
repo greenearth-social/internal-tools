@@ -123,6 +123,43 @@ def test_seed_stops_if_quality_backfill_or_alias_publication_fails(tmp_path, fai
     assert "seed complete" not in result.stdout
 
 
+def run_devctl(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess, Path]:
+    """Run the real devctl with a docker that only records that it was called."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    marker = tmp_path / "docker-called"
+    docker = bin_dir / "docker"
+    docker.write_text(f'#!/bin/sh\necho "$@" >>"{marker}"\nexit 1\n')
+    docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
+    result = subprocess.run(
+        [str(DEVCTL), *args],
+        text=True,
+        capture_output=True,
+        env={"PATH": f"{bin_dir}:{os.environ['PATH']}", "HOME": str(tmp_path)},
+    )
+    return result, marker
+
+
+@pytest.mark.parametrize("command", ["seed", "nuke", "down", "up", "bootstrap", "setup", "test"])
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_help_flag_prints_usage_without_touching_docker(tmp_path, command, flag):
+    # Issue #42: `seed --help` used to ignore the flag and wipe the seeded data.
+    result, marker = run_devctl(tmp_path, "--name", "helptest", command, flag)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Usage: devctl" in result.stdout
+    assert not marker.exists(), marker.read_text()
+
+
+@pytest.mark.parametrize("command", ["seed", "nuke", "down", "status"])
+def test_argumentless_commands_refuse_stray_arguments(tmp_path, command):
+    result, marker = run_devctl(tmp_path, command, "oops")
+
+    assert result.returncode == 1
+    assert f"{command} takes no arguments" in result.stderr
+    assert not marker.exists(), marker.read_text()
+
+
 def test_quality_backfill_uses_local_es_and_the_ingest_checkout():
     services = yaml.safe_load(COMPOSE_FILE.read_text())["services"]
     quality = services["seed-quality"]
