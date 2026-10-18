@@ -1,3 +1,6 @@
+import gzip
+import json
+import threading
 from datetime import UTC
 
 import load_likes
@@ -234,3 +237,36 @@ def test_like_counts_and_regular_posts_are_visible_before_backfill(monkeypatch):
     load_likes.main([])
 
     assert events.index("counts") < events.index("/_aliases") < events.index("/posts/_refresh")
+
+
+# --------------------------------------------------------------------------
+# like counts
+# --------------------------------------------------------------------------
+
+
+def test_like_counts_send_every_post_once_across_parallel_batches(tmp_path, monkeypatch, capsys):
+    # Batches go out concurrently, so check nothing is dropped, duplicated or
+    # miscounted when they're split up and their missing counts summed.
+    total = 2 * load_likes.BATCH_SIZE + 7
+    with gzip.open(tmp_path / "like_counts.jsonl.gz", "wt") as f:
+        for i in range(total):
+            doc = {"at_uri": f"at://p/{i}", "author_did": "did:x", "like_count": i}
+            f.write(json.dumps(doc) + "\n")
+    monkeypatch.setattr(load_likes, "SEED_DIR", tmp_path)
+    sent: dict[str, int] = {}
+    lock = threading.Lock()
+
+    def fake_flush(lines, allow_missing=False):
+        assert allow_missing
+        with lock:
+            for meta, body in zip(lines[::2], lines[1::2], strict=True):
+                at_uri = json.loads(meta)["update"]["_id"]
+                assert at_uri not in sent
+                sent[at_uri] = json.loads(body)["doc"]["like_count"]
+        return 1  # one missing post per batch
+
+    monkeypatch.setattr(load_likes, "flush", fake_flush)
+    load_likes.apply_like_counts()
+
+    assert sent == {f"at://p/{i}": i for i in range(total)}
+    assert f"Applied like counts to {total - 3}/{total} posts" in capsys.readouterr().out
