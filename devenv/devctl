@@ -2594,6 +2594,29 @@ EOF
 cmd="${1:-}"
 [[ -n "$cmd" ]] && shift || true
 
+# A command must never act on an argument it doesn't read: `seed --help` used
+# to go ahead and wipe and reload Elasticsearch (issue #42). So --help means
+# usage everywhere except the passthrough commands, whose underlying tool
+# answers it — and runs before port resolution, so it works on an instance
+# that doesn't exist yet. Commands that take no arguments refuse any.
+case "$cmd" in
+exec | es | feed) ;;
+*)
+  for _a in "$@"; do
+    case "$_a" in -h | --help)
+      usage
+      exit 0
+      ;;
+    esac
+  done
+  ;;
+esac
+case "$cmd" in
+seed | nuke | down | setup | status | ps | doctor | fetch-fixture | fetch-models | ls | instances)
+  [[ $# -eq 0 ]] || die "$cmd takes no arguments, got: $* (try: devctl help)"
+  ;;
+esac
+
 # Ports have to be known before most commands run, and `up` is the only one
 # allowed to claim a block: everywhere else, an instance that has no ports
 # recorded doesn't exist, and saying so beats acting on the wrong one.
