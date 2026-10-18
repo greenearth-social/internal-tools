@@ -40,6 +40,7 @@ import re
 import shutil
 import sqlite3
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -96,42 +97,49 @@ def rebase_db(src_zip: Path, delta: dt.timedelta, delta_us: int) -> Path:
     shifted_ts = file_ts + delta
     out_name = f"{prefix}{shifted_ts:%Y%m%d_%H%M%S}.db.zip"
 
-    work_db = OUT_DIR / (out_name + ".tmp.db")
-    if zipfile.is_zipfile(src_zip):
-        with zipfile.ZipFile(src_zip) as zf:
-            db_members = [m for m in zf.namelist() if m.endswith(".db")]
-            if len(db_members) != 1:
-                sys.exit(f"FATAL: expected one .db inside {src_zip.name}, got {db_members}")
-            work_db.write_bytes(zf.read(db_members[0]))
-    else:
-        # The ingest service tolerates raw SQLite files with a .db.zip name.
-        shutil.copyfile(src_zip, work_db)
+    # Do the SQLite work and the zipping in the container's own filesystem,
+    # then copy the finished zip out in one sequential write. OUT_DIR is a
+    # bind mount, and on Docker Desktop the per-row page writes of the UPDATE
+    # loop run about 12x slower there (63s vs 5s per fixture file).
+    with tempfile.TemporaryDirectory() as tmp:
+        work_db = Path(tmp) / (out_name + ".tmp.db")
+        if zipfile.is_zipfile(src_zip):
+            with zipfile.ZipFile(src_zip) as zf:
+                db_members = [m for m in zf.namelist() if m.endswith(".db")]
+                if len(db_members) != 1:
+                    sys.exit(f"FATAL: expected one .db inside {src_zip.name}, got {db_members}")
+                work_db.write_bytes(zf.read(db_members[0]))
+        else:
+            # The ingest service tolerates raw SQLite files with a .db.zip name.
+            shutil.copyfile(src_zip, work_db)
 
-    conn = sqlite3.connect(work_db)
-    try:
-        rows = conn.execute(
-            "SELECT id, time_us, raw_post, created_at FROM enriched_posts"
-        ).fetchall()
-        for row_id, time_us, raw_post, created_at in rows:
-            new_time_us = int(time_us) + delta_us if time_us is not None else None
-            new_raw = shift_raw_post(raw_post, delta, delta_us) if raw_post else raw_post
-            new_created = None
-            if created_at:
-                # SQLite CURRENT_TIMESTAMP format: "YYYY-MM-DD HH:MM:SS"
-                parsed = dt.datetime.fromisoformat(str(created_at))
-                new_created = (parsed + delta).strftime("%Y-%m-%d %H:%M:%S")
-            conn.execute(
-                "UPDATE enriched_posts SET time_us = ?, raw_post = ?, created_at = ? WHERE id = ?",
-                (new_time_us, new_raw, new_created, row_id),
-            )
-        conn.commit()
-    finally:
-        conn.close()
+        conn = sqlite3.connect(work_db)
+        try:
+            rows = conn.execute(
+                "SELECT id, time_us, raw_post, created_at FROM enriched_posts"
+            ).fetchall()
+            for row_id, time_us, raw_post, created_at in rows:
+                new_time_us = int(time_us) + delta_us if time_us is not None else None
+                new_raw = shift_raw_post(raw_post, delta, delta_us) if raw_post else raw_post
+                new_created = None
+                if created_at:
+                    # SQLite CURRENT_TIMESTAMP format: "YYYY-MM-DD HH:MM:SS"
+                    parsed = dt.datetime.fromisoformat(str(created_at))
+                    new_created = (parsed + delta).strftime("%Y-%m-%d %H:%M:%S")
+                conn.execute(
+                    "UPDATE enriched_posts SET time_us = ?, raw_post = ?, created_at = ?"
+                    " WHERE id = ?",
+                    (new_time_us, new_raw, new_created, row_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
 
-    out_zip = OUT_DIR / out_name
-    with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(work_db, out_name.removesuffix(".zip"))
-    work_db.unlink()
+        work_zip = Path(tmp) / out_name
+        with zipfile.ZipFile(work_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(work_db, out_name.removesuffix(".zip"))
+        out_zip = OUT_DIR / out_name
+        shutil.copyfile(work_zip, out_zip)
     return out_zip
 
 

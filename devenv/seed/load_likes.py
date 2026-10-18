@@ -23,6 +23,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,6 +31,11 @@ ES_URL = os.environ["GE_ELASTICSEARCH_URL"].rstrip("/")
 ES_KEY = os.environ["GE_ELASTICSEARCH_API_KEY"]
 SEED_DIR = Path("/runtime/seed")
 BATCH_SIZE = 1000
+# Concurrent bulk requests for the like-count pass. Each partial update
+# rewrites the whole post, re-inserting both of its HNSW vectors, so the pass
+# is bound by Elasticsearch CPU; a serial client leaves all but one core idle.
+# 4 measured 2.5x faster than serial; 8 pushed requests past the 60s timeout.
+LIKE_COUNT_WORKERS = 4
 
 
 def request(method: str, path: str, body: bytes | None = None, ndjson: bool = False) -> dict:
@@ -112,7 +118,7 @@ def apply_like_counts() -> None:
         print("No like_counts.jsonl.gz in seed dir; posts keep like_count=0")
         return
     total = 0
-    missing = 0
+    batches: list[list[str]] = []
     lines: list[str] = []
     with gzip.open(counts_path, "rt") as fin:
         for line in fin:
@@ -130,9 +136,13 @@ def apply_like_counts() -> None:
             lines.append(json.dumps({"doc": {"like_count": int(doc["like_count"])}}))
             total += 1
             if total % BATCH_SIZE == 0:
-                missing += flush(lines, allow_missing=True)
+                batches.append(lines)
                 lines = []
-    missing += flush(lines, allow_missing=True)
+    batches.append(lines)
+    # Each update sets an absolute count, so batches commute and can land in
+    # any order. map() re-raises the first failure; flush already exits on one.
+    with ThreadPoolExecutor(LIKE_COUNT_WORKERS) as pool:
+        missing = sum(pool.map(lambda batch: flush(batch, allow_missing=True), batches))
     print(f"Applied like counts to {total - missing}/{total} posts", flush=True)
     if missing:
         print(f"  ({missing} posts not found — likely skipped by ingest; harmless in dev)")
