@@ -47,6 +47,9 @@ services:
       # fails at startup instead of 401ing on every feed request.
       - BRIDGEU_MYSKY_API_URL=${GE_DEV_BRIDGEU_MYSKY_API_URL:-http://mysky-api:8000}
       - BRIDGEU_MYSKY_API_KEY=${GE_DEV_BRIDGEU_MYSKY_API_KEY:-}
+      # Signs the feedContext tokens bridg-eu serves. Any 32+ characters do
+      # locally; tokens stop verifying when it changes.
+      - BRIDGEU_FEED_CONTEXT_SECRET=${GE_DEV_BRIDGEU_FEED_CONTEXT_SECRET:-ge-dev-bridgeu-feed-context-secret}
       # The same development session the mysky api accepts: X-Dev-Session plus
       # X-Dev-Session-DID stand in for the Bluesky JWT a local caller can't
       # mint. bridg-eu refuses it unless BRIDGEU_HOSTNAME is localhost, so
