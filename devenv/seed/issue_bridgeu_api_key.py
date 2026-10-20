@@ -49,6 +49,8 @@ async def issue(full_key: str) -> str:
         email=OWNER_EMAIL,
         is_active=True,
         is_admin=False,
+        # /slate/generate and /slate/interactions act on behalf of a user.
+        scopes=["user-config"],
         created_at=now,
         last_used_at=now,
         monthly_call_count=0,
