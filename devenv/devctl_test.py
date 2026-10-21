@@ -595,6 +595,12 @@ def test_bridgeu_services_reach_mysky_only_through_the_api():
     assert set(api["networks"]) == {"default", "bridgeu"}
     assert api["networks"]["bridgeu"]["aliases"] == ["mysky-api"]
 
+    # The tunnel gateway joins too, to route a `devctl eurosky` session to
+    # bridgeu-api. It's a profile-gated reverse proxy that never runs by default.
+    gateway = bridgeu.pop("gateway")
+    assert gateway == {"networks": {"default": {}, "bridgeu": {}}}
+    assert mysky["gateway"]["profiles"] == ["bsky"]
+
     assert bridgeu, "expected at least one BridgEU service"
     for name, svc in bridgeu.items():
         assert name.startswith("bridgeu-"), name
@@ -638,6 +644,9 @@ def run_resolve_live(live: str, live_env: str = "stage", **env: str) -> subproce
             shell_function("live_url"),
             shell_function("live_key_var"),
             shell_function("resolve_live"),
+            # No tunnel session here; see run_session_env for one.
+            "bsky_export_session_env() { :; }",
+            "eurosky_export_session_env() { :; }",
             "resolve_live",
             'echo "$GE_DEV_BRIDGEU_MYSKY_API_URL $GE_DEV_BRIDGEU_MYSKY_API_KEY"',
         ]
@@ -649,6 +658,212 @@ def run_resolve_live(live: str, live_env: str = "stage", **env: str) -> subproce
         capture_output=True,
         env={"PATH": os.environ["PATH"], "GE_DEV_LIVE": live, "GE_DEV_LIVE_ENV": live_env, **env},
     )
+
+
+def test_resolve_live_reapplies_an_active_tunnel_session():
+    """`devctl restart api` or `restart bridgeu-api` after an edit mustn't drop
+    the tunnel identity."""
+    body = shell_function("resolve_live")
+    assert "bsky_export_session_env" in body
+    assert "eurosky_export_session_env" in body
+
+
+BSKY_SESSION_VARS = (
+    "GE_DEV_FEED_GENERATOR_DID",
+    "GE_DEV_FRONTEND_ALLOWED_HOSTS",
+    "GE_DEV_APP_ORIGIN",
+    "GE_DEV_FUNCTIONS_TARGET",
+    "BLUESKY_OAUTH_CLIENT_KID",
+)
+
+
+def run_bsky_session_env(
+    tmp_path: Path, *, state: bool, ngrok_running: bool, oauth_ok: str = "1"
+) -> dict[str, str]:
+    state_file = tmp_path / "bsky.env"
+    if state:
+        state_file.write_text(
+            "GE_BSKY_HANDLE=dev.bsky.social\n"
+            "GE_BSKY_HOST=abc.ngrok-free.dev\n"
+            "GE_BSKY_DID=did:web:abc.ngrok-free.dev\n"
+            f"GE_BSKY_OAUTH_OK={oauth_ok}\n"
+        )
+    oauth_dir = tmp_path / "oauth"
+    oauth_dir.mkdir()
+    for name, value in [
+        ("kid", "kid-1"),
+        ("private-key.json", "{}"),
+        ("public-jwks.json", "{}"),
+        ("state-key", "k"),
+    ]:
+        (oauth_dir / name).write_text(value)
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            f'BSKY_STATE="{state_file}"',
+            f'BSKY_OAUTH_DIR="{oauth_dir}"',
+            f"service_running() {{ {'true' if ngrok_running else 'false'}; }}",
+            shell_function("env_file_value"),
+            shell_function("bsky_export_oauth_env"),
+            shell_function("bsky_export_session_env"),
+            "bsky_export_session_env",
+            *[f'echo "{v}=${{{v}-unset}}"' for v in BSKY_SESSION_VARS],
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-s"],
+        input=script,
+        text=True,
+        capture_output=True,
+        env={"PATH": os.environ["PATH"]},
+    )
+    assert result.returncode == 0, result.stderr
+    return dict(line.split("=", 1) for line in result.stdout.splitlines())
+
+
+def test_bsky_session_env_keeps_the_api_and_frontend_on_the_tunnel(tmp_path):
+    env = run_bsky_session_env(tmp_path, state=True, ngrok_running=True)
+
+    assert env == {
+        "GE_DEV_FEED_GENERATOR_DID": "did:web:abc.ngrok-free.dev",
+        "GE_DEV_FRONTEND_ALLOWED_HOSTS": "localhost,abc.ngrok-free.dev",
+        "GE_DEV_APP_ORIGIN": "https://abc.ngrok-free.dev",
+        "GE_DEV_FUNCTIONS_TARGET": "firebase:15001",
+        "BLUESKY_OAUTH_CLIENT_KID": "kid-1",
+    }
+
+
+def test_bsky_session_env_without_oauth_leaves_sign_in_on_the_shim(tmp_path):
+    env = run_bsky_session_env(tmp_path, state=True, ngrok_running=True, oauth_ok="0")
+
+    assert env["GE_DEV_FEED_GENERATOR_DID"] == "did:web:abc.ngrok-free.dev"
+    assert env["GE_DEV_APP_ORIGIN"] == "unset"
+    assert env["GE_DEV_FUNCTIONS_TARGET"] == "unset"
+
+
+@pytest.mark.parametrize(("state", "ngrok_running"), [(False, True), (True, False)])
+def test_bsky_session_env_leaves_the_stack_local_otherwise(tmp_path, state, ngrok_running):
+    env = run_bsky_session_env(tmp_path, state=state, ngrok_running=ngrok_running)
+
+    assert set(env.values()) == {"unset"}
+
+
+def run_eurosky_session_env(
+    tmp_path: Path, *, state: bool, ngrok_running: bool
+) -> subprocess.CompletedProcess:
+    state_file = tmp_path / "eurosky.env"
+    if state:
+        state_file.write_text(
+            "GE_EUROSKY_HANDLE=dev.eurosky.social\n"
+            "GE_EUROSKY_PUBLISHER_DID=did:plc:dev\n"
+            "GE_EUROSKY_HOST=abc.ngrok-free.dev\n"
+        )
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            f'EUROSKY_STATE="{state_file}"',
+            f"service_running() {{ {'true' if ngrok_running else 'false'}; }}",
+            shell_function("env_file_value"),
+            shell_function("eurosky_export_env"),
+            shell_function("eurosky_export_session_env"),
+            "eurosky_export_session_env",
+            'echo "${GE_DEV_BRIDGEU_HOSTNAME-unset} ${GE_DEV_BRIDGEU_PUBLISHER_DID-unset}'
+            ' [${GE_DEV_BRIDGEU_SESSION_SECRET-unset}]"',
+        ]
+    )
+    return subprocess.run(
+        ["bash", "-s"],
+        input=script,
+        text=True,
+        capture_output=True,
+        env={"PATH": os.environ["PATH"]},
+    )
+
+
+def test_eurosky_session_env_points_bridgeu_api_at_the_tunnel(tmp_path):
+    result = run_eurosky_session_env(tmp_path, state=True, ngrok_running=True)
+
+    assert result.returncode == 0, result.stderr
+    # The dev session goes off: bridg-eu refuses it on a public hostname.
+    assert result.stdout.strip() == "abc.ngrok-free.dev did:plc:dev []"
+
+
+@pytest.mark.parametrize(("state", "ngrok_running"), [(False, True), (True, False)])
+def test_eurosky_session_env_leaves_bridgeu_api_local_otherwise(tmp_path, state, ngrok_running):
+    """No session, or one whose tunnel is gone (after `devctl down`): stay local."""
+    result = run_eurosky_session_env(tmp_path, state=state, ngrok_running=ngrok_running)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "unset unset [unset]"
+
+
+def test_eurosky_gateway_sends_everything_to_bridgeu_api(tmp_path):
+    config = tmp_path / "Caddyfile"
+    subprocess.run(
+        ["bash", "-s", "--", str(config)],
+        check=True,
+        input="\n".join(
+            [
+                "set -euo pipefail",
+                "umask 077",
+                shell_function("eurosky_write_gateway_config"),
+                'eurosky_write_gateway_config "$1"',
+            ]
+        ),
+        text=True,
+        env={"PATH": os.environ["PATH"]},
+    )
+
+    lines = [line.strip() for line in config.read_text().splitlines()]
+    assert [line for line in lines if line.startswith("reverse_proxy")] == [
+        "reverse_proxy bridgeu-api:8000"
+    ]
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+
+
+@pytest.mark.parametrize(
+    ("up", "other_state", "message"),
+    [
+        ("eurosky_up", "bsky.env", "a bsky session holds the tunnel"),
+        ("bsky_up", "eurosky.env", "a eurosky session holds the tunnel"),
+    ],
+)
+def test_bsky_and_eurosky_sessions_exclude_each_other(tmp_path, up, other_state, message):
+    """They share one tunnel and gateway, so the second `up` refuses."""
+    (tmp_path / other_state).write_text("")
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            'die() { echo "devctl: $*" >&2; exit 1; }',
+            "name_flag() { :; }",
+            "have_bridgeu() { true; }",
+            "service_running() { true; }",
+            # Anything past the guard would start real work.
+            "bsky_ensure_oauth_keys() { echo 'past the guard'; exit 3; }",
+            "eurosky_resolve_did() { echo 'past the guard'; exit 3; }",
+            f'BSKY_STATE="{tmp_path / "bsky.env"}"',
+            f'EUROSKY_STATE="{tmp_path / "eurosky.env"}"',
+            shell_function(up),
+            up,
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-s"],
+        input=script,
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "NGROK_AUTHTOKEN": "token",
+            "GE_DEV_BSKY_HANDLE": "dev.bsky.social",
+            "GE_BSKY_APP_PASSWORD": "pw",
+            "GE_DEV_EUROSKY_HANDLE": "dev.eurosky.social",
+            "GE_DEV_EUROSKY_APP_PASSWORD": "pw",
+        },
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert message in result.stderr
 
 
 def test_bridgeu_calls_the_local_api_with_the_local_key_by_default():
@@ -724,12 +939,18 @@ def test_bridgeu_key_is_issued_only_for_a_local_mysky(tmp_path, bridgeu, live, i
     assert calls == (["run --rm issue-bridgeu-key"] if issued else [])
 
 
-def run_feed(tmp_path: Path, *args: str, bridgeu_secret: str = "ge-dev-session"):
+def run_feed(
+    tmp_path: Path, *args: str, bridgeu_secret: str = "ge-dev-session", eurosky: bool = False
+):
     """Run cmd_feed with docker stubbed out, recording what it would execute."""
     calls_path = tmp_path / "feed-calls"
+    eurosky_state = tmp_path / "eurosky.env"
+    if eurosky:
+        eurosky_state.write_text("GE_EUROSKY_HANDLE=dev.eurosky.social\n")
     script = "\n".join(
         [
             "set -euo pipefail",
+            f'EUROSKY_STATE="{eurosky_state}"',
             'die() { echo "devctl: $*" >&2; exit 1; }',
             "service_running() { return 0; }",
             "have_bridgeu() { return 0; }",
@@ -775,12 +996,12 @@ def test_feed_defaults_to_mysky_feeds_on_the_api(tmp_path):
     assert calls == ["api", *VIEWER, "--limit", "5"]
 
 
-def test_bridgeu_feed_defaults_to_its_mysky_feed(tmp_path):
+def test_bridgeu_feed_defaults_to_its_passthrough_feed(tmp_path):
     result, calls = run_feed(tmp_path, "--bridgeu")
     assert result.returncode == 0, result.stderr
     assert calls == [
         *BRIDGEU_VIEWER,
-        "at://did:plc:bridgeupub/app.bsky.feed.generator/mysky",
+        "at://did:plc:bridgeupub/app.bsky.feed.generator/passthrough",
         "--api-url",
         "http://bridgeu-api:8000",
         "--no-pipeline",
@@ -818,6 +1039,14 @@ def test_bridgeu_feed_needs_the_dev_session(tmp_path):
     result, calls = run_feed(tmp_path, "--bridgeu", bridgeu_secret="")
     assert result.returncode == 1
     assert "dev session turned off" in result.stderr
+    assert calls == []
+
+
+def test_bridgeu_feed_points_a_eurosky_session_at_a_real_client(tmp_path):
+    result, calls = run_feed(tmp_path, "--bridgeu", bridgeu_secret="", eurosky=True)
+    assert result.returncode == 1
+    assert "serving a eurosky session" in result.stderr
+    assert "devctl eurosky down" in result.stderr
     assert calls == []
 
 
