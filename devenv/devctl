@@ -577,6 +577,10 @@ resolve_live() {
     export GE_DEV_BRIDGEU_MYSKY_API_URL="$BRIDGEU_LOCAL_MYSKY_API_URL"
     export GE_DEV_BRIDGEU_MYSKY_API_KEY="$BRIDGEU_LOCAL_MYSKY_API_KEY"
   fi
+  # Everything that recreates a service comes through here (up, restart), so
+  # an active bsky or eurosky session survives the restart after an edit.
+  bsky_export_session_env
+  eurosky_export_session_env
 
   if [[ "$GE_DEV_LIVE_ENV" == "prod" && -n "$GE_DEV_LIVE" ]]; then
     echo "devctl: WARNING — using PROD services: $GE_DEV_LIVE" >&2
@@ -1262,7 +1266,7 @@ cmd_feed() {
   #   devctl feed
   #   devctl feed your-feed --user did:plc:... --limit 50 --pages 2
   #   devctl feed --json                 # raw getFeedSkeleton, the old output
-  #   devctl feed --bridgeu              # a BridgEU feed (default: mysky)
+  #   devctl feed --bridgeu              # a BridgEU feed (default: passthrough)
   #
   # All other arguments pass through to scripts/feed_view.py (feed defaults to
   # your-feed). See feed_view.py --help for the full flag set.
@@ -1290,6 +1294,10 @@ cmd_feed() {
   local publisher secret
   publisher="$(compose exec -T bridgeu-api printenv BRIDGEU_PUBLISHER_DID | tr -d '\r')"
   secret="$(compose exec -T bridgeu-api printenv BRIDGEU_DEV_SESSION_SECRET | tr -d '\r' || true)"
+  if [[ -z "$secret" && -f "$EUROSKY_STATE" ]]; then
+    die "bridgeu-api is serving a eurosky session, which turns its dev session off —
+        load the feed in a real client (devctl eurosky status), or end it: devctl eurosky down$(name_flag)"
+  fi
   [[ -n "$secret" ]] ||
     die "bridgeu-api has its dev session turned off (GE_DEV_BRIDGEU_SESSION_SECRET is empty),
         so there's no way to request a feed from it as a persona"
@@ -1308,7 +1316,7 @@ cmd_feed() {
 # mysky feed to the viewer (it even aliases `mysky` to your-feed). BridgEU
 # serves mysky's slates without writing the api's feed snapshots, so there is
 # no pipeline detail to wait for: --no-pipeline.
-BRIDGEU_DEFAULT_FEED="mysky"
+BRIDGEU_DEFAULT_FEED="passthrough"
 bridgeu_feed_args() {
   local publisher="$1" feed=""
   shift
@@ -1450,9 +1458,9 @@ BSKY_KEYGEN_JS='const c=require("crypto");const{publicKey,privateKey}=c.generate
 # it instead (see bsky_warn_if_published), because deleting it would leave those
 # records on the account with nothing left that knows they exist.
 BSKY_STATE="$RUNTIME/bsky.env"
+BSKY_OAUTH_DIR="$RUNTIME/oauth"
 
 cmd_bsky() {
-  BSKY_OAUTH_DIR="$RUNTIME/oauth"
   local sub="${1:-}"
   shift || true
   case "$sub" in
@@ -1482,6 +1490,9 @@ bsky_up() {
   [[ -f "$BSKY_STATE" ]] &&
     die "a bsky session is already active for this instance — tear it down first:
         devctl bsky down$(name_flag)   (inspect it with: devctl bsky status$(name_flag))"
+  [[ -f "$EUROSKY_STATE" ]] &&
+    die "a eurosky session holds the tunnel for this instance — tear it down first:
+        devctl eurosky down$(name_flag)"
 
   # 1. Dev OAuth keypair. Best-effort: real frontend sign-in needs it, feed
   #    serving doesn't, so a failure here is a warning, not a stop.
@@ -1770,6 +1781,13 @@ bsky_start_tunnel() {
     api_paths="$BSKY_GATEWAY_FALLBACK_PATHS"
   fi
   bsky_write_gateway_config "$RUNTIME/Caddyfile" "$api_paths"
+  start_public_tunnel
+}
+
+# Start the gateway and ngrok behind the Caddyfile already written to the
+# runtime dir. Shared by `bsky up` and `eurosky up`, which differ only in where
+# the gateway routes.
+start_public_tunnel() {
   bsky_write_ngrok_config "$RUNTIME/ngrok.yml"
   compose --profile "$BSKY_PROFILE" up -d --force-recreate gateway ngrok >/dev/null 2>&1 || return 1
   sleep 2
@@ -1841,8 +1859,8 @@ for t in d.get("tunnels", []):
 # Wait for the api's did.json to report the tunnel DID (served through ngrok, so
 # this also confirms the tunnel reaches the api).
 bsky_wait_did() {
-  local host="$1" did="$2" got
-  for _ in $(seq 1 15); do
+  local host="$1" did="$2" tries="${3:-15}" got
+  for _ in $(seq 1 "$tries"); do
     got="$(curl -s --max-time 3 "https://$host/.well-known/did.json" 2>/dev/null | python3 -c '
 import json, sys
 try:
@@ -1886,6 +1904,27 @@ bsky_feed_links() {
     [[ -n "$name" ]] || name="$rkey"
     printf '  %-*s  https://bsky.app/profile/%s/feed/%s\n' "$((w + 1))" "$name:" "$handle" "$rkey"
   done <"$tsv"
+}
+
+# Re-apply an active session's environment, for resolve_live: the api as the
+# tunnel's feed generator, and the frontend and functions on the tunnel origin
+# (the same values bsky_up and bsky_wire_frontend set). Without it, `devctl
+# restart api` puts the api back on did:web:localhost, so every feed record
+# points at a generator that no longer answers as itself. Only while the tunnel
+# runs, as with eurosky_export_session_env.
+bsky_export_session_env() {
+  [[ -f "$BSKY_STATE" ]] || return 0
+  service_running ngrok || return 0
+  local host
+  host="$(env_file_value "$BSKY_STATE" GE_BSKY_HOST)"
+  [[ -n "$host" ]] || return 0
+  export GE_DEV_FEED_GENERATOR_DID="did:web:$host"
+  export GE_DEV_FRONTEND_ALLOWED_HOSTS="localhost,$host"
+  if [[ "$(env_file_value "$BSKY_STATE" GE_BSKY_OAUTH_OK)" == "1" ]]; then
+    export GE_DEV_APP_ORIGIN="https://$host"
+    export GE_DEV_FUNCTIONS_TARGET="firebase:15001"
+    bsky_export_oauth_env
+  fi
 }
 
 bsky_write_state() {
@@ -2012,8 +2051,10 @@ bsky_status() {
     echo "bsky session active$(instance_label) as ${handle:-?} (${did:-?})."
   else
     echo "bsky session recorded$(instance_label) as ${handle:-?} (${did:-?}), but its tunnel isn't running."
+    # `devctl up` doesn't reopen the tunnel (and a free ngrok URL wouldn't come
+    # back the same), so the only way forward is down and, if wanted, up again.
     echo "The feeds below are still published and now resolve to nothing:"
-    echo "  devctl up$(name_flag) restores them; devctl bsky down$(name_flag) deletes them."
+    echo "  devctl bsky down$(name_flag) deletes them; devctl bsky up$(name_flag) starts a new session."
   fi
   echo
   echo "Published feeds:"
@@ -2022,6 +2063,252 @@ bsky_status() {
   bsky_print_endpoint "${host:-?}" "${oauth_ok:-0}"
   echo
   echo "tear down with: devctl bsky down$(name_flag)"
+}
+
+# --- eurosky: serve a local BridgEU feed on the real network (bridg-eu#23) --
+# BridgEU's counterpart to `bsky`: one ngrok tunnel into the gateway, which here
+# sends everything to bridgeu-api, and BridgEU's feeds published as records on a
+# dev account with bridg-eu's own scripts/publish_feeds.py. A feed record isn't
+# tied to an AppView, so the published feed loads in Skeets and mu (on either
+# AppView) as well as the Bluesky app. `eurosky down` deletes exactly the
+# records `up` published and returns bridgeu-api to its local defaults.
+#
+# The two commands share the tunnel and gateway — work is on mysky or on
+# BridgEU, never both — so each refuses while the other's session exists.
+#
+# Unlike mysky's dev account, the BridgEU one is its own
+# (GE_DEV_EUROSKY_HANDLE): `bsky down` deletes every feed record on its
+# account, which on a shared one would take BridgEU's records with it.
+
+# Like BSKY_STATE, this records records published on a real account, so it
+# outlives the stack and only `eurosky down` removes it.
+EUROSKY_STATE="$RUNTIME/eurosky.env"
+EUROSKY_FEEDS_TSV="$RUNTIME/eurosky_feeds.tsv"
+
+cmd_eurosky() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+  up) eurosky_up "$@" ;;
+  down) eurosky_down "$@" ;;
+  status) eurosky_status "$@" ;;
+  *) die "usage: devctl eurosky <up|down|status>" ;;
+  esac
+}
+
+eurosky_up() {
+  [[ $# -eq 0 ]] || die "usage: devctl eurosky up"
+  have_bridgeu ||
+    die "eurosky serves BridgEU's feeds and needs $BRIDGEU_REPO checked out: git clone $BRIDGEU_CLONE_URL \"$GE_DEV_REPO_ROOT/$BRIDGEU_REPO\""
+  service_running bridgeu-api ||
+    die "bridgeu-api isn't running — start it with: devctl up$(name_flag)"
+  [[ -n "${NGROK_AUTHTOKEN:-}" ]] ||
+    die "set NGROK_AUTHTOKEN in devenv.local.env — copy it from https://dashboard.ngrok.com/get-started/your-authtoken
+        (a free ngrok account is enough)"
+  local handle="${GE_DEV_EUROSKY_HANDLE:-}"
+  [[ -n "$handle" ]] ||
+    die "set GE_DEV_EUROSKY_HANDLE in devenv.local.env (your dev BridgEU publisher account, e.g. you-beu-dev.eurosky.social)"
+  [[ -n "${GE_DEV_EUROSKY_APP_PASSWORD:-}" ]] ||
+    die "set GE_DEV_EUROSKY_APP_PASSWORD in devenv.local.env (an app password for $handle)"
+  [[ -f "$EUROSKY_STATE" ]] &&
+    die "a eurosky session is already active for this instance — tear it down first:
+        devctl eurosky down$(name_flag)   (inspect it with: devctl eurosky status$(name_flag))"
+  [[ -f "$BSKY_STATE" ]] &&
+    die "a bsky session holds the tunnel for this instance — tear it down first:
+        devctl bsky down$(name_flag)"
+
+  # 1. The publisher: getFeedSkeleton only serves feeds under its DID, so
+  #    bridgeu-api has to be told it before anything is published.
+  local publisher
+  publisher="$(eurosky_resolve_did "$handle")" ||
+    die "couldn't resolve $handle to a DID"
+
+  # 2. One tunnel into the gateway, which sends every path to bridgeu-api.
+  eurosky_write_gateway_config "$RUNTIME/Caddyfile"
+  start_public_tunnel || die "the public endpoint didn't start (see the error above)"
+  local host
+  host="$(bsky_tunnel_host)" || {
+    bsky_stop_tunnel
+    die "no usable tunnel — devctl logs ngrok"
+  }
+
+  # 3. Recreate bridgeu-api as the tunnel's feed generator. Its first start
+  #    installs dependencies, so give did.json longer than bsky does.
+  echo "devctl: pointing bridgeu-api at the tunnel (did:web:$host) and restarting it"
+  resolve_live
+  eurosky_export_env "$host" "$publisher"
+  compose up -d --no-deps --force-recreate bridgeu-api >/dev/null
+  bsky_wait_did "$host" "did:web:$host" 90 || {
+    bsky_stop_tunnel
+    eurosky_restore
+    die "bridgeu-api didn't answer at https://$host/.well-known/did.json — devctl logs bridgeu-api"
+  }
+
+  # 4. Publish, with the script's dev naming. The password goes in the
+  #    environment, not argv, where anything on the host could read it.
+  compose_exec bridgeu-api pipenv run python scripts/publish_feeds.py --configured \
+    --environment dev 2>/dev/null | tr -d '\r' >"$EUROSKY_FEEDS_TSV" || true
+  echo "devctl: publishing BridgEU's feeds to $handle"
+  compose exec -T -e "BRIDGEU_PUBLISHER_APP_PASSWORD=$GE_DEV_EUROSKY_APP_PASSWORD" bridgeu-api \
+    pipenv run python scripts/publish_feeds.py --environment dev --handle "$handle" || {
+    bsky_stop_tunnel
+    rm -f "$EUROSKY_FEEDS_TSV"
+    eurosky_restore
+    die "publishing feeds failed — the tunnel and bridgeu-api change have been rolled back"
+  }
+
+  cat >"$EUROSKY_STATE" <<EOF
+GE_EUROSKY_HANDLE=$handle
+GE_EUROSKY_PUBLISHER_DID=$publisher
+GE_EUROSKY_HOST=$host
+EOF
+  echo
+  echo "Serving BridgEU's feeds as $handle ($publisher), from https://$host."
+  echo
+  eurosky_print_feeds "$handle"
+  echo
+  echo "This tunnel is on the public internet. Tear it down when you're done:"
+  echo "  devctl eurosky down$(name_flag)"
+}
+
+# A handle's DID, resolved inside bridgeu-api the way its publish script does
+# (DNS or the handle's own /.well-known), so no AppView is involved.
+eurosky_resolve_did() {
+  local did
+  did="$(compose_exec bridgeu-api pipenv run python -c '
+import sys
+sys.path.insert(0, "src")
+from app.lib.feed_publishing import AtprotoResolver, resolve_account
+print(resolve_account(sys.argv[1], AtprotoResolver())[0])
+' "$1" 2>/dev/null | tr -d '\r')" || return 1
+  [[ "$did" == did:* ]] || return 1
+  printf '%s\n' "$did"
+}
+
+# What bridgeu-api runs with while it's the tunnel's feed generator. The dev
+# session goes off: bridg-eu refuses it on any hostname but localhost.
+eurosky_export_env() {
+  export GE_DEV_BRIDGEU_HOSTNAME="$1"
+  export GE_DEV_BRIDGEU_PUBLISHER_DID="$2"
+  export GE_DEV_BRIDGEU_SESSION_SECRET=""
+}
+
+# Re-apply an active session's environment, for resolve_live. Only while the
+# tunnel runs: after a `devctl down` (or a reboot) it's gone, and a free ngrok
+# domain won't come back the same, so bridgeu-api goes back to local and the
+# session is only owed a `eurosky down`.
+eurosky_export_session_env() {
+  [[ -f "$EUROSKY_STATE" ]] || return 0
+  service_running ngrok || return 0
+  eurosky_export_env "$(env_file_value "$EUROSKY_STATE" GE_EUROSKY_HOST)" \
+    "$(env_file_value "$EUROSKY_STATE" GE_EUROSKY_PUBLISHER_DID)"
+}
+
+# Back to local defaults. Callers have removed the session state first, or
+# never wrote it, so resolve_live exports nothing of the session's.
+eurosky_restore() {
+  echo "devctl: restoring bridgeu-api to local defaults"
+  unset GE_DEV_BRIDGEU_HOSTNAME GE_DEV_BRIDGEU_PUBLISHER_DID GE_DEV_BRIDGEU_SESSION_SECRET
+  resolve_live || true
+  compose up -d --no-deps --force-recreate bridgeu-api >/dev/null 2>&1 || true
+}
+
+# The gateway's routing for a eurosky session: everything is bridgeu-api's.
+# There's no frontend or OAuth to split off, unlike bsky_write_gateway_config.
+eurosky_write_gateway_config() {
+  cat >"$1" <<EOF
+{
+	admin off
+	auto_https off
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+:80 {
+	reverse_proxy bridgeu-api:8000
+}
+EOF
+  chmod 644 "$1"
+}
+
+eurosky_print_feeds() {
+  local handle="$1" rkey name
+  echo "Published feeds (open in the Bluesky app, or find them on $handle's profile in Skeets or mu):"
+  [[ -s "$EUROSKY_FEEDS_TSV" ]] || return 0
+  while IFS=$'\t' read -r rkey name; do
+    printf '  %s:  https://bsky.app/profile/%s/feed/%s\n' "${name:-$rkey}" "$handle" "$rkey"
+  done <"$EUROSKY_FEEDS_TSV"
+}
+
+eurosky_down() {
+  [[ $# -eq 0 ]] || die "usage: devctl eurosky down"
+  [[ -f "$EUROSKY_STATE" ]] ||
+    die "no active eurosky session for this instance$(instance_label) — nothing to tear down"
+  local handle publisher rkeys
+  handle="$(env_file_value "$EUROSKY_STATE" GE_EUROSKY_HANDLE)"
+  publisher="$(env_file_value "$EUROSKY_STATE" GE_EUROSKY_PUBLISHER_DID)"
+  rkeys="$(cut -f1 "$EUROSKY_FEEDS_TSV" 2>/dev/null | tr '\n' ' ' || true)"
+  # Exactly the records `up` published, by rkey: nothing else on the account.
+  # BRIDGEU_PUBLISHER_DID is the session's, since bridgeu-api may already be
+  # back on the local placeholder (after a `devctl down`).
+  if [[ -n "$rkeys" && -n "${GE_DEV_EUROSKY_APP_PASSWORD:-}" ]] && service_running bridgeu-api; then
+    echo "devctl: deleting feed records from $handle"
+    # shellcheck disable=SC2086  # one rkey per word
+    compose exec -T -e "BRIDGEU_PUBLISHER_APP_PASSWORD=$GE_DEV_EUROSKY_APP_PASSWORD" \
+      -e "BRIDGEU_PUBLISHER_DID=$publisher" bridgeu-api \
+      pipenv run python scripts/publish_feeds.py --handle "$handle" --delete $rkeys || {
+      die "deleting the feed records failed — the session is left in place; retry devctl eurosky down$(name_flag)"
+    }
+  else
+    echo "devctl: warning — can't delete the feed records (bridgeu-api down, no app password, or" >&2
+    echo "        no record of what was published). Delete them by hand:" >&2
+    echo "          devctl exec bridgeu-api pipenv run python scripts/publish_feeds.py --list" >&2
+    echo "        with BRIDGEU_PUBLISHER_DID=$publisher, then --delete <rkey>" >&2
+  fi
+
+  bsky_stop_tunnel
+  rm -f "$EUROSKY_STATE" "$EUROSKY_FEEDS_TSV"
+  eurosky_restore
+  echo "devctl: eurosky session torn down — bridgeu-api is local-only again."
+}
+
+eurosky_warn_if_published() {
+  local mode="${1:-stop}" handle
+  [[ -f "$EUROSKY_STATE" ]] || return 0
+  handle="$(env_file_value "$EUROSKY_STATE" GE_EUROSKY_HANDLE)"
+  if [[ "$mode" == "nuke" ]]; then
+    echo "devctl: note — BridgEU's feeds are still published on ${handle:-your dev account}, and" >&2
+    echo "        nuke removes the record of that session. Delete them from its profile in" >&2
+    echo "        a client, or with bridg-eu's scripts/publish_feeds.py --delete." >&2
+  else
+    echo "devctl: note — BridgEU's feeds are still published on ${handle:-your dev account}," >&2
+    echo "        and the tunnel serving them is now closed." >&2
+    echo "        Delete them with: devctl up$(name_flag) && devctl eurosky down$(name_flag)" >&2
+  fi
+}
+
+eurosky_status() {
+  [[ $# -eq 0 ]] || die "usage: devctl eurosky status"
+  if [[ ! -f "$EUROSKY_STATE" ]]; then
+    echo "no active eurosky session$(instance_label)."
+    echo "start one with: devctl eurosky up$(name_flag)"
+    return
+  fi
+  local handle publisher host
+  handle="$(env_file_value "$EUROSKY_STATE" GE_EUROSKY_HANDLE)"
+  publisher="$(env_file_value "$EUROSKY_STATE" GE_EUROSKY_PUBLISHER_DID)"
+  host="$(env_file_value "$EUROSKY_STATE" GE_EUROSKY_HOST)"
+  if service_running ngrok; then
+    echo "eurosky session active$(instance_label) as ${handle:-?} (${publisher:-?}), from https://${host:-?}."
+  else
+    echo "eurosky session recorded$(instance_label) as ${handle:-?}, but its tunnel isn't running."
+    echo "The feeds below are still published and resolve to nothing: devctl eurosky down$(name_flag) deletes them."
+  fi
+  echo
+  eurosky_print_feeds "${handle:-}"
+  echo
+  echo "tear down with: devctl eurosky down$(name_flag)"
 }
 
 # --- pull: fast-forward every sibling checkout ------------------------------
@@ -2388,6 +2675,7 @@ cmd_nuke() {
         GE_DEV_FORCE_NUKE=1 devctl nuke"
   fi
   bsky_warn_if_published nuke
+  eurosky_warn_if_published nuke
   compose down -v --remove-orphans
   # Volumes are namespaced by compose project, and the runtime directory and
   # derived Firebase config are named after the instance — so this destroys
@@ -2666,7 +2954,7 @@ Work with it:
   exec <svc> ...   run any command in a service (e.g. exec api pipenv run pytest)
   feed [feed]      view a hydrated feed in the terminal (default: your-feed;
                    --user <did>, --limit, --pages, --json for raw skeleton;
-                   --bridgeu for a BridgEU feed, default: mysky)
+                   --bridgeu for a BridgEU feed, default: passthrough)
   es <path>        query this instance's Elasticsearch (read-only key, e.g.
                    devctl es /posts/_count)
   login [did]      print a sign-in URL for the frontend as the seeded persona
@@ -2678,13 +2966,19 @@ Work with it:
                    flag any on a branch other than main (--repo-root <dir> for
                    another copy)
 
-Serve on real Bluesky (opt-in; ngrok runs as a container — just an authtoken):
+Serve on real Bluesky or Eurosky (opt-in; ngrok runs as a container — just an authtoken):
   bsky up          tunnel this env to Bluesky and publish its feeds; the same
                    public URL serves the frontend for real sign-in. Prints the
                    feed + sign-in links
   bsky down        delete those feed records and close the tunnel
   bsky status      show the active session's URL, sign-in note and feed links
        (config: NGROK_AUTHTOKEN, GE_DEV_BSKY_HANDLE, GE_BSKY_APP_PASSWORD; see README)
+  eurosky up       the same for BridgEU: tunnel bridgeu-api and publish its feeds
+                   to your dev Eurosky account, to load in Skeets, mu or Bluesky
+  eurosky down     delete those feed records and close the tunnel
+  eurosky status   show the active session's URL and feed links
+       (config: NGROK_AUTHTOKEN, GE_DEV_EUROSKY_HANDLE, GE_DEV_EUROSKY_APP_PASSWORD)
+       bsky and eurosky share one tunnel, so only one runs at a time.
 
 Instances & ports:
   ls               every instance on this machine, and whether it's running
@@ -2713,6 +3007,8 @@ Configuration (devenv.local.env, gitignored — see devenv.local.env.example)
   Stick a live choice: GE_DEV_LIVE, GE_DEV_LIVE_ENV (else a bare 'up' is all-local)
   Serve on bsky:       NGROK_AUTHTOKEN, GE_DEV_BSKY_HANDLE, GE_BSKY_APP_PASSWORD,
                        GE_DEV_NGROK_DOMAIN (bsky up/down)
+  Serve on eurosky:    NGROK_AUTHTOKEN, GE_DEV_EUROSKY_HANDLE,
+                       GE_DEV_EUROSKY_APP_PASSWORD (eurosky up/down)
   Other overrides:     ports (GE_DEV_PORT_*), ES heap (GE_DEV_ES_HEAP),
                        repo root (GE_DEV_REPO_ROOT)
 EOF
@@ -2767,6 +3063,7 @@ seed) cmd_seed "$@" ;;
 feed) cmd_feed "$@" ;;
 login) cmd_login "$@" ;;
 bsky) cmd_bsky "$@" ;;
+eurosky) cmd_eurosky "$@" ;;
 pull) cmd_pull "$@" ;;
 status | ps) cmd_status "$@" ;;
 doctor) cmd_doctor "$@" ;;
@@ -2788,6 +3085,7 @@ down)
   compose down
   rm -f "$GE_DEV_REPO_ROOT/frontend/$GE_DEV_FIREBASE_CONFIG"
   bsky_warn_if_published
+  eurosky_warn_if_published
   ;;
 nuke) cmd_nuke "$@" ;;
 "" | help | -h | --help) usage ;;

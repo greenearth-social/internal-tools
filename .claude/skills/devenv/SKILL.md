@@ -83,8 +83,16 @@ devctl restart bridgeu-api      # after editing bridg-eu code
 BridgEU feeds come from the api's `/slate/generate`. `bridgeu-api` calls the
 local api with a key `devctl up` issues it, and accepts the api's dev session
 in place of a Bluesky JWT. Render a BridgEU feed as the seeded persona with
-`devctl feed --bridgeu` (default feed `mysky`; other `devctl feed` options
+`devctl feed --bridgeu` (default feed `passthrough`; other `devctl feed` options
 apply, `--json` for the raw skeleton).
+
+`devctl eurosky up` serves BridgEU's feeds publicly: an ngrok tunnel to
+`bridgeu-api`, plus the feeds published (as `BEU Dev ...`) on the dev
+account in `GE_DEV_EUROSKY_HANDLE`, to load in Skeets, mu or the Bluesky app.
+`devctl eurosky down` deletes those records and closes the tunnel. It publishes
+to a real account and opens a public tunnel, so only run it when the user asks,
+and tear it down when done. It shares the tunnel with `devctl bsky`, so only
+one of the two runs at a time; while it's up, `devctl feed --bridgeu` is off.
 
 `devctl up --live mysky --live-env prod` points it at the prod api instead,
 with a real key in `GE_DEV_MYSKY_API_KEY` (devenv.local.env). Only do that when

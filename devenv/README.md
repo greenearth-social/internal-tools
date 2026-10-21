@@ -880,7 +880,7 @@ session as the mysky api (`X-Dev-Session` plus `X-Dev-Session-DID`).
 the same way `devctl feed` renders a mysky one:
 
 ```bash
-./devctl feed --bridgeu                       # BridgEU's mysky feed
+./devctl feed --bridgeu                       # BridgEU's passthrough feed
 ./devctl feed --bridgeu --limit 10 --pages 2  # other feed options work as usual
 ./devctl feed --bridgeu --json                # the raw skeleton, feedContext included
 ```
@@ -891,7 +891,7 @@ API, which doesn't write the snapshots `devctl feed` reads that from. With curl:
 ```bash
 persona=$(sed -n 's/^GE_PROBE_USER_DID=//p' .runtime/probe.env)
 curl -s -H 'X-Dev-Session: ge-dev-session' -H "X-Dev-Session-DID: $persona" \
-  --get --data-urlencode 'feed=at://did:plc:bridgeudevpublisher/app.bsky.feed.generator/mysky' \
+  --get --data-urlencode 'feed=at://did:plc:bridgeudevpublisher/app.bsky.feed.generator/passthrough' \
   -d limit=10 http://127.0.0.1:8400/xrpc/app.bsky.feed.getFeedSkeleton
 ```
 
@@ -907,6 +907,29 @@ The dev session only works while `bridgeu-api` answers as `localhost`: bridg-eu
 refuses to start with it under any other hostname. If you set
 `GE_DEV_BRIDGEU_HOSTNAME`, also set `GE_DEV_BRIDGEU_SESSION_SECRET=` (empty) to
 turn the dev session off.
+
+### Serving a local BridgEU feed on Eurosky
+
+`devctl eurosky up` is BridgEU's version of [`devctl bsky up`](#serving-a-local-feed-on-real-bluesky): it opens the same kind of ngrok tunnel to `bridgeu-api` and publishes BridgEU's feeds on your dev account with bridg-eu's own `scripts/publish_feeds.py --environment dev`, named `BEU Dev <name>`. A feed record isn't tied to an AppView, so the published feed loads in Skeets and mu (on Eurosky's AppView or Bluesky's) as well as the Bluesky app. Scrolling it sends real `sendInteractions` back through your PDS and the tunnel, so `devctl logs bridgeu-api` and `devctl logs api` show the whole interactions path.
+
+```bash
+devctl eurosky up        # tunnel, publish, print the feed links
+devctl eurosky status    # the URL and feed links again
+devctl eurosky down      # delete exactly those records, close the tunnel
+```
+
+In `devenv.local.env`:
+
+```bash
+NGROK_AUTHTOKEN=2abc...                          # shared with bsky
+GE_DEV_EUROSKY_HANDLE=you-beu-dev.eurosky.social
+GE_DEV_EUROSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
+```
+
+- **Use a dev account of its own**, not `GE_DEV_BSKY_HANDLE`. `bsky down` deletes every feed record on its account, so a shared one would lose BridgEU's records too. Any PDS works, since the publish script finds the account's PDS from its DID document, but an account on `eurosky.social` is the closest to production.
+- **During a session bridgeu-api is the tunnel's feed generator:** `BRIDGEU_HOSTNAME` is the tunnel host, `BRIDGEU_PUBLISHER_DID` is your dev account, and the dev session is off (bridg-eu refuses it on a public hostname). So `devctl feed --bridgeu` doesn't work; load the feed in a real client instead. Signed in as any account, the AppView sends that account's JWT, bridg-eu verifies it, and the local mysky api builds the slate from the seeded sample, which is real Bluesky posts that hydrate normally. `devctl restart bridgeu-api` after an edit keeps the session.
+- **One session at a time.** `bsky` and `eurosky` share the tunnel and its gateway (which joins the `bridgeu` network for this), so each refuses to start while the other's session exists.
+- **A session outlives the containers**, as with `bsky`. `devctl down` closes the tunnel and returns bridgeu-api to local, but the records stay on your account until `devctl eurosky down`; `down`, `nuke` and `eurosky status` say so. A free ngrok URL doesn't survive the restart, so end the session and start a new one rather than resuming.
 
 ## Service endpoints (defaults)
 

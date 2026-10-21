@@ -76,6 +76,16 @@
       "handle": "ge-stage.bsky.social",
       "did": "did:plc:n5joql37jrpxsahnbdpg4z7z",
       "owner": "raindrift"
+    },
+    {
+      "handle": "raindrift.eurosky.social",
+      "did": "did:plc:w4ng3limigm7emvq77wahnuj",
+      "owner": "raindrift"
+    },
+    {
+      "handle": "rd-beu-dev.eurosky.social",
+      "did": "did:plc:gp2rb7avwrmxx2r4sg3slg7i",
+      "owner": "raindrift"
     }
   ]
 }

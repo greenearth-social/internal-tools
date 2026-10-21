@@ -7,7 +7,7 @@
 # the mysky api with an API key. This file reproduces that boundary with
 # networks rather than by convention: BridgEU services sit only on the
 # `bridgeu` network, and the one mysky service that also joins it is the api,
-# as `mysky-api`. So `elasticsearch` and `firebase` don't even resolve from a
+# as `mysky-api` (the tunnel gateway joins too; see below). So `elasticsearch` and `firebase` don't even resolve from a
 # BridgEU container — reaching for them directly fails here the same way it
 # would in production.
 #
@@ -85,6 +85,15 @@ services:
       bridgeu:
         aliases:
           - mysky-api
+
+  # The public tunnel's gateway (docker-compose.yml, profile "bsky") also joins,
+  # so `devctl eurosky up` can route it to bridgeu-api. It's a reverse proxy
+  # for whichever side's session is up, not a mysky service, and BridgEU
+  # services still can't reach anything of mysky's through it.
+  gateway:
+    networks:
+      default: {}
+      bridgeu: {}
 
 networks:
   bridgeu:
