@@ -352,9 +352,9 @@ with a fake, and ranking adds ~90ms to a ~700ms feed request.
 `megastream_ingest` computes each post's `ge_post_embedding` by calling the
 inference service at seed time, and the api's `two_tower` generator runs kNN
 over that field *filtered by the model UUID that produced it*. Change the
-models and the seeded embeddings no longer match: the feed comes back thin
-rather than wrong, which is the safe failure but an easy one to misread. **Any
-model change needs a re-seed.**
+post tower and the seeded embeddings no longer match: the feed comes back thin
+rather than wrong, which is the safe failure but an easy one to misread. **A
+post-tower change needs a re-seed.** A compatible ranker-only change does not.
 
 `devctl` also compares the model bundle's `manifest.json` against the fixture's
 before `up` and `seed`, and refuses to run if the content encoder or its
@@ -379,6 +379,53 @@ the same artifacts is idempotent.
 Maintainers publish a new bundle with `models/publish_models.sh` and move the
 pin — the procedure, including the `max_history_len` check that fails silently
 when skipped, is in [docs/runbooks.md](docs/runbooks.md).
+
+### Select a local ranker from GCS
+
+Use a specific training-run directory or its serving-manifest URI:
+
+```bash
+./devctl use-ranker "gs://bucket/Engagement Prediction/train_bst-ranker.<task-id>"
+./devctl use-ranker "gs://bucket/path/to/run/artifacts/ranker_serving_manifest/ranker_serving_manifest.json"
+```
+
+This needs `gcloud` authenticated with read access to the artifacts. It downloads
+the TorchScript ranker and matching author map, rewrites paths for the container,
+and selects the model for this instance. It works before the dev environment has
+ever started and never calls Docker, starts a service, or restarts one. Bucket-wide
+selection is not supported; provide the exact run or manifest.
+
+The next `./devctl up` uses the selected model for local inference. If inference
+is already running, it keeps serving its loaded model until you explicitly run
+`./devctl restart inference`. Loading the weights and checking predictions still
+require a running inference service; preparation checks the published metadata.
+With `--live inference`, the selection is saved for later local use and does not
+change the deployed service.
+
+Newer runs include `bst_model_config/model_config.json`, from which the command
+reads the history length and checks the content encoder, dimensions, and supported
+ranker features. Older exports without that configuration need an explicit
+`--max-history-len`, for example:
+
+```bash
+./devctl use-ranker "gs://bucket/path/to/older-run" --max-history-len 64
+```
+
+The override and downloaded artifacts live under the instance's gitignored
+`.runtime/` directory (`.runtime.<name>/` with `--name`). They survive
+`fetch-models`; the bundle's two towers stay selected. Compatibility is checked
+again before `up`, `seed`, and `restart inference`, including when the bundle or
+fixture was downloaded after selecting the ranker. `nuke` removes the override
+with the instance's other runtime state. To return to the ranker configured by
+the downloaded bundle:
+
+```bash
+./devctl use-ranker --reset
+```
+
+Reset also only updates the selection; apply it on the next start or explicit
+restart. Previously downloaded rankers remain on disk so running containers keep
+their mounted files.
 
 ## Live ingestion (optional)
 
