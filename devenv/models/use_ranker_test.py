@@ -102,9 +102,9 @@ def test_selects_specific_run_with_matching_author_map_and_derived_history(
                 source,
                 "--runtime",
                 str(runtime),
-                "--models-manifest",
+                "--models-manifest-path",
                 str(models),
-                "--fixture-manifest",
+                "--fixture-manifest-path",
                 str(fixture),
             ]
         )
@@ -267,7 +267,7 @@ def test_rejects_model_or_fixture_embedding_mismatch(
     )
     assert (
         use_ranker.main(
-            [RUN_URI, "--runtime", str(tmp_path), f"--{bundle}-manifest", str(manifest)]
+            [RUN_URI, "--runtime", str(tmp_path), f"--{bundle}-manifest-path", str(manifest)]
         )
         == 1
     )
@@ -278,7 +278,7 @@ def test_check_validates_bundles_that_arrive_after_selection_without_network(
     tmp_path, remote, capsys
 ):
     models = tmp_path / "models.json"
-    args = ["--runtime", str(tmp_path), "--models-manifest", str(models)]
+    args = ["--runtime", str(tmp_path), "--models-manifest-path", str(models)]
     assert use_ranker.main([RUN_URI, *args]) == 0
     calls_before = list(remote[1])
     write_json(models, {"content_embedding_model": "different", "content_embedding_dims": 384})
@@ -365,4 +365,23 @@ def test_reset_does_not_create_runtime_or_require_gcloud(tmp_path, remote):
     runtime = tmp_path / "not-created"
     assert use_ranker.main(["--reset", "--runtime", str(runtime)]) == 0
     assert not runtime.exists()
+    assert remote[1] == []
+
+
+def test_help_describes_all_arguments_without_requiring_runtime_or_gcloud(remote, capsys):
+    with pytest.raises(SystemExit) as exc:
+        use_ranker.main(["--help"])
+
+    assert exc.value.code == 0
+    output = " ".join(capsys.readouterr().out.split())
+    for description in (
+        "GCS_URI GCS URI of a specific training-run directory",
+        "--runtime DIR Local runtime directory",
+        "--models-manifest-path PATH Path to the local model bundle's manifest.json",
+        "--fixture-manifest-path PATH Path to the local fixture's manifest.json",
+        "--max-history-len N Override the maximum number of history entries",
+        "--reset Clear the local ranker selection",
+        "--check Check the saved ranker against local manifests",
+    ):
+        assert description in output
     assert remote[1] == []

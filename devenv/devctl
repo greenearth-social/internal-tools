@@ -754,8 +754,8 @@ EOF
 check_model_fixture_compat() {
   if [[ -f "$RUNTIME/ranker.compose.json" ]]; then
     python3 "$DEVENV_DIR/models/use_ranker.py" --check --runtime "$RUNTIME" \
-      --models-manifest "$DEVENV_DIR/models/data/manifest.json" \
-      --fixture-manifest "$DEVENV_DIR/fixtures/data/manifest.json" || exit 1
+      --models-manifest-path "$DEVENV_DIR/models/data/manifest.json" \
+      --fixture-manifest-path "$DEVENV_DIR/fixtures/data/manifest.json" || exit 1
   fi
   have_models && have_fixtures || return 0
   python3 "$DEVENV_DIR/models/check_compat.py" \
@@ -893,8 +893,8 @@ cmd_use_ranker() {
   # Preparation is independent of Docker and port allocation: developers can
   # select a model before starting an instance for the first time.
   python3 "$DEVENV_DIR/models/use_ranker.py" "$@" --runtime "$RUNTIME" \
-    --models-manifest "$DEVENV_DIR/models/data/manifest.json" \
-    --fixture-manifest "$DEVENV_DIR/fixtures/data/manifest.json"
+    --models-manifest-path "$DEVENV_DIR/models/data/manifest.json" \
+    --fixture-manifest-path "$DEVENV_DIR/fixtures/data/manifest.json"
   echo "devctl: selection applies on the next local inference start."
   echo "        Start the stack: devctl up$(name_flag)"
   echo "        Apply to a running service: devctl restart$(name_flag) inference"

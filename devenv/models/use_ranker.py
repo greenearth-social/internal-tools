@@ -170,7 +170,7 @@ def select_ranker(args: argparse.Namespace) -> None:
             raise ValueError(
                 "This run has no bst_model_config/model_config.json; supply --max-history-len"
             )
-        check_compatibility(config, args.models_manifest, args.fixture_manifest)
+        check_compatibility(config, args.models_manifest_path, args.fixture_manifest_path)
 
         print("devctl: downloading author map...", flush=True)
         gcloud("cp", author_maps[0], str(stage / "ranker_author_idx.parquet"))
@@ -230,24 +230,64 @@ def select_ranker(args: argparse.Namespace) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "source", nargs="?", help="Specific GCS run URI or ranker_serving_manifest.json URI"
+        "source",
+        nargs="?",
+        metavar="GCS_URI",
+        help=(
+            "GCS URI of a specific training-run directory or its ranker_serving_manifest.json; "
+            "omit with --reset or --check"
+        ),
     )
-    parser.add_argument("--runtime", type=Path, required=True)
-    parser.add_argument("--models-manifest", type=Path)
-    parser.add_argument("--fixture-manifest", type=Path)
+    parser.add_argument(
+        "--runtime",
+        type=Path,
+        required=True,
+        metavar="DIR",
+        help="Local runtime directory for this dev instance; stores downloads and ranker selection",
+    )
+    parser.add_argument(
+        "--models-manifest-path",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Path to the local model bundle's manifest.json for compatibility checks; "
+            "skipped if omitted or the file does not exist"
+        ),
+    )
+    parser.add_argument(
+        "--fixture-manifest-path",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Path to the local fixture's manifest.json for compatibility checks; "
+            "skipped if omitted or the file does not exist"
+        ),
+    )
     parser.add_argument(
         "--max-history-len",
         type=int,
-        help="Override history length; required for legacy runs without model config",
+        metavar="N",
+        help=(
+            "Override the maximum number of history entries passed to the ranker; "
+            "defaults to training metadata, required for legacy runs without model config"
+        ),
     )
     actions = parser.add_mutually_exclusive_group()
-    actions.add_argument("--reset", action="store_true", help="Clear the local selection")
-    actions.add_argument("--check", action="store_true", help=argparse.SUPPRESS)
+    actions.add_argument(
+        "--reset",
+        action="store_true",
+        help="Clear the local ranker selection, keeping downloaded files",
+    )
+    actions.add_argument(
+        "--check",
+        action="store_true",
+        help="Check the saved ranker against local manifests without downloading files",
+    )
     args = parser.parse_args(argv)
     if (args.reset or args.check) and (args.source or args.max_history_len is not None):
         parser.error("--reset and --check cannot be combined with a source or --max-history-len")
     if not (args.reset or args.check) and args.source is None:
-        parser.error("a GCS source or --reset is required")
+        parser.error("a GCS source, --reset, or --check is required")
     try:
         if args.max_history_len is not None:
             positive_int(args.max_history_len, "--max-history-len")
@@ -260,8 +300,8 @@ def main(argv: list[str] | None = None) -> int:
                 selection = read_json(selection_path)
                 check_compatibility(
                     selection["x-ge-ranker"]["model_config"],
-                    args.models_manifest,
-                    args.fixture_manifest,
+                    args.models_manifest_path,
+                    args.fixture_manifest_path,
                 )
         else:
             select_ranker(args)
