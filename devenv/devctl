@@ -210,8 +210,13 @@ MODELS_TAG="${GE_DEV_MODELS_TAG:-models-1bf1ea3c-177899dd}"
 # and BridgEU (docker-compose.bridgeu.yml), which only reaches mysky through
 # its api. See the header of the BridgEU file.
 compose() {
-  docker compose -f "$DEVENV_DIR/docker-compose.yml" -f "$DEVENV_DIR/docker-compose.bridgeu.yml" \
-    --project-directory "$DEVENV_DIR" "$@"
+  local files=(-f "$DEVENV_DIR/docker-compose.yml" -f "$DEVENV_DIR/docker-compose.bridgeu.yml")
+  # A selected ranker belongs to this instance and survives fetching a new
+  # shared model bundle. Its environment overrides the bundle's env_file.
+  if [[ -f "$RUNTIME/ranker.compose.json" ]]; then
+    files+=(-f "$RUNTIME/ranker.compose.json")
+  fi
+  docker compose "${files[@]}" --project-directory "$DEVENV_DIR" "$@"
 }
 
 # BridgEU lives in another GitHub org, so not every checkout of this stack has
@@ -748,9 +753,14 @@ credentials needed. \`devctl setup\` does it for you.
 EOF
 }
 
-# Nothing to compare until both halves are present; models/check_compat.py
-# explains why this matters.
+# A local ranker can be selected before either bundle arrives, so recheck it
+# against whatever is now available. The tower/fixture check needs both bundles.
 check_model_fixture_compat() {
+  if [[ -f "$RUNTIME/ranker.compose.json" ]]; then
+    python3 "$DEVENV_DIR/models/use_ranker.py" --check --runtime "$RUNTIME" \
+      --models-manifest-path "$DEVENV_DIR/models/data/manifest.json" \
+      --fixture-manifest-path "$DEVENV_DIR/fixtures/data/manifest.json" || exit 1
+  fi
   have_models && have_fixtures || return 0
   python3 "$DEVENV_DIR/models/check_compat.py" \
     "$DEVENV_DIR/models/data/manifest.json" \
@@ -881,6 +891,17 @@ print(f"devctl: fetched models {m['tag']} — {m['content_embedding_model']} "
 PY
   check_model_fixture_compat
   hint "Next: devctl up && devctl seed"
+}
+
+cmd_use_ranker() {
+  # Preparation is independent of Docker and port allocation: developers can
+  # select a model before starting an instance for the first time.
+  python3 "$DEVENV_DIR/models/use_ranker.py" "$@" --runtime "$RUNTIME" \
+    --models-manifest-path "$DEVENV_DIR/models/data/manifest.json" \
+    --fixture-manifest-path "$DEVENV_DIR/fixtures/data/manifest.json"
+  echo "devctl: selection applies on the next local inference start."
+  echo "        Start the stack: devctl up$(name_flag)"
+  echo "        Apply to a running service: devctl restart$(name_flag) inference"
 }
 
 # ---------------------------------------------------------------------------
@@ -2824,6 +2845,9 @@ cmd_restart() {
   check_docker
   resolve_live
   export_api_es_env
+  if [[ " $* " == *" inference "* ]]; then
+    check_model_fixture_compat
+  fi
   compose up -d --no-deps --force-recreate "$@"
   # A recreated emulator has forgotten the key.
   [[ " $* " != *" firebase "* ]] || issue_bridgeu_key
@@ -2930,6 +2954,11 @@ Setup (first run):
                    install inference-service's dependencies
   fetch-fixture    download the published fixture set (no account or auth needed)
   fetch-models     download the pinned trained models (no account or auth needed)
+  use-ranker <gs://run-or-manifest>
+                   download and select a ranker for this instance (needs gcloud)
+                   history length is required in the training configuration
+                     --reset                         return to the bundle's ranker
+                   prepares files only; never starts or restarts a service
 
 Run the stack:
   up               start the stack (ES + Firebase emulators + inference + api,
@@ -3047,7 +3076,7 @@ esac
 # recorded doesn't exist, and saying so beats acting on the wrong one.
 # `exec` resolves its own, after parsing the --name that may follow it.
 case "$cmd" in
-setup | fetch-fixture | fetch-models | ls | exec | pull | "" | help | -h | --help) ;;
+setup | fetch-fixture | fetch-models | use-ranker | ls | exec | pull | "" | help | -h | --help) ;;
 up | bootstrap) ;; # allocate inside cmd_up, after its flags are parsed
 *) resolve_ports read ;;
 esac
@@ -3057,6 +3086,7 @@ setup) cmd_setup "$@" ;;
 bootstrap) cmd_bootstrap "$@" ;;
 fetch-fixture) cmd_fetch_fixture "$@" ;;
 fetch-models) cmd_fetch_models "$@" ;;
+use-ranker) cmd_use_ranker "$@" ;;
 up) cmd_up "$@" ;;
 tunnel) cmd_tunnel "$@" ;;
 seed) cmd_seed "$@" ;;

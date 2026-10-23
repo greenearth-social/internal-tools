@@ -140,7 +140,9 @@ def run_devctl(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess,
     return result, marker
 
 
-@pytest.mark.parametrize("command", ["seed", "nuke", "down", "up", "bootstrap", "setup", "test"])
+@pytest.mark.parametrize(
+    "command", ["seed", "nuke", "down", "up", "bootstrap", "setup", "test", "use-ranker"]
+)
 @pytest.mark.parametrize("flag", ["--help", "-h"])
 def test_help_flag_prints_usage_without_touching_docker(tmp_path, command, flag):
     # Issue #42: `seed --help` used to ignore the flag and wipe the seeded data.
@@ -158,6 +160,210 @@ def test_argumentless_commands_refuse_stray_arguments(tmp_path, command):
     assert result.returncode == 1
     assert f"{command} takes no arguments" in result.stderr
     assert not marker.exists(), marker.read_text()
+
+
+@pytest.fixture
+def ranker_cli(tmp_path):
+    """Run the full CLI in a fresh checkout with fake GCS and no Docker daemon."""
+    devenv = tmp_path / "internal-tools" / "devenv"
+    (devenv / "models").mkdir(parents=True)
+    shutil.copy2(DEVCTL, devenv / "devctl")
+    shutil.copy2(DEVENV_DIR / "models" / "use_ranker.py", devenv / "models")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker_calls = tmp_path / "docker-calls"
+    write_executable(bin_dir / "docker", '#!/bin/sh\necho "$@" >>"$DOCKER_CALLS"\nexit 1\n')
+    run_uri = "gs://rankers/Engagement Prediction/train_bst-ranker.task-1"
+    manifest_uri = run_uri + "/artifacts/ranker_serving_manifest/ranker_serving_manifest.json"
+    objects = {
+        manifest_uri: json.dumps(
+            {
+                "ranker_uri": run_uri + "/models/ranker.pt",
+                "ranker_clearml_model_id": "ranker-1",
+                "clearml_task_id": "task-1",
+            }
+        ),
+        run_uri + "/artifacts/bst_model_config/model_config.json": json.dumps(
+            {
+                "model_type": "bst-ranker",
+                "embedding_model": "all_MiniLM_L12_v2",
+                "max_history_len": 64,
+                "constructor_args": {"post_embedding_dim": 384, "num_transformer_layers": 1},
+            }
+        ),
+        run_uri + "/artifacts/author_idx_mapping/ranker_author_idx.parquet": "author map",
+        run_uri + "/models/ranker.pt": "weights",
+    }
+    objects_path = tmp_path / "gcs.json"
+    objects_path.write_text(json.dumps(objects))
+    write_executable(
+        bin_dir / "gcloud",
+        """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+objects = json.loads(Path(os.environ["GCS_OBJECTS"]).read_text())
+args = sys.argv[1:]
+if args[:2] == ["storage", "ls"]:
+    print("\\n".join(uri for uri in objects if uri.startswith(args[-1])))
+elif args[:2] == ["storage", "cp"]:
+    Path(args[-1]).write_text(objects[args[-2]])
+else:
+    sys.exit("Unexpected gcloud invocation: " + repr(args))
+""",
+    )
+    environment = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "HOME": str(tmp_path),
+        "DOCKER_CALLS": str(docker_calls),
+        "GCS_OBJECTS": str(objects_path),
+    }
+
+    def run(*args):
+        return subprocess.run(
+            [str(devenv / "devctl"), *args],
+            env=environment,
+            text=True,
+            capture_output=True,
+        )
+
+    return run, devenv, run_uri, manifest_uri, docker_calls
+
+
+@pytest.mark.parametrize("source_kind", ["run", "manifest"])
+def test_use_ranker_prepares_fresh_named_instance_without_docker(ranker_cli, source_kind):
+    run, devenv, run_uri, manifest_uri, docker_calls = ranker_cli
+    source = run_uri if source_kind == "run" else manifest_uri
+
+    result = run("use-ranker", source, "--name", "candidate")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    runtime = devenv / ".runtime.candidate"
+    selection = json.loads((runtime / "ranker.compose.json").read_text())
+    inference = selection["services"]["inference"]
+    assert inference["environment"]["GE_INFERENCE_RANKER_MAX_HISTORY_LEN"] == "64"
+    artifacts = Path(inference["volumes"][0]["source"])
+    assert artifacts.is_relative_to(runtime)
+    assert (artifacts / "ranker.pt").read_text() == "weights"
+    assert not (runtime / "ports.json").exists()
+    assert not (devenv / ".runtime").exists()
+    assert not docker_calls.exists()
+    assert "devctl restart --name candidate inference" in result.stdout
+
+
+def test_use_ranker_reset_preserves_artifacts_and_other_instances(ranker_cli):
+    run, devenv, run_uri, _, docker_calls = ranker_cli
+    for name in ("dev", "candidate"):
+        result = run("use-ranker", run_uri, "--name", name)
+        assert result.returncode == 0, result.stdout + result.stderr
+    runtime = devenv / ".runtime.candidate"
+    selection = json.loads((runtime / "ranker.compose.json").read_text())
+    artifacts = Path(selection["services"]["inference"]["volumes"][0]["source"])
+
+    result = run("use-ranker", "--reset", "--name", "candidate")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (runtime / "ranker.compose.json").exists()
+    assert (artifacts / "ranker.pt").exists()
+    assert (devenv / ".runtime" / "ranker.compose.json").exists()
+    assert not docker_calls.exists()
+
+
+@pytest.mark.parametrize("flag", ["--restart", "--latest", "--max-history-len", "--unknown"])
+def test_use_ranker_rejects_unsupported_flags_without_docker(ranker_cli, flag):
+    run, devenv, run_uri, _, docker_calls = ranker_cli
+
+    result = run("use-ranker", run_uri, flag, "--name", "candidate")
+
+    assert result.returncode != 0
+    assert "unrecognized arguments" in result.stderr
+    assert not (devenv / ".runtime.candidate").exists()
+    assert not docker_calls.exists()
+
+
+def test_compose_applies_ranker_override_only_to_selected_instance(ranker_cli):
+    run, devenv, run_uri, _, _ = ranker_cli
+    result = run("use-ranker", run_uri, "--name", "candidate")
+    assert result.returncode == 0, result.stdout + result.stderr
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            'docker() { printf "%s\\n" "$@"; }',
+            shell_function("compose"),
+            "compose config",
+        ]
+    )
+
+    for name in ("candidate", "other"):
+        result = subprocess.run(
+            ["bash", "-s"],
+            input=script,
+            text=True,
+            capture_output=True,
+            env={
+                "PATH": os.environ["PATH"],
+                "DEVENV_DIR": str(devenv),
+                "RUNTIME": str(devenv / f".runtime.{name}"),
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        arguments = result.stdout.splitlines()
+        assert arguments[:5] == [
+            "compose",
+            "-f",
+            str(devenv / "docker-compose.yml"),
+            "-f",
+            str(devenv / "docker-compose.bridgeu.yml"),
+        ]
+        override = str(devenv / ".runtime.candidate" / "ranker.compose.json")
+        assert (override in arguments) == (name == "candidate")
+
+
+@pytest.mark.parametrize("entrypoint", ["check_model_fixture_compat", "cmd_restart inference"])
+def test_ranker_compatibility_checked_when_bundle_arrives_after_selection(ranker_cli, entrypoint):
+    run, devenv, run_uri, _, docker_calls = ranker_cli
+    result = run("use-ranker", run_uri)
+    assert result.returncode == 0, result.stdout + result.stderr
+    bundle = devenv / "models" / "data"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text(
+        json.dumps(
+            {
+                "content_embedding_model": "different-encoder",
+                "content_embedding_dims": 384,
+            }
+        )
+    )
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            "have_models() { return 1; }",
+            "have_fixtures() { return 1; }",
+            "check_docker() { :; }",
+            "resolve_live() { :; }",
+            "export_api_es_env() { :; }",
+            'compose() { echo "unexpected service operation"; exit 23; }',
+            shell_function("check_model_fixture_compat"),
+            shell_function("cmd_restart"),
+            entrypoint,
+        ]
+    )
+
+    result = subprocess.run(
+        ["bash", "-s"],
+        input=script,
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "DEVENV_DIR": str(devenv),
+            "RUNTIME": str(devenv / ".runtime"),
+        },
+    )
+
+    assert result.returncode == 1
+    assert "disagree" in result.stderr
+    assert "unexpected service operation" not in result.stdout
+    assert not docker_calls.exists()
 
 
 def test_quality_backfill_uses_local_es_and_the_ingest_checkout():
