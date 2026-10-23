@@ -402,14 +402,11 @@ require a running inference service; preparation checks the published metadata.
 With `--live inference`, the selection is saved for later local use and does not
 change the deployed service.
 
-Newer runs include `bst_model_config/model_config.json`, from which the command
-reads the history length and checks the content encoder, dimensions, and supported
-ranker features. Older exports without that configuration need an explicit
-`--max-history-len`, for example:
-
-```bash
-./devctl use-ranker "gs://bucket/path/to/older-run" --max-history-len 64
-```
+The run must include `bst_model_config/model_config.json`, from which the command
+reads `max_history_len` and checks the content encoder, dimensions, and supported
+ranker features. Selection fails if the configuration is missing or the history
+length is missing or is not a positive integer, leaving the previous selection
+unchanged.
 
 The override and downloaded artifacts live under the instance's gitignored
 `.runtime/` directory (`.runtime.<name>/` with `--name`). They survive

@@ -2668,8 +2668,7 @@ Setup (first run):
   fetch-models     download the pinned trained models (no account or auth needed)
   use-ranker <gs://run-or-manifest>
                    download and select a ranker for this instance (needs gcloud)
-                     --max-history-len <n>           required for legacy exports
-                       without training configuration; overrides it otherwise
+                   history length is required in the training configuration
                      --reset                         return to the bundle's ranker
                    prepares files only; never starts or restarts a service
 

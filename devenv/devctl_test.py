@@ -268,7 +268,7 @@ def test_use_ranker_reset_preserves_artifacts_and_other_instances(ranker_cli):
     assert not docker_calls.exists()
 
 
-@pytest.mark.parametrize("flag", ["--restart", "--latest", "--unknown"])
+@pytest.mark.parametrize("flag", ["--restart", "--latest", "--max-history-len", "--unknown"])
 def test_use_ranker_rejects_unsupported_flags_without_docker(ranker_cli, flag):
     run, devenv, run_uri, _, docker_calls = ranker_cli
 

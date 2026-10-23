@@ -92,7 +92,10 @@ def check_compatibility(
     config: dict | None, models_manifest: Path | None, fixture_manifest: Path | None
 ) -> None:
     if config is None:
-        return
+        raise ValueError(
+            "Selected ranker has no model config; "
+            "select a run with bst_model_config/model_config.json"
+        )
     validate_config(config)
     encoder = config["embedding_model"].replace("_", "-")
     dimensions = config["constructor_args"]["post_embedding_dim"]
@@ -140,7 +143,7 @@ def select_ranker(args: argparse.Namespace) -> None:
                 "This ranker serving contract is not supported by the inference service"
             )
 
-        # List the run's artifacts once: missing optional metadata is distinct
+        # List the run's artifacts once: missing training metadata is distinct
         # from a failed authenticated read, which must leave the old selection.
         print("devctl: locating training artifacts...", flush=True)
         objects = set(gcloud("ls", "--recursive", run_uri + "/artifacts/").splitlines())
@@ -155,21 +158,17 @@ def select_ranker(args: argparse.Namespace) -> None:
                 f"Expected one author_idx_mapping parquet for this run, found {len(author_maps)}"
             )
 
-        config = None
-        history_len = args.max_history_len
         config_uri = run_uri + "/artifacts/bst_model_config/model_config.json"
-        if config_uri in objects:
-            print("devctl: downloading and checking training metadata...", flush=True)
-            config_path = stage / "model_config.json"
-            gcloud("cp", config_uri, str(config_path))
-            config = read_json(config_path)
-            training_history_len = validate_config(config)
-            if history_len is None:
-                history_len = training_history_len
-        elif history_len is None:
+        if config_uri not in objects:
             raise ValueError(
-                "This run has no bst_model_config/model_config.json; supply --max-history-len"
+                "This run has no bst_model_config/model_config.json; "
+                "cannot determine max_history_len"
             )
+        print("devctl: downloading and checking training metadata...", flush=True)
+        config_path = stage / "model_config.json"
+        gcloud("cp", config_uri, str(config_path))
+        config = read_json(config_path)
+        history_len = validate_config(config)
         check_compatibility(config, args.models_manifest_path, args.fixture_manifest_path)
 
         print("devctl: downloading author map...", flush=True)
@@ -215,11 +214,6 @@ def select_ranker(args: argparse.Namespace) -> None:
         selection_temp.replace(runtime / SELECTION_FILE)
         published = True
         print(f"devctl: selected ranker {model_id} (task {task_id}, history {history_len})")
-        if config is None:
-            print(
-                "devctl: legacy run has no model config; "
-                "encoder and model feature compatibility could not be checked"
-            )
     finally:
         if selection_temp is not None:
             selection_temp.unlink(missing_ok=True)
@@ -263,15 +257,6 @@ def main(argv: list[str] | None = None) -> int:
             "skipped if omitted or the file does not exist"
         ),
     )
-    parser.add_argument(
-        "--max-history-len",
-        type=int,
-        metavar="N",
-        help=(
-            "Override the maximum number of history entries passed to the ranker; "
-            "defaults to training metadata, required for legacy runs without model config"
-        ),
-    )
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument(
         "--reset",
@@ -284,13 +269,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Check the saved ranker against local manifests without downloading files",
     )
     args = parser.parse_args(argv)
-    if (args.reset or args.check) and (args.source or args.max_history_len is not None):
-        parser.error("--reset and --check cannot be combined with a source or --max-history-len")
+    if (args.reset or args.check) and args.source:
+        parser.error("--reset and --check cannot be combined with a source")
     if not (args.reset or args.check) and args.source is None:
         parser.error("a GCS source, --reset, or --check is required")
     try:
-        if args.max_history_len is not None:
-            positive_int(args.max_history_len, "--max-history-len")
         selection_path = args.runtime / SELECTION_FILE
         if args.reset:
             selection_path.unlink(missing_ok=True)

@@ -161,34 +161,42 @@ def test_reports_progress_before_each_external_operation(tmp_path, remote, monke
     assert "selected ranker model-id" in output
 
 
-def test_legacy_requires_explicit_history_and_records_unknown_compatibility(
-    tmp_path, remote, capsys
+@pytest.mark.parametrize("existing_selection", [False, True])
+@pytest.mark.parametrize(
+    "problem", ["missing_config", "missing_history_length", "invalid_history_length"]
+)
+def test_missing_or_invalid_history_config_leaves_selection_unchanged(
+    tmp_path, remote, capsys, existing_selection, problem
 ):
-    del remote[0][CONFIG_URI]
     args = [RUN_URI, "--runtime", str(tmp_path)]
+    selection_path = tmp_path / use_ranker.SELECTION_FILE
+    previous = None
+    directories = []
+    if existing_selection:
+        assert use_ranker.main(args) == 0
+        previous = selection_path.read_bytes()
+        directories = list((tmp_path / "rankers").iterdir())
+    remote[1].clear()
+    if problem == "missing_config":
+        del remote[0][CONFIG_URI]
+        expected_error = "cannot determine max_history_len"
+    else:
+        config = json.loads(remote[0][CONFIG_URI])
+        if problem == "missing_history_length":
+            del config["max_history_len"]
+        else:
+            config["max_history_len"] = -1
+        remote[0][CONFIG_URI] = json.dumps(config).encode()
+        expected_error = "model_config max_history_len must be a positive integer"
+
     assert use_ranker.main(args) == 1
-    assert "--max-history-len" in capsys.readouterr().err
-    assert not (tmp_path / use_ranker.SELECTION_FILE).exists()
-    assert list((tmp_path / "rankers").iterdir()) == []
-
-    assert use_ranker.main([*args, "--max-history-len", "50"]) == 0
-    chosen = selection(tmp_path)
-    assert (
-        chosen["services"]["inference"]["environment"]["GE_INFERENCE_RANKER_MAX_HISTORY_LEN"]
-        == "50"
-    )
-    assert chosen["x-ge-ranker"]["model_config"] is None
-    assert "could not be checked" in capsys.readouterr().out
-
-
-def test_history_override_wins_over_training_metadata(tmp_path, remote):
-    assert use_ranker.main([RUN_URI, "--runtime", str(tmp_path), "--max-history-len", "32"]) == 0
-    assert (
-        selection(tmp_path)["services"]["inference"]["environment"][
-            "GE_INFERENCE_RANKER_MAX_HISTORY_LEN"
-        ]
-        == "32"
-    )
+    assert expected_error in capsys.readouterr().err
+    if previous is None:
+        assert not selection_path.exists()
+    else:
+        assert selection_path.read_bytes() == previous
+    assert list((tmp_path / "rankers").iterdir()) == directories
+    assert not any(call[2:4] == ["cp", MODEL_URI] for call in remote[1])
 
 
 @pytest.mark.parametrize(
@@ -291,6 +299,18 @@ def test_check_validates_bundles_that_arrive_after_selection_without_network(
     assert remote[1] == calls_before
 
 
+def test_check_rejects_saved_selection_without_model_config(tmp_path, remote, capsys):
+    assert use_ranker.main([RUN_URI, "--runtime", str(tmp_path)]) == 0
+    chosen = selection(tmp_path)
+    chosen["x-ge-ranker"]["model_config"] = None
+    write_json(tmp_path / use_ranker.SELECTION_FILE, chosen)
+    calls_before = list(remote[1])
+
+    assert use_ranker.main(["--check", "--runtime", str(tmp_path)]) == 1
+    assert "Selected ranker has no model config" in capsys.readouterr().err
+    assert remote[1] == calls_before
+
+
 @pytest.mark.parametrize(
     "failure_uri", [MANIFEST_URI, RUN_URI + "/artifacts/", CONFIG_URI, AUTHOR_URI, MODEL_URI]
 )
@@ -355,9 +375,12 @@ def test_requires_specific_gcs_run_without_network(tmp_path, remote, source):
     assert remote[1] == []
 
 
-@pytest.mark.parametrize("length", ["0", "-1"])
-def test_rejects_nonpositive_history_override_without_network(tmp_path, remote, length):
-    assert use_ranker.main([RUN_URI, "--runtime", str(tmp_path), "--max-history-len", length]) == 1
+def test_rejects_removed_history_override_without_network(tmp_path, remote, capsys):
+    with pytest.raises(SystemExit) as exc:
+        use_ranker.main([RUN_URI, "--runtime", str(tmp_path), "--max-history-len", "64"])
+
+    assert exc.value.code == 2
+    assert "unrecognized arguments: --max-history-len 64" in capsys.readouterr().err
     assert remote[1] == []
 
 
@@ -379,9 +402,9 @@ def test_help_describes_all_arguments_without_requiring_runtime_or_gcloud(remote
         "--runtime DIR Local runtime directory",
         "--models-manifest-path PATH Path to the local model bundle's manifest.json",
         "--fixture-manifest-path PATH Path to the local fixture's manifest.json",
-        "--max-history-len N Override the maximum number of history entries",
         "--reset Clear the local ranker selection",
         "--check Check the saved ranker against local manifests",
     ):
         assert description in output
+    assert "--max-history-len" not in output
     assert remote[1] == []
