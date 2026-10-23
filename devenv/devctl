@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# devctl — Green Earth local development environment (issue api#268).
+#
+# This is only the launcher: devctl itself is the Python package in devctlib/.
+# It finds a Python 3.13+, keeps devctl's own small virtualenv in
+# .venv-devctl/ (created on first run, re-synced whenever
+# devctl-requirements.txt changes), and runs devctlib with it.
+#
+# GE_DEV_PYTHON picks the interpreter; otherwise python3.13, then python3.
+set -euo pipefail
+
+DEVENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV="$DEVENV_DIR/.venv-devctl"
+REQUIREMENTS="$DEVENV_DIR/devctl-requirements.txt"
+# The requirements the venv was last synced to, kept inside it.
+SYNCED="$VENV/devctl-requirements.txt"
+
+die() {
+  echo "devctl: $*" >&2
+  exit 1
+}
+
+new_enough() {
+  "$1" -c 'import sys; sys.exit(sys.version_info < (3, 13))' 2>/dev/null
+}
+
+find_python() {
+  # An explicit choice is the only one tried: falling back past it would
+  # quietly run something other than what was asked for.
+  if [[ -n "${GE_DEV_PYTHON:-}" ]]; then
+    new_enough "$GE_DEV_PYTHON" || die "GE_DEV_PYTHON=$GE_DEV_PYTHON isn't a Python 3.13 or newer"
+    echo "$GE_DEV_PYTHON"
+    return
+  fi
+  local candidate
+  for candidate in python3.13 python3; do
+    if command -v "$candidate" >/dev/null && new_enough "$candidate"; then
+      echo "$candidate"
+      return
+    fi
+  done
+  die "devctl needs Python 3.13 or newer, and found none (tried python3.13 and python3).
+        Install one (pyenv, Homebrew, or your distribution's packages), or point
+        GE_DEV_PYTHON at it."
+}
+
+# Build into a scratch directory and move it into place, so an interrupted
+# install — or two devctl runs racing on a fresh clone — never leaves a
+# half-built venv behind to be trusted.
+sync_venv() {
+  local python scratch="$VENV.tmp.$$"
+  python="$(find_python)"
+  echo "devctl: preparing devctl's virtualenv (one time, a few seconds)..." >&2
+  rm -rf "$scratch"
+  "$python" -m venv "$scratch" ||
+    die "couldn't create a virtualenv with $python — on Debian/Ubuntu, install python3-venv"
+  "$scratch/bin/python" -m pip install --quiet --disable-pip-version-check -r "$REQUIREMENTS" ||
+    { rm -rf "$scratch"; die "couldn't install devctl's dependencies (see above)"; }
+  cp "$REQUIREMENTS" "$scratch/devctl-requirements.txt"
+  rm -rf "$VENV"
+  mv "$scratch" "$VENV" 2>/dev/null || rm -rf "$scratch"
+}
+
+if ! { [[ -x "$VENV/bin/python" ]] && cmp -s "$REQUIREMENTS" "$SYNCED" && new_enough "$VENV/bin/python"; }; then
+  sync_venv
+fi
+
+exec "$VENV/bin/python" -I -c '
+import sys
+devenv = sys.argv.pop(1)
+sys.path.insert(0, devenv)
+from devctlib.cli import main
+sys.exit(main(sys.argv[1:], devenv))
+' "$DEVENV_DIR" "$@"

@@ -146,7 +146,7 @@ resolve_ports() {
   # offset to an already-offset port.
   [[ -z "${GE_DEV_PORT_OFFSET:-}" ]] || return 0
   local assignments
-  assignments="$(python3 "$DEVENV_DIR/ports.py" "$DEVENV_DIR" "$INSTANCE" "${1:-read}")" || exit 1
+  assignments="$(python3 "$DEVENV_DIR/devctlib/ports.py" "$DEVENV_DIR" "$INSTANCE" "${1:-read}")" || exit 1
   set -a
   eval "$assignments"
   set +a
@@ -2796,7 +2796,7 @@ cmd_ls() {
   done < <(python3 -c "
 import sys
 from pathlib import Path
-sys.path.insert(0, '$DEVENV_DIR')
+sys.path.insert(0, '$DEVENV_DIR/devctlib')
 import ports
 devenv = Path('$DEVENV_DIR')
 import os

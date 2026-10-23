@@ -10,9 +10,12 @@ from pathlib import Path
 
 import pytest
 import yaml
+from devctlib.testing import devctl_argv
 
 DEVENV_DIR = Path(__file__).parent
-DEVCTL = DEVENV_DIR / "devctl"
+# The bash original, until every command is ported to devctlib; tests of its
+# functions read them from here.
+DEVCTL = DEVENV_DIR / "devctl-legacy"
 COMPOSE_FILE = DEVENV_DIR / "docker-compose.yml"
 BRIDGEU_COMPOSE_FILE = DEVENV_DIR / "docker-compose.bridgeu.yml"
 FIREBASE_UI_PROXY_TEST = DEVENV_DIR / "firebase" / "ui-proxy_test.mjs"
@@ -132,7 +135,7 @@ def run_devctl(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess,
     docker.write_text(f'#!/bin/sh\necho "$@" >>"{marker}"\nexit 1\n')
     docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
     result = subprocess.run(
-        [str(DEVCTL), *args],
+        devctl_argv(DEVENV_DIR, *args),
         text=True,
         capture_output=True,
         env={"PATH": f"{bin_dir}:{os.environ['PATH']}", "HOME": str(tmp_path)},
@@ -167,7 +170,10 @@ def ranker_cli(tmp_path):
     """Run the full CLI in a fresh checkout with fake GCS and no Docker daemon."""
     devenv = tmp_path / "internal-tools" / "devenv"
     (devenv / "models").mkdir(parents=True)
-    shutil.copy2(DEVCTL, devenv / "devctl")
+    shutil.copy2(DEVCTL, devenv / DEVCTL.name)
+    shutil.copytree(
+        DEVENV_DIR / "devctlib", devenv / "devctlib", ignore=shutil.ignore_patterns("__pycache__")
+    )
     shutil.copy2(DEVENV_DIR / "models" / "use_ranker.py", devenv / "models")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -220,7 +226,7 @@ else:
 
     def run(*args):
         return subprocess.run(
-            [str(devenv / "devctl"), *args],
+            devctl_argv(devenv, *args),
             env=environment,
             text=True,
             capture_output=True,
