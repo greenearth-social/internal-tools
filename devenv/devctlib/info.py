@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 from . import ports as port_table
-from .compose import compose, compose_argv, oom_killed_services, running_projects
+from .assets import python_tool
+from .compose import (
+    compose,
+    compose_argv,
+    exec_argv,
+    oom_killed_services,
+    require_running,
+    running_projects,
+)
 from .ctx import Ctx, die, warn
 from .envfiles import env_file_value, nonempty
 from .es import ES_OWNER, data_age_hours, es_count, es_curl, share_es, warn_stale_data
@@ -154,3 +162,52 @@ def cmd_status(ctx: Ctx, args: list[str]) -> None:
     if age is not None:
         print(f"data age     newest post {age}h old")
     warn_stale_data(ctx)
+
+
+# --- exec --------------------------------------------------------------------
+
+
+def cmd_exec(ctx: Ctx, args: list[str]) -> None:
+    # One entrypoint for running things inside the environment (issue
+    # api#283), so a coding agent's sandbox can allow `devctl exec` instead of
+    # every command that might ever need to run in a container:
+    #
+    #   devctl exec api pipenv run pytest
+    #   devctl exec --name alpha api pipenv run ruff check .
+    #
+    # `--name` right after `exec` is taken by cli.parse_global; everything
+    # after the service name passes through untouched.
+    if len(args) < 2:
+        die(
+            "usage: devctl exec [--name <instance>] <service> <command>...\n"
+            "        e.g. devctl exec api pipenv run pytest"
+        )
+    service, command = args[0], args[1:]
+    require_running(ctx, service, f"service '{service}' isn't running{ctx.label()}")
+    ctx.exec(exec_argv(ctx, service, *command))
+
+
+# --- login -------------------------------------------------------------------
+
+
+def cmd_login(ctx: Ctx, args: list[str]) -> None:
+    # Signing in normally means completing Bluesky OAuth, which needs private
+    # keys a credential-free environment doesn't have. The Auth emulator
+    # accepts unsigned custom tokens, so we mint one for the seeded persona and
+    # hand it to the app's own #/auth/finish route — the same entry point the
+    # real OAuth callback redirects to. See firebase/mint_token.py.
+    persona = args[0] if args else env_file_value(ctx.runtime / "probe.env", "GE_PROBE_USER_DID")
+    if not persona:
+        die("no seeded persona found — run: devctl seed (or pass a did:plc:... explicitly)")
+    minted = ctx.run(python_tool(ctx, "firebase/mint_token.py", persona), check=False, capture=True)
+    if not minted.ok:
+        raise SystemExit(1)
+    token = minted.stdout.strip()
+    print(
+        f"devctl: open this to sign in as the seeded persona ({persona}):\n"
+        "\n"
+        f"  http://127.0.0.1:{ctx.port('FRONTEND')}/#/auth/finish?token={token}\n"
+        "\n"
+        "The token is unsigned and only works against the Auth emulator. It expires in\n"
+        "an hour; re-run devctl login for a fresh one."
+    )

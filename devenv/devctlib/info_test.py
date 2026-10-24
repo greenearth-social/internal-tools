@@ -130,3 +130,56 @@ def test_a_sharing_instance_queries_the_owner(tmp_path):
         "Authorization: ApiKey owner",
         "http://127.0.0.1:9201/_count",
     ]
+
+
+def test_exec_runs_in_a_running_service(tmp_path):
+    ctx = make_ctx(tmp_path, runner=FakeRunner(lambda argv: "api" if "ps" in argv else None))
+    with pytest.raises(Exec) as exc:
+        info.cmd_exec(ctx, ["api", "pipenv", "run", "pytest", "-k", "x"])
+    argv = exc.value.argv
+    assert argv[argv.index("exec") :] == [
+        "exec",
+        "-T",
+        "-e",
+        "PIPENV_VERBOSITY=-1",
+        "api",
+        "pipenv",
+        "run",
+        "pytest",
+        "-k",
+        "x",
+    ]
+
+
+def test_exec_names_a_stopped_service(tmp_path):
+    ctx = make_ctx(tmp_path, instance="alpha")
+    with pytest.raises(
+        Die,
+        match=r"service 'api' isn't running \[alpha\] — start it with: "
+        r"devctl up --name alpha",
+    ):
+        info.cmd_exec(ctx, ["api", "true"])
+
+
+@pytest.mark.parametrize("args", [[], ["api"]])
+def test_exec_needs_a_service_and_a_command(tmp_path, args):
+    with pytest.raises(Die, match="usage: devctl exec"):
+        info.cmd_exec(make_ctx(tmp_path), args)
+
+
+def test_login_mints_a_token_for_the_seeded_persona(tmp_path, capsys):
+    ctx = make_ctx(tmp_path, runner=FakeRunner(lambda argv: "tok.en\n"))
+    (ctx.runtime / "probe.env").write_text("GE_PROBE_USER_DID=did:plc:me\n")
+
+    info.cmd_login(ctx, [])
+
+    assert fake(ctx).calls[-1].argv[-2:] == [
+        str(ctx.devenv / "firebase/mint_token.py"),
+        "did:plc:me",
+    ]
+    assert "http://127.0.0.1:3000/#/auth/finish?token=tok.en" in capsys.readouterr().out
+
+
+def test_login_needs_a_persona(tmp_path):
+    with pytest.raises(Die, match="no seeded persona found"):
+        info.cmd_login(make_ctx(tmp_path), [])

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 
-from .ctx import Ctx
+from .ctx import Ctx, die
 from .runner import Result
 
 COMPOSE_FILES = ("docker-compose.yml", "docker-compose.bridgeu.yml")
@@ -101,3 +101,11 @@ def running_projects(ctx: Ctx) -> set[str]:
         return {p["Name"] for p in json.loads(result.stdout)}
     except (ValueError, TypeError, KeyError):
         return set()
+
+
+def require_running(ctx: Ctx, service: str, problem: str = "") -> None:
+    """Stop, naming the fix, unless service is running. problem is how the
+    message puts it; by default "<service> isn't running"."""
+    if not service_running(ctx, service):
+        problem = problem or f"{service} isn't running"
+        die(f"{problem} — start it with: devctl up{ctx.name_flag()}")

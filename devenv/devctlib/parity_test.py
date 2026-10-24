@@ -264,3 +264,104 @@ TWO_CLUSTERS = Rule(r"compose ls", '[{"Name": "ge-dev"}, {"Name": "ge-beta"}]')
 # a running api with no ES key to read with, on this instance or the owner.
 def test_doctor(tmp_path, args, setup, rules, http, phrases):
     parity(tmp_path, *args, setup=setup, rules=rules, http=http, phrases=phrases)
+
+
+@pytest.mark.parametrize(
+    ("args", "rules"),
+    [
+        (("exec", "api", "pipenv", "run", "pytest", "--name", "x"), [RUNNING]),
+        (("exec", "--name", "alpha", "api", "ls"), [RUNNING]),
+        (("--name", "alpha", "exec", "api", "ls"), [RUNNING]),
+        (("exec", "api", "ls"), []),
+        (("exec", "api"), [RUNNING]),
+        (("exec",), []),
+        (("exec", "--name"), []),
+    ],
+)
+def test_exec(tmp_path, args, rules):
+    # With no state recorded for dev, the bash version's exec --name bug
+    # (dev's recorded state applied to alpha) can't show here; cli_test has it.
+    parity(tmp_path, *args, rules=rules, setup=named_instance("alpha", 10))
+
+
+ALL_RUNNING = Rule(r"ps --status running", "api\ninference\nfrontend\nbridgeu-api\n")
+
+
+@pytest.mark.parametrize(
+    ("args", "rules", "repos"),
+    [
+        (("test",), [ALL_RUNNING], ("api", "ingex", "frontend", "inference-service")),
+        (("test",), [ALL_RUNNING], ("api", "ingex", "frontend", "inference-service", "bridg-eu")),
+        (("test", "ingex"), [], ("api", "ingex", "frontend", "inference-service")),
+        (("test", "api", "frontend"), [RUNNING], ("api", "ingex", "frontend", "inference-service")),
+        (("test", "bridgeu"), [ALL_RUNNING], ("api", "ingex", "frontend", "inference-service")),
+        (("test", "nope"), [], ("api",)),
+        (("test", "api"), [ALL_RUNNING, Rule(r"exec .* pytest", rc=2)], ("api",)),
+    ],
+)
+def test_test(tmp_path, args, rules, repos):
+    parity(tmp_path, *args, rules=rules, repos=repos)
+
+
+def probe_persona(sandbox):
+    runtime = sandbox.devenv / ".runtime"
+    runtime.mkdir(exist_ok=True)
+    (runtime / "probe.env").write_text("GE_PROBE_USER_DID=did:plc:persona\n")
+
+
+@pytest.mark.parametrize(
+    ("args", "setup", "phrases"),
+    [
+        (("login",), probe_persona, [r"auth/finish\?token=", "did:plc:persona"]),
+        (("login", "did:plc:other"), None, ["did:plc:other"]),
+        (("login",), None, ["no seeded persona found"]),
+    ],
+)
+def test_login(tmp_path, args, setup, phrases):
+    parity(tmp_path, *args, setup=setup, phrases=phrases)
+
+
+def git_repos(sandbox):
+    """Real checkouts: api behind its remote, frontend dirty, ingex on a branch."""
+    import subprocess
+
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@x",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@x",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+
+    def git(cwd, *args):
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=env)
+
+    for repo in ("api", "ingex", "frontend", "inference-service"):
+        remote = sandbox.root / "remotes" / repo
+        remote.mkdir(parents=True)
+        git(remote, "init", "-q", "-b", "main")
+        git(remote, "commit", "-q", "--allow-empty", "-m", "one")
+        import shutil
+
+        shutil.rmtree(sandbox.root / repo)
+        git(sandbox.root, "clone", "-q", str(remote), repo)
+    git(sandbox.root / "remotes" / "api", "commit", "-q", "--allow-empty", "-m", "two")
+    (sandbox.root / "frontend" / "dirty").write_text("x")
+    git(sandbox.root / "ingex", "checkout", "-q", "-b", "feature")
+
+
+@pytest.mark.parametrize(
+    ("args", "setup"),
+    [
+        (("pull",), None),
+        (("pull",), git_repos),
+        (("pull", "--repo-root"), None),
+        (("pull", "--bogus"), None),
+        (("pull", "--repo-root", "/no/such/dir"), None),
+    ],
+)
+def test_pull(tmp_path, args, setup):
+    legacy, port = parity(tmp_path, *args, setup=setup, env={"GIT_CONFIG_GLOBAL": "/dev/null"})
+    assert port.stdout == legacy.stdout

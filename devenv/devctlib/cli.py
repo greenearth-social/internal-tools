@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import doctor, info
+from . import doctor, info, pull, suites
 from .ctx import DEFAULT_INSTANCE, Ctx, Die, die
 from .envfiles import load_local_env
 from .instance import load_state, resolve_ports, set_instance
@@ -52,6 +52,10 @@ COMMANDS: dict[str, Command] = {
     "status": Command(info.cmd_status, no_args=True),
     "ps": Command(info.cmd_status, no_args=True),
     "doctor": Command(doctor.cmd_doctor, no_args=True),
+    "exec": Command(info.cmd_exec, passthrough=True),
+    "test": Command(suites.cmd_test),
+    "login": Command(info.cmd_login),
+    "pull": Command(pull.cmd_pull, ports=None),
 }
 
 
@@ -68,7 +72,9 @@ def parse_global(argv: Sequence[str], default_instance: str) -> Invocation:
     The flag is global rather than per-command — every command has to act on
     the same instance. The exception is what follows `exec`'s service: that
     belongs to the command being run inside the container and must reach it
-    untouched.
+    untouched. So after `exec`, only `--name` pairs straight after it are
+    taken (`devctl exec --name alpha api ...`), and everything from the
+    service on passes through.
     """
     instance = default_instance
     rest: list[str] = []
@@ -81,6 +87,13 @@ def parse_global(argv: Sequence[str], default_instance: str) -> Invocation:
             instance = argv[i + 1]
             i += 2
         elif arg == "exec":
+            rest.append(arg)
+            i += 1
+            while i < len(argv) and argv[i] == "--name":
+                if i + 1 >= len(argv) or not argv[i + 1]:
+                    die("--name needs an instance name")
+                instance = argv[i + 1]
+                i += 2
             rest.extend(argv[i:])
             break
         else:

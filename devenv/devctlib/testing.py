@@ -337,7 +337,11 @@ class Sandbox:
     def _snapshot(self) -> dict[str, str]:
         out = {}
         for path in self.root.rglob("*"):
-            if not path.is_file() or "__pycache__" in path.parts or path == self.log:
+            # Git's own bookkeeping carries hashes and timestamps; what pull did
+            # to a repo shows in its output instead.
+            skip = {"__pycache__", ".git", "remotes"}
+            parts = set(path.relative_to(self.root).parts)
+            if not path.is_file() or skip & parts or path == self.log:
                 continue
             rel = str(path.relative_to(self.root))
             if rel.startswith(("bin/", "rules.json")):

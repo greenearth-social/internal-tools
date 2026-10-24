@@ -1262,57 +1262,6 @@ def test_bridgeu_feed_points_a_eurosky_session_at_a_real_client(tmp_path):
     assert calls == []
 
 
-def run_test_command(
-    tmp_path: Path, *args: str, bridgeu: bool
-) -> tuple[subprocess.CompletedProcess, list[str]]:
-    """Run cmd_test with every suite and service stubbed out, recording calls."""
-    calls_path = tmp_path / "suite-calls"
-    script = "\n".join(
-        [
-            "set -euo pipefail",
-            'die() { echo "devctl: $*" >&2; exit 1; }',
-            "check_docker() { :; }",
-            "ensure_go_caches() { :; }",
-            "service_running() { return 0; }",
-            f"have_bridgeu() {{ return {0 if bridgeu else 1}; }}",
-            'run_test_suite() { echo "$1" >>"$TEST_CALLS"; }',
-            "BRIDGEU_REPO=bridg-eu; BRIDGEU_CLONE_URL=x; GE_DEV_REPO_ROOT=/r",
-            f'TEST_SUITES="{shell_constant("TEST_SUITES")}"',
-            shell_function("cmd_test"),
-            'cmd_test "$@"',
-        ]
-    )
-    result = subprocess.run(
-        ["bash", "-s", "--", *args],
-        input=script,
-        text=True,
-        capture_output=True,
-        env={"PATH": os.environ["PATH"], "TEST_CALLS": str(calls_path)},
-    )
-    calls = calls_path.read_text().split() if calls_path.exists() else []
-    return result, calls
-
-
-def test_all_suites_include_bridgeu_when_checked_out(tmp_path):
-    result, calls = run_test_command(tmp_path, bridgeu=True)
-    assert result.returncode == 0, result.stderr
-    assert calls == ["api", "inference", "ingex", "frontend", "bridgeu"]
-
-
-def test_all_suites_skip_bridgeu_without_the_checkout(tmp_path):
-    result, calls = run_test_command(tmp_path, bridgeu=False)
-    assert result.returncode == 0, result.stderr
-    assert calls == ["api", "inference", "ingex", "frontend"]
-    assert "skipping bridgeu" in result.stderr
-
-
-def test_bridgeu_suite_names_the_missing_checkout(tmp_path):
-    result, calls = run_test_command(tmp_path, "bridgeu", bridgeu=False)
-    assert result.returncode == 1
-    assert calls == []
-    assert "needs bridg-eu checked out" in result.stderr
-
-
 @pytest.mark.parametrize("environment_name", ["stage", "prod"])
 def test_tunnel_selects_and_pins_the_environment_cluster(tmp_path, environment_name):
     result = run_tunnel(tmp_path, environment_name)
