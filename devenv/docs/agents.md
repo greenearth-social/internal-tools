@@ -43,6 +43,10 @@ separately — and every capability below comes with it:
 }
 ```
 
+`devctl` is a Python program with a virtualenv of its own, which its first
+run creates (installing from PyPI). A sandbox without network access should
+have it run once beforehand — any command will do, e.g. `devctl help`.
+
 With that one allowance an agent can run every repo's tests
 (`devctl test`), run anything inside a service (`devctl exec api pipenv run
 pytest -k ...`), read logs, query Elasticsearch (read-only key), render

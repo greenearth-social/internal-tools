@@ -6,3 +6,6 @@ fixtures/data/
 devenv.local.env
 models/data/
 models/data.staging/
+
+# devctl's own virtualenv, created and kept in sync by the launcher.
+.venv-devctl/

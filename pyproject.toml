@@ -25,21 +25,27 @@ select = [
 ]
 ignore = []
 
+[tool.ruff.lint.isort]
+# devenv/devctlib is imported by package name from tests across devenv/.
+known-first-party = ["devctlib"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
 
 [tool.pyright]
 include = ["velocity", "devenv"]
-# dev-auth adds firebase/ to sys.path at runtime (the directory is mounted into
+# devenv itself is listed because devctlib is imported by package name from
+# tests inside it (pytest roots them at devenv/, the first directory up without
+# an __init__.py). dev-auth adds firebase/ to sys.path at runtime (the directory is mounted into
 # its container), so tell the checker where those modules come from instead of
 # silencing the import. dev-auth itself is listed for a different reason: its
 # test imports the neighbouring `app` module the way pytest resolves it, and
 # extraPaths are searched before site-packages — so `import app` keeps meaning
 # dev-auth's app.py even when the shell has a sibling repo's virtualenv active
 # (the api installs itself editable under exactly that name).
-extraPaths = ["devenv/firebase", "devenv/dev-auth"]
+extraPaths = ["devenv", "devenv/firebase", "devenv/dev-auth"]
 # Same exclusion as ruff: notebook cells re-import and shadow freely.
-exclude = ["velocity/notebooks", "**/__pycache__"]
+exclude = ["velocity/notebooks", "**/__pycache__", "devenv/.venv-devctl"]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"

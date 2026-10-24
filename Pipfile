@@ -17,6 +17,9 @@ pyright = "*"
 # devenv/es-init parses ingex's index-template ConfigMaps; only its tests need
 # this locally, since the script itself runs inside a container that has it.
 pyyaml = "*"
+# devctl's own dependency (devenv/devctl-requirements.txt, installed into its
+# own venv by the launcher); here so its tests and pyright can import it.
+python-dotenv = "*"
 
 [requires]
 python_version = "3.13"

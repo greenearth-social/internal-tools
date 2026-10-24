@@ -13,7 +13,7 @@ prod search index, or from a local 131k-post sample if you prefer.
 
 | For | You need |
 |---|---|
-| everything | Docker Desktop running, git, python3, curl. Nothing else on your machine: every language toolchain runs inside containers. |
+| everything | Docker Desktop running, git, Python 3.13+, curl. Nothing else on your machine: every language toolchain runs inside containers. |
 | the prod index | `gcloud` (signed in, with `gke-gcloud-auth-plugin`), `kubectl`, and access to the prod cluster |
 
 ## 2. Get the branches

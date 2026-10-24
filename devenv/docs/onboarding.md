@@ -15,10 +15,15 @@ Budget 20–30 minutes, most of it unattended (image builds and the seed).
 - **Docker memory**: a single environment wants ~5GB available to Docker.
   Docker Desktop's default (~8GB) is fine for one; see
   [troubleshooting](troubleshooting.md#memory) before running two.
-- **git**, **python3**, and **curl** — present on any development machine.
+- **git** and **curl** — present on any development machine.
+- **Python 3.13 or newer**, for `devctl` itself. It looks for `python3.13`,
+  then `python3`; if neither is new enough, install one (pyenv, Homebrew, your
+  distribution's packages) or point `GE_DEV_PYTHON` at it.
 
-Nothing else. No Node, no Go, no Python packages on your host — every
-language toolchain runs inside containers.
+Nothing else. No Node, no Go, and nothing installed into your own Python —
+every language toolchain runs inside containers, and `devctl` keeps its one
+dependency in a virtualenv of its own (`devenv/.venv-devctl`, created on its
+first run, which needs network access to PyPI).
 
 ## 2. Clone the repos
 
