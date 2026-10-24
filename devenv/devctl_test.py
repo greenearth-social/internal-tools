@@ -6,10 +6,16 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
+
+from devctlib import stack
+from devctlib.compose import compose_argv
+from devctlib.ctx import Ctx
+from devctlib.runner import Runner
 from devctlib.testing import devctl_argv
 
 DEVENV_DIR = Path(__file__).parent
@@ -48,82 +54,6 @@ def shell_function(name: str) -> str:
             break
     assert end is not None, f"no closing brace for {name}()"
     return "\n".join(lines[start : end + 1])
-
-
-def run_seed(
-    tmp_path: Path, fail_command: str = ""
-) -> tuple[subprocess.CompletedProcess, list[str]]:
-    """Exercise real seed orchestration with fake services and no Docker."""
-    calls_path = tmp_path / "compose-calls"
-    script = "\n".join(
-        [
-            "set -euo pipefail",
-            'die() { echo "devctl: $*" >&2; exit 1; }',
-            "check_docker() { :; }",
-            "ensure_runtime() { :; }",
-            "share_es() { return 1; }",
-            "have_fixtures() { return 0; }",
-            "env_file_value() { echo test-value; }",
-            "check_model_fixture_compat() { :; }",
-            "resolve_live() { :; }",
-            "live_has() { return 1; }",
-            "service_running() { return 0; }",
-            "export_api_es_env() { :; }",
-            """compose() {
-  printf '%s\\n' "$*" >>"$TEST_CALLS"
-  if [[ "$*" == "$TEST_FAIL_COMMAND" ]]; then return 23; fi
-}""",
-            shell_function("cmd_seed"),
-            "cmd_seed",
-        ]
-    )
-    result = subprocess.run(
-        ["bash", "-s"],
-        input=script,
-        text=True,
-        capture_output=True,
-        env={
-            "PATH": os.environ["PATH"],
-            "RUNTIME": str(tmp_path),
-            "TEST_CALLS": str(calls_path),
-            "TEST_FAIL_COMMAND": fail_command,
-        },
-    )
-    return result, calls_path.read_text().splitlines()
-
-
-def test_seed_backfills_quality_after_likes_before_publishing_aliases_and_restarting_api(tmp_path):
-    result, calls = run_seed(tmp_path)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert calls == [
-        "up -d --wait inference",
-        "run --rm seed-wipe",
-        "run --rm seed-rebase",
-        "run --rm seed-firestore-users",
-        "run --rm seed-megastream",
-        "run --rm seed-likes",
-        "run --rm seed-quality",
-        "run --rm seed-likes python /seedscripts/load_likes.py --aliases-only",
-        "up -d --force-recreate api",
-    ]
-    assert "seed complete" in result.stdout
-
-
-@pytest.mark.parametrize(
-    "failed_command",
-    [
-        "run --rm seed-quality",
-        "run --rm seed-likes python /seedscripts/load_likes.py --aliases-only",
-    ],
-)
-def test_seed_stops_if_quality_backfill_or_alias_publication_fails(tmp_path, failed_command):
-    result, calls = run_seed(tmp_path, failed_command)
-
-    assert result.returncode == 23
-    assert calls[-1] == failed_command
-    assert "up -d --force-recreate api" not in calls
-    assert "seed complete" not in result.stdout
 
 
 def run_devctl(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess, Path]:
@@ -290,30 +220,11 @@ def test_compose_applies_ranker_override_only_to_selected_instance(ranker_cli):
     run, devenv, run_uri, _, _ = ranker_cli
     result = run("use-ranker", run_uri, "--name", "candidate")
     assert result.returncode == 0, result.stdout + result.stderr
-    script = "\n".join(
-        [
-            "set -euo pipefail",
-            'docker() { printf "%s\\n" "$@"; }',
-            shell_function("compose"),
-            "compose config",
-        ]
-    )
 
     for name in ("candidate", "other"):
-        result = subprocess.run(
-            ["bash", "-s"],
-            input=script,
-            text=True,
-            capture_output=True,
-            env={
-                "PATH": os.environ["PATH"],
-                "DEVENV_DIR": str(devenv),
-                "RUNTIME": str(devenv / f".runtime.{name}"),
-            },
-        )
-        assert result.returncode == 0, result.stderr
-        arguments = result.stdout.splitlines()
-        assert arguments[:5] == [
+        arguments = compose_argv(Ctx(devenv=devenv, env={}, instance=name), "config")
+        assert arguments[:6] == [
+            "docker",
             "compose",
             "-f",
             str(devenv / "docker-compose.yml"),
@@ -324,8 +235,20 @@ def test_compose_applies_ranker_override_only_to_selected_instance(ranker_cli):
         assert (override in arguments) == (name == "candidate")
 
 
+class ToolsOnlyRunner(Runner):
+    """Runs devenv's own Python helpers; anything else is a service operation
+    the compatibility check should have stopped before."""
+
+    def run(self, argv, **kwargs):
+        if argv[0] != sys.executable:
+            raise AssertionError(f"unexpected service operation: {argv}")
+        return super().run(argv, **kwargs)
+
+
 @pytest.mark.parametrize("entrypoint", ["check_model_fixture_compat", "cmd_restart inference"])
-def test_ranker_compatibility_checked_when_bundle_arrives_after_selection(ranker_cli, entrypoint):
+def test_ranker_compatibility_checked_when_bundle_arrives_after_selection(
+    ranker_cli, monkeypatch, capfd, entrypoint
+):
     run, devenv, run_uri, _, docker_calls = ranker_cli
     result = run("use-ranker", run_uri)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -339,36 +262,18 @@ def test_ranker_compatibility_checked_when_bundle_arrives_after_selection(ranker
             }
         )
     )
-    script = "\n".join(
-        [
-            "set -euo pipefail",
-            "have_models() { return 1; }",
-            "have_fixtures() { return 1; }",
-            "check_docker() { :; }",
-            "resolve_live() { :; }",
-            "export_api_es_env() { :; }",
-            'compose() { echo "unexpected service operation"; exit 23; }',
-            shell_function("check_model_fixture_compat"),
-            shell_function("cmd_restart"),
-            entrypoint,
-        ]
-    )
+    for name in ("check_docker", "resolve_live", "export_api_es_env"):
+        monkeypatch.setattr(stack, name, lambda ctx: None)
+    ctx = Ctx(devenv=devenv, env=dict(os.environ), runner=ToolsOnlyRunner())
 
-    result = subprocess.run(
-        ["bash", "-s"],
-        input=script,
-        text=True,
-        capture_output=True,
-        env={
-            "PATH": os.environ["PATH"],
-            "DEVENV_DIR": str(devenv),
-            "RUNTIME": str(devenv / ".runtime"),
-        },
-    )
+    with pytest.raises(SystemExit) as exc:
+        if entrypoint == "check_model_fixture_compat":
+            stack.check_model_fixture_compat(ctx)
+        else:
+            stack.cmd_restart(ctx, ["inference"])
 
-    assert result.returncode == 1
-    assert "disagree" in result.stderr
-    assert "unexpected service operation" not in result.stdout
+    assert exc.value.code == 1
+    assert "disagree" in capfd.readouterr().err
     assert not docker_calls.exists()
 
 
@@ -784,43 +689,6 @@ def test_bridgeu_key_issuer_is_a_mysky_side_tool():
     assert "BRIDGEU_MYSKY_API_KEY=${GE_DEV_BRIDGEU_MYSKY_API_KEY:-}" in bridgeu_api["environment"]
 
 
-def run_resolve_live(live: str, live_env: str = "stage", **env: str) -> subprocess.CompletedProcess:
-    """Run resolve_live for a live selection and print the BridgEU mysky target."""
-    script = "\n".join(
-        [
-            "set -euo pipefail",
-            'die() { echo "devctl: $*" >&2; exit 1; }',
-            f'LIVE_SERVICES="{shell_constant("LIVE_SERVICES")}"',
-            f'BRIDGEU_LOCAL_MYSKY_API_KEY="{shell_constant("BRIDGEU_LOCAL_MYSKY_API_KEY")}"',
-            f'BRIDGEU_LOCAL_MYSKY_API_URL="{shell_constant("BRIDGEU_LOCAL_MYSKY_API_URL")}"',
-            shell_function("live_has"),
-            shell_function("live_url"),
-            shell_function("live_key_var"),
-            shell_function("resolve_live"),
-            # No tunnel session here; see run_session_env for one.
-            "bsky_export_session_env() { :; }",
-            "eurosky_export_session_env() { :; }",
-            "resolve_live",
-            'echo "$GE_DEV_BRIDGEU_MYSKY_API_URL $GE_DEV_BRIDGEU_MYSKY_API_KEY"',
-        ]
-    )
-    return subprocess.run(
-        ["bash", "-s"],
-        input=script,
-        text=True,
-        capture_output=True,
-        env={"PATH": os.environ["PATH"], "GE_DEV_LIVE": live, "GE_DEV_LIVE_ENV": live_env, **env},
-    )
-
-
-def test_resolve_live_reapplies_an_active_tunnel_session():
-    """`devctl restart api` or `restart bridgeu-api` after an edit mustn't drop
-    the tunnel identity."""
-    body = shell_function("resolve_live")
-    assert "bsky_export_session_env" in body
-    assert "eurosky_export_session_env" in body
-
-
 BSKY_SESSION_VARS = (
     "GE_DEV_FEED_GENERATOR_DID",
     "GE_DEV_FRONTEND_ALLOWED_HOSTS",
@@ -1017,79 +885,6 @@ def test_bsky_and_eurosky_sessions_exclude_each_other(tmp_path, up, other_state,
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert message in result.stderr
-
-
-def test_bridgeu_calls_the_local_api_with_the_local_key_by_default():
-    result = run_resolve_live("inference", GE_DEV_INFERENCE_API_KEY="k")
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == [
-        "http://mysky-api:8000",
-        shell_constant("BRIDGEU_LOCAL_MYSKY_API_KEY"),
-    ]
-
-
-def test_bridgeu_ignores_a_live_url_override_when_mysky_is_local():
-    result = run_resolve_live("", GE_DEV_BRIDGEU_MYSKY_API_URL="https://elsewhere.example")
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.split()[0] == "http://mysky-api:8000"
-
-
-def test_live_mysky_calls_the_prod_api_with_the_real_key():
-    result = run_resolve_live("mysky", "prod", GE_DEV_MYSKY_API_KEY="gea_real")
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == ["https://api.greenearth.social", "gea_real"]
-
-
-def test_live_mysky_needs_a_key():
-    result = run_resolve_live("mysky", "prod")
-    assert result.returncode == 1
-    assert "GE_DEV_MYSKY_API_KEY" in result.stderr
-
-
-def test_live_mysky_has_no_stage_default():
-    result = run_resolve_live("mysky", "stage", GE_DEV_MYSKY_API_KEY="gea_real")
-    assert result.returncode == 1
-    assert "GE_DEV_BRIDGEU_MYSKY_API_URL" in result.stderr
-
-
-def test_live_mysky_url_override():
-    result = run_resolve_live(
-        "mysky",
-        "stage",
-        GE_DEV_MYSKY_API_KEY="gea_real",
-        GE_DEV_BRIDGEU_MYSKY_API_URL="https://stage-api.example",
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == ["https://stage-api.example", "gea_real"]
-
-
-@pytest.mark.parametrize(
-    ("bridgeu", "live", "issued"),
-    [(True, "", True), (True, "mysky", False), (False, "", False)],
-)
-def test_bridgeu_key_is_issued_only_for_a_local_mysky(tmp_path, bridgeu, live, issued):
-    calls_path = tmp_path / "compose-calls"
-    script = "\n".join(
-        [
-            "set -euo pipefail",
-            'die() { echo "devctl: $*" >&2; exit 1; }',
-            f"have_bridgeu() {{ return {0 if bridgeu else 1}; }}",
-            'compose() { printf "%s\\n" "$*" >>"$TEST_CALLS"; }',
-            shell_function("live_has"),
-            shell_function("issue_bridgeu_key"),
-            "issue_bridgeu_key",
-        ]
-    )
-    result = subprocess.run(
-        ["bash", "-s"],
-        input=script,
-        text=True,
-        capture_output=True,
-        env={"PATH": os.environ["PATH"], "GE_DEV_LIVE": live, "TEST_CALLS": str(calls_path)},
-    )
-    assert result.returncode == 0, result.stderr
-    calls = calls_path.read_text().splitlines() if calls_path.exists() else []
-    assert calls == (["run --rm issue-bridgeu-key"] if issued else [])
 
 
 def run_feed(

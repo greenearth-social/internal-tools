@@ -288,10 +288,16 @@ class Sandbox:
             "FAKE_ENV_KEYS": ENV_KEYS,
             **self.env,
         }
-        server = None
+        # The fake Elasticsearch answers on the default instance's port and on
+        # the first named instance's (offset 10), for one with its own cluster.
+        servers: list[_FakeHTTP] = []
+        requests: list[tuple[str, str]] = []
         if self.http is not None:
-            server = _FakeHTTP(int(env.get("GE_DEV_PORT_ES", "9201")), self.http)
-            threading.Thread(target=server.serve_forever, daemon=True).start()
+            for offset in (0, 10):
+                server = _FakeHTTP(int(env.get("GE_DEV_PORT_ES", "9201")) + offset, self.http)
+                server.requests = requests
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                servers.append(server)
         try:
             argv = (
                 [str(self.devenv / "devctl-legacy"), *args]
@@ -302,7 +308,7 @@ class Sandbox:
                 argv, env=env, text=True, capture_output=True, input=stdin, timeout=60
             )
         finally:
-            if server is not None:
+            for server in servers:
                 server.shutdown()
                 server.server_close()
         calls = []
@@ -315,7 +321,7 @@ class Sandbox:
             self._norm(proc.stdout),
             self._norm(proc.stderr),
             calls,
-            list(server.requests) if server else [],
+            list(requests),
             self._changed_files(),
         )
 

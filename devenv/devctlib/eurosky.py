@@ -18,7 +18,7 @@ would take BridgEU's records with it.
 from __future__ import annotations
 
 from .compose import service_running
-from .ctx import Ctx
+from .ctx import Ctx, warn
 from .envfiles import env_file_value
 
 
@@ -42,3 +42,24 @@ def export_session_env(ctx: Ctx) -> None:
         env_file_value(ctx.eurosky_state, "GE_EUROSKY_HOST"),
         env_file_value(ctx.eurosky_state, "GE_EUROSKY_PUBLISHER_DID"),
     )
+
+
+def warn_if_published(ctx: Ctx, mode: str = "stop") -> None:
+    """Like bsky.warn_if_published: this session's records outlive the stack,
+    and only `eurosky down` removes them."""
+    if not ctx.eurosky_state.is_file():
+        return
+    handle = env_file_value(ctx.eurosky_state, "GE_EUROSKY_HANDLE") or "your dev account"
+    flag = ctx.name_flag()
+    if mode == "nuke":
+        warn(
+            f"devctl: note — BridgEU's feeds are still published on {handle}, and\n"
+            "        nuke removes the record of that session. Delete them from its profile in\n"
+            "        a client, or with bridg-eu's scripts/publish_feeds.py --delete."
+        )
+    else:
+        warn(
+            f"devctl: note — BridgEU's feeds are still published on {handle},\n"
+            "        and the tunnel serving them is now closed.\n"
+            f"        Delete them with: devctl up{flag} && devctl eurosky down{flag}"
+        )

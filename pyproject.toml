@@ -25,6 +25,10 @@ select = [
 ]
 ignore = []
 
+[tool.ruff.lint.isort]
+# devenv/devctlib is imported by package name from tests across devenv/.
+known-first-party = ["devctlib"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"

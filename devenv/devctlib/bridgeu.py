@@ -6,7 +6,8 @@ it. Its services run when it's there and are skipped, with a note, when not.
 
 from __future__ import annotations
 
-from .ctx import Ctx
+from .compose import compose
+from .ctx import Ctx, die
 
 BRIDGEU_REPO = "bridg-eu"
 BRIDGEU_CLONE_URL = "git@github.com:eurosky-social/bridg-eu.git"
@@ -27,3 +28,15 @@ def clone_hint(ctx: Ctx) -> str:
 # sides. issue_bridgeu_key makes the local api accept it.
 BRIDGEU_LOCAL_MYSKY_API_KEY = "gea_bridgeu0devenvlocalkeynotasecretdevenvlocalkeynotasecret"
 BRIDGEU_LOCAL_MYSKY_API_URL = "http://mysky-api:8000"
+
+
+def issue_bridgeu_key(ctx: Ctx) -> None:
+    """Make the local api accept the key bridgeu-api calls it with. Firestore
+    emulator data doesn't survive a recreate, so this runs on every `up` and
+    after `restart firebase`. Nothing to do under --live mysky (bridgeu-api
+    isn't calling the local api) or without the bridg-eu checkout."""
+    if not have_bridgeu(ctx) or ctx.live_has("mysky"):
+        return
+    print("devctl: issuing BridgEU's local mysky api key...")
+    if not compose(ctx, "run", "--rm", "issue-bridgeu-key", check=False, quiet=True).ok:
+        die("couldn't issue BridgEU's mysky api key — see: devctl logs firebase")

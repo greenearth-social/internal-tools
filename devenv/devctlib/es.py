@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import time
 from pathlib import Path
 
 from . import http
 from .compose import running_projects
 from .ctx import DEFAULT_INSTANCE, Ctx, Die, die, warn
-from .envfiles import env_file_value
+from .envfiles import env_file_value, write_env_file
 from .instance import runtime_dirs, runtime_instance
 
 ES_OWNER = DEFAULT_INSTANCE
@@ -220,3 +221,84 @@ def check_memory_budget(ctx: Ctx) -> None:
         "        a cluster (named instances do by default — drop --dedicated-es), or\n"
         "        stop one: devctl ls"
     )
+
+
+# --- the api's view of Elasticsearch -------------------------------------------
+
+
+def record_share_choice(ctx: Ctx) -> None:
+    write_env_file(ctx.share_state, {"GE_DEV_SHARE_ES": ctx.get("GE_DEV_SHARE_ES")})
+
+
+def resolve_shared_es(ctx: Ctx) -> None:
+    """Point the api at the owner's cluster and serve the owner's persona
+    (since it's the owner's data). Reachable via host.docker.internal, exactly
+    as a deployed cluster is under `--live es`."""
+    if not share_es(ctx):
+        return
+    key = owner_ro_key(ctx)
+    if not key:
+        die(
+            f"shared Elasticsearch needs the '{ES_OWNER}' instance up first:\n"
+            "        devctl up\n"
+            "    Or give this instance its own cluster:\n"
+            f"        devctl up --name {ctx.instance} --dedicated-es"
+        )
+    ctx.export("GE_DEV_ES_API_KEY", key)
+    ctx.export("GE_DEV_ES_URL", f"http://host.docker.internal:{owner_es_port(ctx)}")
+    try:
+        shutil.copyfile(owner_runtime(ctx) / "probe.env", ctx.runtime / "probe.env")
+    except OSError:
+        pass
+
+
+def preflight_shared_es(ctx: Ctx) -> None:
+    """Reach the owner's cluster from the host before the api depends on it,
+    so an owner that isn't running is a clear message here rather than a feed
+    that 500s later."""
+    if not share_es(ctx):
+        return
+    port = owner_es_port(ctx)
+    code = http.status(
+        f"http://127.0.0.1:{port}/_cluster/health",
+        headers={"Authorization": f"ApiKey {ctx.get('GE_DEV_ES_API_KEY')}"},
+    ).code
+    if code == "200":
+        print(
+            f"devctl: sharing the '{ES_OWNER}' instance's Elasticsearch"
+            f" (127.0.0.1:{port}, read-only)"
+        )
+    elif code == "000":
+        die(
+            f"the '{ES_OWNER}' instance's Elasticsearch isn't reachable on port {port}.\n"
+            "        Start it:              devctl up\n"
+            f"        Or run standalone:     devctl up --name {ctx.instance} --dedicated-es"
+        )
+    else:
+        die(f"shared Elasticsearch returned HTTP {code} from the '{ES_OWNER}' instance")
+
+
+def export_api_es_env(ctx: Ctx) -> None:
+    """Supply the api's Elasticsearch key. The api reads its ES endpoint from
+    the compose `environment` block rather than an env_file, so that it can be
+    pointed at a deployed cluster (an `environment` entry always wins over
+    env_file, so the file can't be the fallback). That makes supplying the
+    local key devctl's job."""
+    if not ctx.get("GE_DEV_ES_API_KEY"):
+        key = own_ro_key(ctx)
+        if not key:
+            die(
+                f"no Elasticsearch key in {ctx.get('GE_DEV_RUNTIME')}/es_key_ro.env"
+                f" — run: devctl up{ctx.name_flag()}"
+            )
+        ctx.export("GE_DEV_ES_API_KEY", key)
+
+
+def sharers_of_owner(ctx: Ctx) -> list[str]:
+    """Named instances that read the owner's cluster — checked before nuking or
+    stopping the owner, whose volumes hold data they're serving."""
+    return [
+        runtime_instance(runtime)
+        for runtime in runtime_dirs(ctx.devenv)
+        if runtime.name != ".runtime" and is_sharer(runtime)
+    ]

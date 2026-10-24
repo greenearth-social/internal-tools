@@ -440,3 +440,319 @@ def test_use_ranker(tmp_path, args):
 )
 def test_tunnel(tmp_path, args, rules, phrases):
     parity(tmp_path, *args, rules=rules, phrases=phrases)
+
+
+# --- the stack -----------------------------------------------------------------
+
+MYSKY = ("api", "ingex", "frontend", "inference-service")
+WITH_BRIDGEU = (*MYSKY, "bridg-eu")
+
+
+def empty_es(method, path):
+    if path.endswith("/_count"):
+        return 200, '{"count":0}'
+    return es_answers(method, path)
+
+
+@pytest.mark.parametrize(
+    ("args", "setup", "rules", "http", "repos", "env", "phrases"),
+    [
+        (("up",), steps(bundles(), es_keys), [], es_answers, MYSKY, {}, ["environment is up"]),
+        (("up",), steps(bundles(), es_keys), [], es_answers, WITH_BRIDGEU, {}, ["bridgeu-api"]),
+        (("up",), steps(bundles(), es_keys), [], stale_es, MYSKY, {}, ["30h old"]),
+        (("up",), steps(bundles(), es_keys), [], empty_es, MYSKY, {}, ["Elasticsearch is empty"]),
+        (("up",), bundles(), [], None, MYSKY, {}, ["no Elasticsearch key"]),
+        (("up",), es_keys, [], es_answers, MYSKY, {}, ["No model artifacts"]),
+        (("up", "--watch"), steps(bundles(), es_keys), [], es_answers, MYSKY, {}, []),
+        (("up", "--bogus"), None, [], None, MYSKY, {}, ["unknown argument to up: --bogus"]),
+        (("up",), bundles(), [], None, ("api",), {}, ["missing required repos"]),
+        (
+            ("up", "--name", "alpha"),
+            steps(bundles(), es_keys),
+            [],
+            es_answers,
+            MYSKY,
+            {},
+            ["sharing the 'dev' instance's Elasticsearch", "read-only here"],
+        ),
+        (
+            ("up", "--name", "alpha"),
+            bundles(),
+            [],
+            None,
+            MYSKY,
+            {},
+            ["needs the 'dev' instance up first"],
+        ),
+        (
+            ("up", "--name", "alpha"),
+            steps(bundles(), es_keys),
+            [],
+            None,
+            MYSKY,
+            {},
+            ["isn't reachable on port"],
+        ),
+        (
+            ("up", "--name", "alpha", "--dedicated-es"),
+            steps(
+                bundles(),
+                es_keys,
+                named_instance("alpha", 10, es_key_ro_env="GE_ELASTICSEARCH_API_KEY=a\n"),
+            ),
+            [],
+            es_answers,
+            MYSKY,
+            {},
+            ["environment is up"],
+        ),
+        (
+            ("up", "--name", "alpha", "--with-ingest"),
+            steps(bundles(), es_keys),
+            [],
+            es_answers,
+            MYSKY,
+            {},
+            ["live ingestion writes to Elasticsearch"],
+        ),
+        (
+            ("up", "--with-megastream"),
+            steps(bundles(), es_keys),
+            [],
+            es_answers,
+            MYSKY,
+            {},
+            ["needs GE_AWS_S3_ACCESS_KEY"],
+        ),
+        (
+            ("up", "--with-ingest"),
+            steps(bundles(), es_keys),
+            [],
+            es_answers,
+            MYSKY,
+            {"GE_AWS_S3_ACCESS_KEY": "a", "GE_AWS_S3_SECRET_KEY": "s"},
+            ["megastream", "jetstream"],
+        ),
+        (
+            ("up", "--with-jetstream"),
+            steps(bundles(), es_keys),
+            [],
+            es_answers,
+            MYSKY,
+            {},
+            ["only half of live ingestion"],
+        ),
+        (
+            ("up", "--live", "inference"),
+            steps(bundles(), es_keys),
+            [],
+            es_answers,
+            MYSKY,
+            {},
+            ["needs GE_DEV_INFERENCE_API_KEY"],
+        ),
+        (
+            ("up", "--live", "inference", "--live-env", "prod"),
+            steps(bundles(), es_keys),
+            [],
+            es_answers,
+            MYSKY,
+            {"GE_DEV_INFERENCE_API_KEY": "k", **NO_NETWORK},
+            ["live inference unreachable", "PROD services"],
+        ),
+        (
+            ("up", "--live", "perspective"),
+            steps(bundles(), es_keys),
+            [],
+            es_answers,
+            MYSKY,
+            {"GE_PERSPECTIVE_API_KEY": "k"},
+            ["LIVE Perspective"],
+        ),
+        (
+            ("up", "--live", "mysky", "--live-env", "prod"),
+            steps(bundles(), es_keys),
+            [],
+            es_answers,
+            MYSKY,
+            {"GE_DEV_MYSKY_API_KEY": "k"},
+            ["isn't checked out"],
+        ),
+        (
+            ("up", "--live-env", "dev"),
+            steps(bundles(), es_keys),
+            [],
+            es_answers,
+            MYSKY,
+            {},
+            ["--live-env must be stage or prod"],
+        ),
+        (
+            ("up",),
+            steps(bundles(), es_keys),
+            [Rule(r" up -d --remove-orphans", rc=5)],
+            es_answers,
+            MYSKY,
+            {},
+            [],
+        ),
+        (
+            ("up",),
+            steps(bundles(), es_keys),
+            [Rule(r"run --rm issue-bridgeu-key", rc=1)],
+            es_answers,
+            WITH_BRIDGEU,
+            {},
+            ["couldn't issue BridgEU"],
+        ),
+    ],
+)
+def test_up(tmp_path, args, setup, rules, http, repos, env, phrases):
+    parity(
+        tmp_path, *args, setup=setup, rules=rules, http=http, repos=repos, env=env, phrases=phrases
+    )
+
+
+@pytest.mark.parametrize(
+    ("args", "setup", "rules", "env", "phrases"),
+    [
+        (
+            ("seed",),
+            steps(bundles(), es_keys, probe_persona),
+            [RUNNING],
+            {},
+            ["seed complete \\(persona: did:plc:persona\\)", "devctl feed"],
+        ),
+        (("seed",), steps(bundles(), es_keys), [], {}, ["persona: unset", "api isn't running"]),
+        (
+            ("seed",),
+            steps(bundles(), es_keys),
+            [RUNNING, Rule(r"run --rm seed-quality", rc=23)],
+            {},
+            [],
+        ),
+        (
+            ("seed",),
+            steps(bundles(), es_keys),
+            [Rule(r"--wait inference", rc=1)],
+            {},
+            ["inference never became ready"],
+        ),
+        (
+            ("seed",),
+            steps(bundles(), es_keys, live_state("inference")),
+            [RUNNING],
+            {"GE_DEV_INFERENCE_API_KEY": "k"},
+            ["seed complete"],
+        ),
+        (
+            ("seed",),
+            steps(bundles(), es_keys, live_state("es")),
+            [RUNNING],
+            {"GE_DEV_ES_API_KEY": "k"},
+            ["this data won't appear in feeds"],
+        ),
+        (("seed",), bundles(), [], {}, ["no ES key yet"]),
+        (("seed",), es_keys, [], {}, ["No fixture set found"]),
+        (("seed",), steps(bundles(agree=False), es_keys), [], {}, []),
+        (
+            ("--name", "alpha", "seed"),
+            steps(bundles(), es_keys, named_instance("alpha", 10, share_env="GE_DEV_SHARE_ES=1\n")),
+            [],
+            {},
+            ["read-only here"],
+        ),
+        (("seed", "--help"), None, [], {}, ["Usage: devctl"]),
+    ],
+)
+def test_seed(tmp_path, args, setup, rules, env, phrases):
+    parity(tmp_path, *args, setup=setup, rules=rules, env=env, phrases=phrases)
+
+
+@pytest.mark.parametrize(
+    ("args", "setup", "repos", "phrases"),
+    [
+        (("restart", "api"), es_keys, MYSKY, ["restarted: api"]),
+        (("restart", "api", "firebase"), es_keys, WITH_BRIDGEU, ["issuing BridgEU"]),
+        (("restart", "inference"), steps(es_keys, bundles(agree=False)), MYSKY, []),
+        (("restart",), es_keys, MYSKY, ["usage: devctl restart"]),
+        (("restart", "api"), None, MYSKY, ["no Elasticsearch key"]),
+    ],
+)
+def test_restart(tmp_path, args, setup, repos, phrases):
+    parity(tmp_path, *args, setup=setup, repos=repos, phrases=phrases)
+
+
+def bsky_session(sandbox):
+    runtime = sandbox.devenv / ".runtime"
+    runtime.mkdir(exist_ok=True)
+    (runtime / "bsky.env").write_text("GE_BSKY_HANDLE=me.bsky.social\nGE_BSKY_HOST=h\n")
+    (runtime / "eurosky.env").write_text("GE_EUROSKY_HANDLE=me.eurosky.social\n")
+
+
+def frontend_config(sandbox):
+    (sandbox.root / "frontend" / "firebase.devenv.json").write_text("{}")
+    (sandbox.root / "frontend" / "firebase.devenv.alpha.json").write_text("{}")
+
+
+@pytest.mark.parametrize(
+    ("args", "setup", "env", "phrases"),
+    [
+        (("down",), frontend_config, {}, []),
+        (
+            ("down",),
+            steps(frontend_config, named_instance("alpha", 10, share_env="GE_DEV_SHARE_ES=1\n")),
+            {},
+            ["read this one's Elasticsearch: alpha"],
+        ),
+        (
+            ("down",),
+            bsky_session,
+            {},
+            ["still published on me.bsky.social", "still published on me.eurosky.social"],
+        ),
+        (("--name", "alpha", "down"), steps(frontend_config, named_instance("alpha", 10)), {}, []),
+        (("nuke",), steps(frontend_config, es_keys), {}, ["runtime state removed"]),
+        (
+            ("nuke",),
+            steps(es_keys, named_instance("alpha", 10, share_env="GE_DEV_SHARE_ES=1\n")),
+            {},
+            ["share this one's Elasticsearch: alpha"],
+        ),
+        (
+            ("nuke",),
+            steps(es_keys, named_instance("alpha", 10, share_env="GE_DEV_SHARE_ES=1\n")),
+            {"GE_DEV_FORCE_NUKE": "1"},
+            ["runtime state removed"],
+        ),
+        (("nuke",), steps(es_keys, bsky_session), {}, ["nuke removes the record"]),
+        (
+            ("--name", "alpha", "nuke"),
+            steps(frontend_config, named_instance("alpha", 10)),
+            {},
+            ["removed \\[alpha\\]"],
+        ),
+        (("nuke", "now"), None, {}, ["takes no arguments"]),
+    ],
+)
+def test_down_and_nuke(tmp_path, args, setup, env, phrases):
+    parity(tmp_path, *args, setup=setup, env=env, phrases=phrases)
+
+
+@pytest.mark.parametrize(
+    ("args", "http", "phrases"),
+    [
+        (("bootstrap",), es_answers, ["already seeded \\(42 posts\\)", "bootstrap complete"]),
+        (("bootstrap",), empty_es, ["seed complete", "bootstrap complete"]),
+        (("bootstrap", "--name", "alpha"), es_answers, ["serving the 'dev' instance's data"]),
+    ],
+)
+def test_bootstrap(tmp_path, args, http, phrases):
+    parity(
+        tmp_path,
+        *args,
+        setup=steps(bundles(), es_keys),
+        http=http,
+        env=NO_NETWORK,
+        phrases=phrases,
+    )

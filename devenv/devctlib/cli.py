@@ -61,6 +61,13 @@ COMMANDS: dict[str, Command] = {
     "use-ranker": Command(assets.cmd_use_ranker, ports=None),
     "setup": Command(stack.cmd_setup, ports=None, no_args=True),
     "tunnel": Command(live.cmd_tunnel),
+    # up and bootstrap claim their ports themselves, after parsing flags.
+    "up": Command(stack.cmd_up, ports=None),
+    "bootstrap": Command(stack.cmd_bootstrap, ports=None),
+    "seed": Command(stack.cmd_seed, no_args=True),
+    "restart": Command(stack.cmd_restart),
+    "down": Command(stack.cmd_down, no_args=True),
+    "nuke": Command(stack.cmd_nuke, no_args=True),
 }
 
 
