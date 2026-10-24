@@ -1,8 +1,8 @@
 """The state every command works from.
 
-In the bash version this was a few dozen globals, some exported (and so seen by
-docker compose) and some not. Here the exported ones live in `Ctx.env` — the
-environment every child process gets — and the rest are attributes.
+What reaches docker compose and the other tools is `Ctx.env`, the environment
+every child process gets; the rest (the instance, its ports, what the caller
+configured) are attributes.
 """
 
 from __future__ import annotations

@@ -1,11 +1,8 @@
-import json
-import subprocess
-
 import pytest
 
 from devctlib import cli
 from devctlib.ctx import Die
-from devctlib.testing import Exec, FakeRunner, Sandbox, devctl_argv
+from devctlib.testing import Exec, FakeRunner
 
 
 @pytest.mark.parametrize(
@@ -49,17 +46,9 @@ def test_local_env_picks_the_instance(tmp_path, capsys):
     assert "'Nope'" in capsys.readouterr().err
 
 
-def test_unported_commands_reach_the_bash_original_untouched(tmp_path):
-    sandbox = Sandbox(tmp_path)
-    legacy = sandbox.devenv / cli.LEGACY
-    legacy.write_text("#!/usr/bin/env python3\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
-    legacy.chmod(0o755)
-    argv = ["--name", "alpha", "nosuchcommand", "--flag", "a b"]
-
-    result = subprocess.run(devctl_argv(sandbox.devenv, *argv), capture_output=True, text=True)
-
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == argv
+def test_an_unknown_command_is_refused(tmp_path, capsys):
+    assert cli.main(["nosuchcommand"], str(tmp_path)) == 1
+    assert "unknown command: nosuchcommand (try: devctl help)" in capsys.readouterr().err
 
 
 def test_instances_is_ls_even_for_an_unknown_name(tmp_path, capsys):

@@ -100,11 +100,11 @@ MODELS_ASSET = "ge-dev-models.tar"
 # models until someone deliberately moves this. The tag names the two training
 # runs in the bundle (two-tower, ranker); models/publish_models.sh derives it
 # from the artifacts and prints what to set here.
-DEFAULT_MODELS_TAG = "models-1bf1ea3c-177899dd"
+MODELS_TAG = "models-1bf1ea3c-177899dd"
 
 
 def models_tag_pinned(ctx: Ctx) -> str:
-    return ctx.get("GE_DEV_MODELS_TAG", DEFAULT_MODELS_TAG)
+    return ctx.get("GE_DEV_MODELS_TAG", MODELS_TAG)
 
 
 def fetch_release_asset(ctx: Ctx, tag: str, asset: str, dest: Path, size: str) -> None:

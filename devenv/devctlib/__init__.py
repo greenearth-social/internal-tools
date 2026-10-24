@@ -9,7 +9,6 @@ Layout assumption: internal-tools is checked out next to its sibling repos
 monorepo checkout. Override with GE_DEV_REPO_ROOT.
 
 `devenv/devctl` is a small launcher that keeps this package's virtualenv and
-runs `cli.main`. Every command takes a `Ctx` (ctx.py), which holds what used
-to be the bash script's globals: the instance, its ports, and the environment
-handed to docker compose.
+runs `cli.main`. Every command takes a `Ctx` (ctx.py): the instance, its
+ports, and the environment handed to docker compose.
 """

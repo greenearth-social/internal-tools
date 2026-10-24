@@ -123,7 +123,7 @@ Needs: `gcloud` with read access to the prod model bucket.
    runs in the bundle (`models-<two-tower>-<ranker>`), so re-publishing the
    same artifacts is idempotent.
 
-4. **Pin it**: set `MODELS_TAG` in `devctl` to the tag the script prints,
+4. **Pin it**: set `MODELS_TAG` in `devctlib/assets.py` to the tag the script prints,
    and commit. Unlike fixtures, models are pinned — everyone runs the same
    bundle until this line moves, because seeded embeddings and serving
    towers have to agree.

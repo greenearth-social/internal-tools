@@ -12,12 +12,18 @@ set -euo pipefail
 DEVENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="$DEVENV_DIR/.venv-devctl"
 REQUIREMENTS="$DEVENV_DIR/devctl-requirements.txt"
-# The requirements the venv was last synced to, kept inside it.
-SYNCED="$VENV/devctl-requirements.txt"
+# What the venv was last built from — the requirements, and GE_DEV_PYTHON if
+# one was chosen — kept inside it. Changing either rebuilds it.
+SYNCED="$VENV/devctl-built-from"
 
 die() {
   echo "devctl: $*" >&2
   exit 1
+}
+
+built_from() {
+  cat "$REQUIREMENTS"
+  echo "# GE_DEV_PYTHON=${GE_DEV_PYTHON:-}"
 }
 
 new_enough() {
@@ -56,12 +62,12 @@ sync_venv() {
     die "couldn't create a virtualenv with $python — on Debian/Ubuntu, install python3-venv"
   "$scratch/bin/python" -m pip install --quiet --disable-pip-version-check -r "$REQUIREMENTS" ||
     { rm -rf "$scratch"; die "couldn't install devctl's dependencies (see above)"; }
-  cp "$REQUIREMENTS" "$scratch/devctl-requirements.txt"
+  built_from >"$scratch/devctl-built-from"
   rm -rf "$VENV"
   mv "$scratch" "$VENV" 2>/dev/null || rm -rf "$scratch"
 }
 
-if ! { [[ -x "$VENV/bin/python" ]] && cmp -s "$REQUIREMENTS" "$SYNCED" && new_enough "$VENV/bin/python"; }; then
+if ! { [[ -x "$VENV/bin/python" ]] && built_from | cmp -s - "$SYNCED" && new_enough "$VENV/bin/python"; }; then
   sync_venv
 fi
 

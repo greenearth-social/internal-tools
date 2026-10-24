@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import socket
-import sys
 from pathlib import Path
 
 # Port name -> default. The env var for each is GE_DEV_PORT_<name>, which is
@@ -166,25 +165,3 @@ def read_only(devenv_dir: Path, name: str, bases: dict[str, int]) -> tuple[int, 
             f"        or list what exists: devctl ls"
         )
     return offset, ports_for(offset, bases)
-
-
-def main(argv: list[str], env: dict) -> int:
-    if len(argv) != 4 or argv[3] not in ("allocate", "read"):
-        print("usage: ports.py <devenv-dir> <instance-name> allocate|read", file=sys.stderr)
-        return 2
-    devenv_dir, name, mode = Path(argv[1]), argv[2], argv[3]
-
-    bases = resolve_bases(env)
-    offset, ports = (allocate if mode == "allocate" else read_only)(devenv_dir, name, bases)
-    # Shell-sourceable: devctl evaluates this and re-exports, so the values
-    # reach docker-compose.yml as GE_DEV_PORT_*.
-    print(f"GE_DEV_PORT_OFFSET={offset}")
-    for port_name, port in ports.items():
-        print(f"GE_DEV_PORT_{port_name}={port}")
-    return 0
-
-
-if __name__ == "__main__":
-    import os
-
-    raise SystemExit(main(sys.argv, dict(os.environ)))

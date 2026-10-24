@@ -1,12 +1,12 @@
 """Running external commands.
 
-Everything devctl does to the outside world — docker, curl-equivalents aside,
-git, kubectl, gcloud — goes through a Runner, so tests can swap in one that
-records what would have run (see fakes.py) instead of patching subprocess.
+Every command devctl runs — docker, git, kubectl, gcloud, curl — goes through
+a Runner, so tests can swap in one that records what would have run
+(testing.FakeRunner) instead of patching subprocess.
 
-A failed command raises CommandFailed by default, the equivalent of the bash
-script's `set -e`: the command stops there and devctl exits with the failed
-command's status, having printed nothing more (the command already said why).
+A failed command raises CommandFailed by default: the command stops there
+and devctl exits with the failed command's status, having printed nothing
+more (the command already said why).
 """
 
 from __future__ import annotations

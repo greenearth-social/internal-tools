@@ -19,7 +19,7 @@
 #   models/publish_models.sh                      # newest in the prod bucket
 #   models/publish_models.sh --dry-run            # stage and inspect, no upload
 #
-# Then pin the new tag in devctl (MODELS_TAG) so everyone gets it.
+# Then pin the new tag in devctlib/assets.py (MODELS_TAG) so everyone gets it.
 #
 # Requires: gcloud (authenticated, with read access to the prod model bucket),
 # gh, python3.
@@ -193,7 +193,7 @@ EOF
 # run they're actually serving.
 
 # Derived from the training runs, not the clock, so the tag is a function of
-# what's in the bundle. That means MODELS_TAG can be pinned in devctl before
+# what's in the bundle. That means MODELS_TAG can be pinned in devctlib/assets.py before
 # anyone uploads, re-running this for the same artifacts is idempotent, and the
 # tag says which runs it holds instead of when someone happened to press go.
 tag="models-$(read_json "$workdir/two_tower_src.json" clearml_task_id | cut -c1-8)-$(
@@ -261,7 +261,7 @@ print(f\"- Max history: {m['max_history_len']}\")
 print(f\"- Two-tower run: {s['two_tower_manifest_uri']}\")
 print(f\"- Ranker run: {s['ranker_manifest_uri']}\")
 print()
-print('Fetch with \`devctl fetch-models\`. Pin it by setting MODELS_TAG in devctl.')
+print('Fetch with \`devctl fetch-models\`. Pin it by setting MODELS_TAG in devctlib/assets.py.')
 ")"
 
 if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
@@ -279,4 +279,4 @@ fi
 
 echo "publish_models: done.
 
-Pin it: set MODELS_TAG=\"$tag\" in devctl, then: devctl fetch-models"
+Pin it: set MODELS_TAG = \"$tag\" in devctlib/assets.py, then: devctl fetch-models"

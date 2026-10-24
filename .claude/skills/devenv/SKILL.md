@@ -11,7 +11,9 @@ and models come from public GitHub releases. When `bridg-eu` is checked out
 next to the other repos, it also runs the BridgEU services (see below).
 
 Everything goes through `devctl`. Run it from `internal-tools/devenv/`, or by
-absolute path from anywhere.
+absolute path from anywhere. It's Python (3.13+, in `devenv/devctlib/`) and
+keeps its own virtualenv, which its first run creates — so the first command
+on a fresh checkout takes a few extra seconds.
 
 ## Before anything else
 

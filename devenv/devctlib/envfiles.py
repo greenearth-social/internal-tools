@@ -2,8 +2,7 @@
 
 devenv.local.env is the developer's own overrides (ports, ES heap, live keys).
 It's dotenv format: `NAME=value` lines, optionally quoted, `#` comments. Its
-values win over the process environment, as they did when the bash version
-sourced it with `set -a`.
+values win over the process environment.
 
 The state files under .runtime/ (live.env, share.env, repo_root.env, bsky.env,
 eurosky.env, es_key_*.env, probe.env) are written by devctl or by the

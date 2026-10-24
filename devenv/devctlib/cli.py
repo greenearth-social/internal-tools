@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -14,9 +15,6 @@ from .envfiles import load_local_env
 from .instance import load_state, resolve_ports, set_instance
 from .runner import CommandFailed, Runner
 from .usage import usage
-
-# Commands not yet ported are handed, argv untouched, to the bash original.
-LEGACY = "devctl-legacy"
 
 HELP_FLAGS = ("-h", "--help")
 
@@ -118,13 +116,6 @@ def parse_global(argv: Sequence[str], default_instance: str) -> Invocation:
     return Invocation(instance, command, rest[1:])
 
 
-def hand_off_to_legacy(devenv: Path, argv: Sequence[str], environ: Mapping[str, str]) -> None:
-    legacy = str(devenv / LEGACY)
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os.execve(legacy, [legacy, *argv], dict(environ))
-
-
 def run(
     argv: Sequence[str],
     *,
@@ -136,25 +127,24 @@ def run(
     load_local_env(devenv, env)
     inv = parse_global(argv, env.get("GE_DEV_INSTANCE") or DEFAULT_INSTANCE)
 
-    command = COMMANDS.get(inv.command)
-    if command is None:
-        hand_off_to_legacy(devenv, argv, environ)
-        return 0  # not reached
-
     ctx = Ctx(devenv=devenv, env=env, runner=runner or Runner())
     # Everything after this — the live-mode record, the minted keys, the
     # compose project — is per instance, so it settles first.
     set_instance(ctx, inv.instance)
     load_state(ctx)
 
+    command = COMMANDS.get(inv.command)
+
     # A command must never act on an argument it doesn't read: `seed --help`
     # used to go ahead and wipe and reload Elasticsearch (issue #42). So --help
     # means usage everywhere except the passthrough commands, whose underlying
     # tool answers it — and before port resolution, so it works on an instance
     # that doesn't exist yet.
-    if not command.passthrough and any(a in HELP_FLAGS for a in inv.args):
+    if not (command and command.passthrough) and any(a in HELP_FLAGS for a in inv.args):
         usage()
         return 0
+    if command is None:
+        die(f"unknown command: {inv.command} (try: devctl help)")
     if command.no_args and inv.args:
         die(f"{inv.command} takes no arguments, got: {' '.join(inv.args)} (try: devctl help)")
 
@@ -167,6 +157,9 @@ def main(argv: Sequence[str] | None = None, devenv: str | None = None) -> int:
     """Entry point. devenv is the launcher's own directory, as the shell
     spells it (symlinks unresolved), so derived paths read the way they did."""
     devenv_dir = Path(devenv) if devenv else Path(__file__).resolve().parent.parent
+    # Like any other command-line tool, stop quietly when the reader goes away
+    # (`devctl help | head`) instead of with a BrokenPipeError traceback.
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     try:
         return run(
             list(sys.argv[1:] if argv is None else argv), devenv=devenv_dir, environ=os.environ

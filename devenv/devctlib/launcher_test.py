@@ -86,6 +86,27 @@ def test_launcher_ignores_the_working_directory(devenv):
     assert result.returncode == 7, result.stderr
 
 
+def test_launcher_rebuilds_for_a_newly_chosen_python(devenv):
+    launch(devenv)
+
+    result = launch(devenv, GE_DEV_PYTHON=sys.executable)
+
+    assert result.returncode == 7, result.stderr
+    assert "preparing devctl's virtualenv" in result.stderr
+
+
+def test_launcher_names_a_python_that_is_too_old_even_with_a_venv(devenv):
+    launch(devenv)
+    old = devenv.parent / "old-python"
+    old.write_text("#!/bin/sh\nexit 1\n")
+    old.chmod(0o755)
+
+    result = launch(devenv, GE_DEV_PYTHON=str(old))
+
+    assert result.returncode == 1
+    assert "isn't a Python 3.13 or newer" in result.stderr
+
+
 def test_launcher_names_a_python_that_is_too_old(devenv):
     old = devenv.parent / "old-python"
     old.write_text("#!/bin/sh\nexit 1\n")
