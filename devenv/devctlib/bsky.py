@@ -271,12 +271,13 @@ def bsky_up(ctx: Ctx) -> None:
 
 def recreate_env(ctx: Ctx) -> None:
     """The environment `up` gave the api, for recreating it here: its live
-    targets (which re-apply this session) and its Elasticsearch key."""
-    from .es import export_api_es_env
+    targets (which re-apply this session) and how it reaches Elasticsearch —
+    the owner's cluster, on a sharing instance."""
+    from .es import export_api_env
     from .live import resolve_live  # live re-applies this module's session
 
     resolve_live(ctx)
-    export_api_es_env(ctx)
+    export_api_env(ctx)
 
 
 def ensure_oauth_keys(ctx: Ctx) -> bool:

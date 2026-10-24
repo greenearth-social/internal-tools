@@ -180,3 +180,24 @@ def test_oauth_keys_are_generated_in_firebase_once(tmp_path):
 def test_oauth_keys_need_firebase(tmp_path, capsys):
     assert bsky.ensure_oauth_keys(make_ctx(tmp_path)) is False
     assert "firebase container isn't running" in capsys.readouterr().err
+
+
+def test_bsky_up_on_a_sharing_instance_keeps_the_api_on_the_owners_cluster(session):
+    session.instance = "alpha"
+    session.env["GE_DEV_SHARE_ES"] = "1"
+    session.offset = 10
+    session.ports["ES"] = 9211
+    owner = session.devenv / ".runtime"
+    owner.mkdir(exist_ok=True)
+    (owner / "es_key_ro.env").write_text("GE_ELASTICSEARCH_API_KEY=owner-key\n")
+    session.runtime.mkdir(exist_ok=True)
+    keys = bsky.oauth_dir(session)
+    keys.mkdir(exist_ok=True)
+    for name in bsky.OAUTH_FILES:
+        (keys / name).write_text("v")
+
+    bsky.bsky_up(session)
+
+    recreate = next(c for c in fake(session).calls if c.line.endswith("--force-recreate api"))
+    assert recreate.env["GE_DEV_ES_API_KEY"] == "owner-key"
+    assert recreate.env["GE_DEV_ES_URL"] == "http://host.docker.internal:9201"
