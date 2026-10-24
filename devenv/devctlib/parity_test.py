@@ -805,3 +805,91 @@ BRIDGEU_SECRET = Rule(r"printenv BRIDGEU_DEV_SESSION_SECRET", "ge-dev-session\r\
 )
 def test_feed(tmp_path, args, rules, repos, setup, phrases):
     parity(tmp_path, *args, rules=rules, repos=repos, setup=setup, http=stale_es, phrases=phrases)
+
+
+def eurosky_session(sandbox):
+    runtime = sandbox.devenv / ".runtime"
+    runtime.mkdir(exist_ok=True)
+    (runtime / "eurosky.env").write_text(
+        "GE_EUROSKY_HANDLE=me.eurosky.social\nGE_EUROSKY_PUBLISHER_DID=did:plc:p\n"
+        "GE_EUROSKY_HOST=h.ngrok.dev\n"
+    )
+    (runtime / "eurosky_feeds.tsv").write_text("rk1\tpassthrough\nrk2\tother\n")
+
+
+def bsky_only(sandbox):
+    runtime = sandbox.devenv / ".runtime"
+    runtime.mkdir(exist_ok=True)
+    (runtime / "bsky.env").write_text(
+        "GE_BSKY_HANDLE=me.bsky.social\nGE_BSKY_HOST=h.ngrok.dev\n"
+        "GE_BSKY_DID=did:web:h.ngrok.dev\nGE_BSKY_OAUTH_OK=0\n"
+    )
+    (runtime / "bsky_feeds.tsv").write_text("rk-a\tyour-feed\nrk-b\tpopularity\n")
+    (runtime / "es_key_ro.env").write_text("GE_ELASTICSEARCH_API_KEY=ro-key\n")
+
+
+NGROK_UP = Rule(r"ps --status running", "api\nbridgeu-api\nngrok\n")
+TUNNEL_ENV = {
+    "NGROK_AUTHTOKEN": "t",
+    "GE_DEV_BSKY_HANDLE": "me.bsky.social",
+    "GE_BSKY_APP_PASSWORD": "pw",
+    "GE_DEV_EUROSKY_HANDLE": "me.eurosky.social",
+    "GE_DEV_EUROSKY_APP_PASSWORD": "pw",
+}
+
+
+@pytest.mark.parametrize(
+    ("args", "setup", "rules", "env", "repos", "phrases"),
+    [
+        (("bsky",), None, [], {}, MYSKY, ["usage: devctl bsky"]),
+        (("bsky", "up", "now"), None, [], {}, MYSKY, ["usage: devctl bsky up"]),
+        (("bsky", "status"), None, [], {}, MYSKY, ["no active bsky session"]),
+        (("bsky", "status"), bsky_only, [NGROK_UP], {}, MYSKY, ["session active", "your-feed:"]),
+        (("bsky", "status"), bsky_only, [], {}, MYSKY, ["tunnel isn't running"]),
+        (("bsky", "down"), None, [], {}, MYSKY, ["no active bsky session"]),
+        (("bsky", "down"), bsky_only, [NGROK_UP], TUNNEL_ENV, MYSKY, ["torn down"]),
+        (("bsky", "down"), bsky_only, [], {}, MYSKY, ["delete them manually|do it manually"]),
+        (("bsky", "up"), None, [], TUNNEL_ENV, MYSKY, ["the api isn't running"]),
+        (("bsky", "up"), None, [RUNNING], {}, MYSKY, ["set NGROK_AUTHTOKEN"]),
+        (("bsky", "up"), bsky_only, [RUNNING], TUNNEL_ENV, MYSKY, ["already active"]),
+        (("bsky", "up"), eurosky_session, [RUNNING], TUNNEL_ENV, MYSKY, ["eurosky session holds"]),
+        (("eurosky", "status"), eurosky_session, [NGROK_UP], {}, WITH_BRIDGEU, ["passthrough:"]),
+        (("eurosky", "status"), None, [], {}, WITH_BRIDGEU, ["no active eurosky session"]),
+        (
+            ("eurosky", "down"),
+            eurosky_session,
+            [NGROK_UP],
+            TUNNEL_ENV,
+            WITH_BRIDGEU,
+            ["deleting feed records", "torn down"],
+        ),
+        (
+            ("eurosky", "down"),
+            eurosky_session,
+            [NGROK_UP, Rule(r"--delete", rc=1)],
+            TUNNEL_ENV,
+            WITH_BRIDGEU,
+            ["left in place"],
+        ),
+        (("eurosky", "down"), eurosky_session, [], {}, WITH_BRIDGEU, ["Delete them by hand"]),
+        (("eurosky", "up"), None, [], TUNNEL_ENV, MYSKY, ["needs bridg-eu checked out"]),
+        (
+            ("eurosky", "up"),
+            bsky_only,
+            [NGROK_UP],
+            TUNNEL_ENV,
+            WITH_BRIDGEU,
+            ["bsky session holds"],
+        ),
+        (
+            ("eurosky", "up"),
+            None,
+            [NGROK_UP, Rule(r"pipenv run python -c", "nope")],
+            TUNNEL_ENV,
+            WITH_BRIDGEU,
+            ["couldn't resolve"],
+        ),
+    ],
+)
+def test_bsky_and_eurosky(tmp_path, args, setup, rules, env, repos, phrases):
+    parity(tmp_path, *args, setup=setup, rules=rules, env=env, repos=repos, phrases=phrases)

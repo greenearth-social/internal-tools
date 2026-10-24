@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import assets, doctor, info, live, pull, stack, suites
+from . import assets, bsky, doctor, eurosky, info, live, pull, stack, suites
 from .ctx import DEFAULT_INSTANCE, Ctx, Die, die
 from .envfiles import load_local_env
 from .instance import load_state, resolve_ports, set_instance
@@ -69,6 +69,8 @@ COMMANDS: dict[str, Command] = {
     "down": Command(stack.cmd_down, no_args=True),
     "nuke": Command(stack.cmd_nuke, no_args=True),
     "feed": Command(info.cmd_feed, passthrough=True),
+    "bsky": Command(bsky.cmd_bsky),
+    "eurosky": Command(eurosky.cmd_eurosky),
 }
 
 

@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
@@ -65,6 +66,20 @@ class Ctx:
     def unset(self, *names: str) -> None:
         for name in names:
             self.env.pop(name, None)
+
+    @contextmanager
+    def scoped_env(self, **values: str) -> Iterator[None]:
+        """Export values for the commands run inside the block only."""
+        saved = {name: self.env.get(name) for name in values}
+        self.env.update(values)
+        try:
+            yield
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    self.env.pop(name, None)
+                else:
+                    self.env[name] = value
 
     def run(self, argv: Sequence[str], **kwargs) -> Result:
         return self.runner.run(argv, env=self.env, **kwargs)

@@ -331,7 +331,11 @@ class Sandbox:
         return text.replace(str(self.root), "<ROOT>")
 
     def _norm_argv(self, argv: list[str]) -> list[str]:
-        return [self._norm(a) for a in argv]
+        # A program run in a container with `python -c` is compared as the
+        # fact of one: the port's are files of their own, tested directly.
+        return [
+            "<program>" if i and argv[i - 1] == "-c" else self._norm(a) for i, a in enumerate(argv)
+        ]
 
     def _norm_env(self, env: dict[str, str]) -> dict[str, str]:
         return {
