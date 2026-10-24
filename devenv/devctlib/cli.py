@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import doctor, info, pull, suites
+from . import assets, doctor, info, pull, stack, suites
 from .ctx import DEFAULT_INSTANCE, Ctx, Die, die
 from .envfiles import load_local_env
 from .instance import load_state, resolve_ports, set_instance
@@ -56,6 +56,10 @@ COMMANDS: dict[str, Command] = {
     "test": Command(suites.cmd_test),
     "login": Command(info.cmd_login),
     "pull": Command(pull.cmd_pull, ports=None),
+    "fetch-fixture": Command(assets.cmd_fetch_fixture, ports=None, no_args=True),
+    "fetch-models": Command(assets.cmd_fetch_models, ports=None, no_args=True),
+    "use-ranker": Command(assets.cmd_use_ranker, ports=None),
+    "setup": Command(stack.cmd_setup, ports=None, no_args=True),
 }
 
 

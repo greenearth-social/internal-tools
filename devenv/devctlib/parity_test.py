@@ -365,3 +365,64 @@ def git_repos(sandbox):
 def test_pull(tmp_path, args, setup):
     legacy, port = parity(tmp_path, *args, setup=setup, env={"GIT_CONFIG_GLOBAL": "/dev/null"})
     assert port.stdout == legacy.stdout
+
+
+# Network is pointed at a proxy nobody listens on, so downloads fail fast and
+# identically rather than reaching GitHub.
+NO_NETWORK = {"https_proxy": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9"}
+
+
+@pytest.mark.parametrize(
+    ("args", "phrases"),
+    [
+        (("fetch-fixture",), ["no fixture release found"]),
+        (("fetch-models",), ["downloading models-1bf1ea3c-177899dd", "download failed"]),
+        (("fetch-models", "x"), ["takes no arguments"]),
+    ],
+)
+def test_fetch_without_network(tmp_path, args, phrases):
+    parity(tmp_path, *args, env=NO_NETWORK, phrases=phrases)
+
+
+@pytest.mark.parametrize(
+    ("args", "setup", "rules", "repos", "phrases"),
+    [
+        (
+            ("setup",),
+            bundles(),
+            [],
+            ("api", "ingex", "frontend", "inference-service"),
+            ["setup complete"],
+        ),
+        (
+            ("setup",),
+            bundles(),
+            [],
+            ("api", "ingex", "frontend", "inference-service", "bridg-eu"),
+            ["setup complete"],
+        ),
+        (("setup",), None, [], ("api", "ingex"), ["missing required repos"]),
+        (
+            ("setup",),
+            bundles(),
+            [Rule(r"--install-only", rc=1)],
+            ("api", "ingex", "frontend", "inference-service"),
+            ["failed to install"],
+        ),
+        (
+            ("setup",),
+            bundles(),
+            [Rule(r" build ", rc=17)],
+            ("api", "ingex", "frontend", "inference-service"),
+            [],
+        ),
+        (("setup",), bundles(), [Rule(r"^docker info$", rc=1)], ("api",), ["daemon isn't running"]),
+    ],
+)
+def test_setup(tmp_path, args, setup, rules, repos, phrases):
+    parity(tmp_path, *args, setup=setup, rules=rules, repos=repos, phrases=phrases, env=NO_NETWORK)
+
+
+@pytest.mark.parametrize("args", [("use-ranker", "--reset"), ("use-ranker", "--bogus")])
+def test_use_ranker(tmp_path, args):
+    parity(tmp_path, *args, env=NO_NETWORK)
