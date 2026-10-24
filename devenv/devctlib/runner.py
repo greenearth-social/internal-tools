@@ -57,6 +57,8 @@ class Runner:
         quiet / quiet_err: discard stdout / stderr.
         check: raise CommandFailed on a non-zero exit.
         """
+        # Whatever devctl has printed so far comes before the command's output.
+        sys.stdout.flush()
         stdout = subprocess.PIPE if capture else (subprocess.DEVNULL if quiet else None)
         stderr = subprocess.DEVNULL if quiet_err else None
         try:

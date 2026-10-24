@@ -28,6 +28,9 @@ def die(message: str) -> NoReturn:
 
 
 def warn(message: str) -> None:
+    # Flushed first so the two streams interleave as written when both go to
+    # the same pipe (stdout is block-buffered there).
+    sys.stdout.flush()
     print(message, file=sys.stderr)
 
 

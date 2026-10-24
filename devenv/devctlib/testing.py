@@ -12,7 +12,8 @@ import shutil
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -421,3 +422,16 @@ def _diff(what: str, legacy: object, new: object) -> str:
 
     body = "\n".join(difflib.unified_diff(lines(legacy), lines(new), "legacy", "port", lineterm=""))
     return f"{what} differ:\n{body}"
+
+
+@contextmanager
+def serve(respond: Callable[[str, str], tuple[int, str]]) -> Iterator[_FakeHTTP]:
+    """A local HTTP server answering with respond(method, path); its port is
+    server.server_address[1] and what it was asked is server.requests."""
+    server = _FakeHTTP(0, respond)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()

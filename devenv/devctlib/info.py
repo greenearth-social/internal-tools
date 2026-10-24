@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from . import ports as port_table
-from .compose import compose_argv, running_projects
-from .ctx import Ctx, die
-from .envfiles import env_file_value
-from .es import es_curl
+from .compose import compose, compose_argv, oom_killed_services, running_projects
+from .ctx import Ctx, die, warn
+from .envfiles import env_file_value, nonempty
+from .es import ES_OWNER, data_age_hours, es_count, es_curl, share_es, warn_stale_data
 
 # --- ports -------------------------------------------------------------------
 
@@ -127,3 +127,30 @@ def cmd_logs(ctx: Ctx, args: list[str]) -> None:
     if not any(a == "--tail" or a.startswith("--tail=") for a in passthrough):
         passthrough.insert(0, "--tail=100")
     ctx.exec(compose_argv(ctx, "logs", *(["-f"] if follow else []), *passthrough))
+
+
+# --- status ------------------------------------------------------------------
+
+
+def cmd_status(ctx: Ctx, args: list[str]) -> None:
+    compose(ctx, "ps")
+    # `compose ps` shows a 137 exit code but not what it implies, and a stopped
+    # Elasticsearch is the version of this environment failing that looks
+    # least like a memory problem.
+    killed = oom_killed_services(ctx)
+    if killed:
+        print()
+        warn(f"** killed by the kernel, almost certainly out of memory: {' '.join(killed)}")
+        warn(f"   restart with: devctl up{ctx.name_flag()}   (running instances: devctl ls)")
+    print()
+    if share_es(ctx):
+        print(f"elasticsearch shared from '{ES_OWNER}':")
+    if share_es(ctx) or nonempty(ctx.runtime / "es_key_ro.env"):
+        for alias in ("posts", "likes", "inferences"):
+            print(f"{alias:<12} {es_count(ctx, alias)} docs")
+    if ctx.repo_root != ctx.default_repo_root:
+        print(f"code         mounted from {ctx.repo_root}")
+    age = data_age_hours(ctx)
+    if age is not None:
+        print(f"data age     newest post {age}h old")
+    warn_stale_data(ctx)

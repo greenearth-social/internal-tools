@@ -33,6 +33,12 @@ def env_file_value(path: Path, key: str) -> str:
     return read_env_file(path).get(key, "")
 
 
+def nonempty(path: Path) -> bool:
+    """True for a file with something in it — how a minted key's presence
+    shows."""
+    return path.is_file() and path.stat().st_size > 0
+
+
 def write_env_file(path: Path, values: Mapping[str, str]) -> None:
     path.write_text("".join(f"{k}={v}\n" for k, v in values.items()))
 
