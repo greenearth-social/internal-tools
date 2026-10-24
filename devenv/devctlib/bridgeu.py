@@ -19,3 +19,11 @@ def have_bridgeu(ctx: Ctx) -> bool:
 def clone_hint(ctx: Ctx) -> str:
     """The command that fetches the checkout BridgEU's services need."""
     return f'git clone {BRIDGEU_CLONE_URL} "{ctx.repo_root}/{BRIDGEU_REPO}"'
+
+
+# The key bridgeu-api calls the local api with. Deliberately fixed and public:
+# it only ever opens the local api, which carries no data of its own, and a
+# well-known value means nothing has to be minted and handed between the two
+# sides. issue_bridgeu_key makes the local api accept it.
+BRIDGEU_LOCAL_MYSKY_API_KEY = "gea_bridgeu0devenvlocalkeynotasecretdevenvlocalkeynotasecret"
+BRIDGEU_LOCAL_MYSKY_API_URL = "http://mysky-api:8000"

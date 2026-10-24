@@ -426,3 +426,17 @@ def test_setup(tmp_path, args, setup, rules, repos, phrases):
 @pytest.mark.parametrize("args", [("use-ranker", "--reset"), ("use-ranker", "--bogus")])
 def test_use_ranker(tmp_path, args):
     parity(tmp_path, *args, env=NO_NETWORK)
+
+
+# Only the ways tunnel stops: its success path port-forwards forever.
+@pytest.mark.parametrize(
+    ("args", "rules", "phrases"),
+    [
+        (("tunnel", "dev"), [], ["usage: devctl tunnel"]),
+        (("tunnel", "prod"), [Rule(r"^gcloud ", rc=1)], ["couldn't configure kubectl"]),
+        (("tunnel",), [Rule(r"current-context", "")], ["kubectl has no current context"]),
+        (("tunnel",), [Rule(r"current-context", rc=1)], ["kubectl has no current context"]),
+    ],
+)
+def test_tunnel(tmp_path, args, rules, phrases):
+    parity(tmp_path, *args, rules=rules, phrases=phrases)
