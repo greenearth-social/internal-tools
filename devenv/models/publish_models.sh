@@ -245,8 +245,9 @@ if [[ $DRY_RUN -eq 1 ]]; then
   exit 0
 fi
 
-# Already-compressed weights, so tar without compression (same as fixtures).
-tar -cf "$workdir/$ASSET_NAME" -C "$stage" .
+# Already-compressed weights, so tar without compression (same as fixtures,
+# and without macOS's AppleDouble files for the same reason).
+COPYFILE_DISABLE=1 tar -cf "$workdir/$ASSET_NAME" -C "$stage" .
 echo "publish_models: bundle is $(du -h "$workdir/$ASSET_NAME" | cut -f1)"
 
 notes="$(python3 -c "

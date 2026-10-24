@@ -129,3 +129,22 @@ def test_use_ranker_passes_its_arguments_and_this_instances_paths(tmp_path, caps
     assert argv[2:4] == ["gs://run", "--reset"]
     assert argv[argv.index("--runtime") + 1] == str(ctx.devenv / ".runtime.alpha")
     assert "devctl restart --name alpha inference" in capsys.readouterr().out
+
+
+def test_mac_metadata_in_a_release_is_left_out(tmp_path):
+    """A release tarred on a Mac carries ._<name> AppleDouble files; extracted
+    as files, ._x.db.zip fails the seed as "file is not a database"."""
+    payload = tar_of(
+        {
+            **MODELS,
+            "._manifest.json": "\x00\x05\x16\x07",
+            "._mega_20260912_230004.db.zip": "\x00\x05\x16\x07",
+            "__MACOSX/x": "meta",
+        }
+    )
+    ctx = make_ctx(tmp_path, runner=downloads(payload), env={"GE_DEV_MODELS_TAG": "models-x"})
+
+    assets.cmd_fetch_models(ctx, [])
+
+    data = ctx.devenv / "models" / "data"
+    assert sorted(p.name for p in data.rglob("*")) == ["a.pt", "manifest.json", "towers"]

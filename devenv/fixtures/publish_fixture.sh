@@ -68,8 +68,10 @@ workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 
 # Contents are already compressed (zip/gzip), so tar without compression.
+# COPYFILE_DISABLE keeps macOS's tar from adding an AppleDouble ._<name> per
+# file, which every other tar extracts as a (corrupt-looking) file of its own.
 echo "publish_fixture: bundling $DATA_DIR ..."
-tar -cf "$workdir/$ASSET_NAME" -C "$DATA_DIR" .
+COPYFILE_DISABLE=1 tar -cf "$workdir/$ASSET_NAME" -C "$DATA_DIR" .
 echo "publish_fixture: bundle is $(du -h "$workdir/$ASSET_NAME" | cut -f1)"
 
 if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then

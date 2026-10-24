@@ -127,12 +127,26 @@ def fetch_release_asset(ctx: Ctx, tag: str, asset: str, dest: Path, size: str) -
         extracted = work / "x"
         try:
             with tarfile.open(work / asset) as archive:
-                archive.extractall(extracted, filter="data")
+                archive.extractall(extracted, filter=without_mac_metadata)
         except (tarfile.TarError, OSError):
             die(f"{tag}: archive is unreadable")
         shutil.rmtree(dest, ignore_errors=True)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(extracted, dest)
+
+
+def without_mac_metadata(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo | None:
+    """tarfile's safe "data" filter, minus macOS metadata.
+
+    A release tarred on a Mac carries an AppleDouble `._<name>` beside each
+    file. macOS's own tar folds those back into extended attributes, but
+    anything else extracts them as files — and `._x.db.zip` then matches the
+    seed's `*.db.zip` and fails as "file is not a database".
+    """
+    name = Path(member.name)
+    if name.name.startswith("._") or "__MACOSX" in name.parts:
+        return None
+    return tarfile.data_filter(member, dest)
 
 
 def newest_fixture_tag(ctx: Ctx) -> str:
