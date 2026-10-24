@@ -757,3 +757,51 @@ def test_bootstrap(tmp_path, args, http, phrases):
         env=NO_NETWORK,
         phrases=phrases,
     )
+
+
+BRIDGEU_RUNNING = Rule(r"ps --status running", "api\nbridgeu-api\n")
+BRIDGEU_IDENTITY = Rule(r"printenv BRIDGEU_PUBLISHER_DID", "did:plc:pub\r\n")
+BRIDGEU_SECRET = Rule(r"printenv BRIDGEU_DEV_SESSION_SECRET", "ge-dev-session\r\n")
+
+
+@pytest.mark.parametrize(
+    ("args", "rules", "repos", "setup", "phrases"),
+    [
+        (("feed",), [RUNNING], MYSKY, es_keys, []),
+        (("feed", "your-feed", "--limit", "3", "--help"), [RUNNING], MYSKY, es_keys, []),
+        (("feed",), [RUNNING], MYSKY, es_keys, []),
+        (("feed",), [], MYSKY, es_keys, ["the api isn't running"]),
+        (
+            ("feed", "--bridgeu"),
+            [BRIDGEU_RUNNING, BRIDGEU_IDENTITY, BRIDGEU_SECRET],
+            WITH_BRIDGEU,
+            es_keys,
+            [],
+        ),
+        (
+            ("feed", "--bridgeu", "--user", "did:plc:me", "x", "--json"),
+            [BRIDGEU_RUNNING, BRIDGEU_IDENTITY, BRIDGEU_SECRET],
+            WITH_BRIDGEU,
+            es_keys,
+            [],
+        ),
+        (
+            ("feed", "--bridgeu", "a", "b"),
+            [BRIDGEU_RUNNING, BRIDGEU_IDENTITY, BRIDGEU_SECRET],
+            WITH_BRIDGEU,
+            es_keys,
+            ["feed given twice"],
+        ),
+        (
+            ("feed", "--bridgeu"),
+            [BRIDGEU_RUNNING, BRIDGEU_IDENTITY, Rule(r"printenv BRIDGEU_DEV_SESSION_SECRET", rc=1)],
+            WITH_BRIDGEU,
+            es_keys,
+            ["dev session turned off"],
+        ),
+        (("feed", "--bridgeu"), [RUNNING], MYSKY, es_keys, ["needs bridg-eu checked out"]),
+        (("feed", "--bridgeu"), [RUNNING], WITH_BRIDGEU, es_keys, ["bridgeu-api isn't running"]),
+    ],
+)
+def test_feed(tmp_path, args, rules, repos, setup, phrases):
+    parity(tmp_path, *args, rules=rules, repos=repos, setup=setup, http=stale_es, phrases=phrases)

@@ -183,3 +183,89 @@ def test_login_mints_a_token_for_the_seeded_persona(tmp_path, capsys):
 def test_login_needs_a_persona(tmp_path):
     with pytest.raises(Die, match="no seeded persona found"):
         info.cmd_login(make_ctx(tmp_path), [])
+
+
+# --- feed ----------------------------------------------------------------------
+
+VIEWER = ["pipenv", "run", "python", "scripts/feed_view.py"]
+BRIDGEU_VIEWER = ["-e", "GE_DEV_SESSION_SECRET=ge-dev-session", "api", *VIEWER]
+
+
+def feed_ctx(tmp_path, *, secret="ge-dev-session", eurosky=False):
+    def respond(argv):
+        if "ps" in argv:
+            return "api bridgeu-api"
+        if argv[-1] == "BRIDGEU_PUBLISHER_DID":
+            return "did:plc:bridgeupub\r\n"
+        if argv[-1] == "BRIDGEU_DEV_SESSION_SECRET":
+            return f"{secret}\r\n" if secret else 1
+        return None
+
+    ctx = make_ctx(tmp_path, runner=FakeRunner(respond))
+    (tmp_path / "bridg-eu" / ".git").mkdir(parents=True)
+    if eurosky:
+        ctx.eurosky_state.write_text("GE_EUROSKY_HANDLE=dev.eurosky.social\n")
+    return ctx
+
+
+def viewer_call(ctx, args) -> list[str]:
+    with pytest.raises(Exec) as exc:
+        info.cmd_feed(ctx, args)
+    argv = exc.value.argv
+    return argv[argv.index("PIPENV_VERBOSITY=-1") + 1 :]
+
+
+def test_feed_defaults_to_mysky_feeds_on_the_api(tmp_path):
+    assert viewer_call(feed_ctx(tmp_path), ["--limit", "5"]) == ["api", *VIEWER, "--limit", "5"]
+
+
+def test_bridgeu_feed_defaults_to_its_passthrough_feed(tmp_path):
+    assert viewer_call(feed_ctx(tmp_path), ["--bridgeu"]) == [
+        *BRIDGEU_VIEWER,
+        "at://did:plc:bridgeupub/app.bsky.feed.generator/passthrough",
+        "--api-url",
+        "http://bridgeu-api:8000",
+        "--no-pipeline",
+    ]
+
+
+def test_bridgeu_feed_names_a_feed_among_viewer_options(tmp_path):
+    # --user's value is not the feed; the bare word after it is.
+    args = ["--user", "did:plc:me", "other", "--bridgeu", "--limit", "3", "--json"]
+    assert viewer_call(feed_ctx(tmp_path), args) == [
+        *BRIDGEU_VIEWER,
+        "at://did:plc:bridgeupub/app.bsky.feed.generator/other",
+        "--api-url",
+        "http://bridgeu-api:8000",
+        "--no-pipeline",
+        "--user",
+        "did:plc:me",
+        "--limit",
+        "3",
+        "--json",
+    ]
+
+
+def test_bridgeu_feed_passes_a_full_uri_through(tmp_path):
+    uri = "at://did:plc:else/app.bsky.feed.generator/x"
+    assert viewer_call(feed_ctx(tmp_path), ["--bridgeu", uri])[len(BRIDGEU_VIEWER)] == uri
+
+
+def test_bridgeu_feed_refuses_two_feeds(tmp_path):
+    with pytest.raises(Die, match="feed given twice: a and b"):
+        info.cmd_feed(feed_ctx(tmp_path), ["--bridgeu", "a", "b"])
+
+
+def test_bridgeu_feed_needs_the_dev_session(tmp_path):
+    with pytest.raises(Die, match="dev session turned off"):
+        info.cmd_feed(feed_ctx(tmp_path, secret=""), ["--bridgeu"])
+
+
+def test_bridgeu_feed_points_a_eurosky_session_at_a_real_client(tmp_path):
+    with pytest.raises(Die, match="serving a eurosky session(.|\n)*devctl eurosky down"):
+        info.cmd_feed(feed_ctx(tmp_path, secret="", eurosky=True), ["--bridgeu"])
+
+
+def test_feed_needs_the_api(tmp_path):
+    with pytest.raises(Die, match="the api isn't running — start it with: devctl up"):
+        info.cmd_feed(make_ctx(tmp_path), [])

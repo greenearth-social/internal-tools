@@ -1,4 +1,5 @@
 import json
+import socket
 
 import pytest
 
@@ -16,6 +17,12 @@ def running(*services):
     return FakeRunner(respond)
 
 
+def closed_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 def with_bundles(ctx):
     models = ctx.devenv / "models" / "data"
     fixtures = ctx.devenv / "fixtures" / "data"
@@ -31,6 +38,7 @@ def test_a_running_api_without_es_keys_still_gets_a_full_report(tmp_path, capsys
     """The bash version stopped silently here: its posts count ran es_curl,
     which died for want of a key, and set -e took the whole run with it."""
     ctx = make_ctx(tmp_path, runner=running("api", "firebase"))
+    ctx.ports["API"] = closed_port()  # not a real api that happens to be up
     with_bundles(ctx)
 
     doctor.cmd_doctor(ctx, [])

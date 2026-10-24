@@ -68,6 +68,7 @@ COMMANDS: dict[str, Command] = {
     "restart": Command(stack.cmd_restart),
     "down": Command(stack.cmd_down, no_args=True),
     "nuke": Command(stack.cmd_nuke, no_args=True),
+    "feed": Command(info.cmd_feed, passthrough=True),
 }
 
 

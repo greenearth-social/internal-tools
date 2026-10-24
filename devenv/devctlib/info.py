@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from . import ports as port_table
 from .assets import python_tool
+from .bridgeu import BRIDGEU_REPO, bridgeu_feed_args, clone_hint, have_bridgeu
 from .compose import (
     compose,
     compose_argv,
@@ -211,3 +212,74 @@ def cmd_login(ctx: Ctx, args: list[str]) -> None:
         "The token is unsigned and only works against the Auth emulator. It expires in\n"
         "an hour; re-run devctl login for a fresh one."
     )
+
+
+# --- feed ----------------------------------------------------------------------
+
+FEED_VIEWER = ("pipenv", "run", "python", "scripts/feed_view.py")
+
+
+def cmd_feed(ctx: Ctx, args: list[str]) -> None:
+    # Terminal feed viewer (issue #285): request getFeedSkeleton as the seeded
+    # persona, hydrate each post from this environment's Elasticsearch, and
+    # print the feed. Runs inside the api container, which already has every
+    # input the viewer needs — the dev-session secret (so the api runs the full
+    # signed-in path and records a snapshot for the transparency UI), the
+    # persona DID, the ES read key, and the Firestore config for the per-post
+    # pipeline detail.
+    #
+    #   devctl feed
+    #   devctl feed your-feed --user did:plc:... --limit 50 --pages 2
+    #   devctl feed --json                 # raw getFeedSkeleton, the old output
+    #   devctl feed --bridgeu              # a BridgEU feed (default: passthrough)
+    #
+    # Everything else passes through to scripts/feed_view.py (feed defaults to
+    # your-feed). See feed_view.py --help for the full flag set.
+    bridgeu = "--bridgeu" in args
+    args = [a for a in args if a != "--bridgeu"]
+    require_running(ctx, "api", "the api isn't running")
+    # The symptom of stale data is exactly this command coming back empty.
+    warn_stale_data(ctx)
+    if not bridgeu:
+        ctx.exec(exec_argv(ctx, "api", *FEED_VIEWER, *args))
+
+    if not have_bridgeu(ctx):
+        die(f"--bridgeu needs {BRIDGEU_REPO} checked out: {clone_hint(ctx)}")
+    require_running(ctx, "bridgeu-api")
+    # The viewer still runs in the api container (it has the ES key to hydrate
+    # posts with), and reaches bridgeu-api over the bridgeu network the api is
+    # on. Identity and secret are read from bridgeu-api itself, so overrides in
+    # devenv.local.env can't drift from what it's actually running with.
+    publisher = bridgeu_env(ctx, "BRIDGEU_PUBLISHER_DID", check=True)
+    secret = bridgeu_env(ctx, "BRIDGEU_DEV_SESSION_SECRET")
+    if not secret and ctx.eurosky_state.is_file():
+        die(
+            "bridgeu-api is serving a eurosky session, which turns its dev session off —\n"
+            "        load the feed in a real client (devctl eurosky status),"
+            f" or end it: devctl eurosky down{ctx.name_flag()}"
+        )
+    if not secret:
+        die(
+            "bridgeu-api has its dev session turned off"
+            " (GE_DEV_BRIDGEU_SESSION_SECRET is empty),\n"
+            "        so there's no way to request a feed from it as a persona"
+        )
+    if ctx.live_has("mysky"):
+        warn("devctl: note — bridgeu-api is calling the LIVE mysky api, so its posts mostly")
+        warn("        aren't in this environment's index and won't hydrate.")
+    ctx.exec(
+        exec_argv(
+            ctx,
+            "-e",
+            f"GE_DEV_SESSION_SECRET={secret}",
+            "api",
+            *FEED_VIEWER,
+            *bridgeu_feed_args(publisher, args),
+        )
+    )
+
+
+def bridgeu_env(ctx: Ctx, name: str, *, check: bool = False) -> str:
+    """One variable as bridgeu-api's container sees it."""
+    result = compose(ctx, "exec", "-T", "bridgeu-api", "printenv", name, check=check, capture=True)
+    return result.stdout.replace("\r", "").strip()
