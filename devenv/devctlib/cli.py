@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import info
 from .ctx import DEFAULT_INSTANCE, Ctx, Die, die
 from .envfiles import load_local_env
 from .instance import load_state, resolve_ports, set_instance
@@ -43,6 +44,11 @@ COMMANDS: dict[str, Command] = {
     "help": Command(cmd_help, ports=None),
     "-h": Command(cmd_help, ports=None),
     "--help": Command(cmd_help, ports=None),
+    "ports": Command(info.cmd_ports),
+    "ls": Command(info.cmd_ls, ports=None, no_args=True),
+    "instances": Command(info.cmd_ls, ports=None, no_args=True),
+    "es": Command(info.cmd_es, passthrough=True),
+    "logs": Command(info.cmd_logs),
 }
 
 

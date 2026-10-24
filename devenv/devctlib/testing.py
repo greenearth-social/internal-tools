@@ -110,6 +110,12 @@ class FakeRunner(Runner):
         return out
 
 
+def fake(ctx: Ctx) -> FakeRunner:
+    """The FakeRunner behind a test's ctx."""
+    assert isinstance(ctx.runner, FakeRunner)
+    return ctx.runner
+
+
 def make_ctx(
     tmp_path: Path,
     *,
@@ -171,6 +177,9 @@ sys.exit(int(os.environ.get("FAKE_DEFAULT_RC", "0")))
 ENV_KEYS = r"^(GE_|BRIDGEU|NGROK|BLUESKY_OAUTH|OAUTH_STATE)"
 # Compose reads this one as `${VAR-default}`, so empty and unset differ.
 EMPTY_MATTERS = {"GE_DEV_BRIDGEU_SESSION_SECRET"}
+# devctl's own bookkeeping, which no compose file reads: the bash version only
+# exported these when a live.env existed, the port always does.
+NOT_COMPARED = {"GE_DEV_LIVE", "GE_DEV_LIVE_ENV"}
 
 
 @dataclass
@@ -318,7 +327,11 @@ class Sandbox:
         return [self._norm(a) for a in argv]
 
     def _norm_env(self, env: dict[str, str]) -> dict[str, str]:
-        return {k: self._norm(v) for k, v in sorted(env.items()) if v != "" or k in EMPTY_MATTERS}
+        return {
+            k: self._norm(v)
+            for k, v in sorted(env.items())
+            if (v != "" or k in EMPTY_MATTERS) and k not in NOT_COMPARED
+        }
 
     def _snapshot(self) -> dict[str, str]:
         out = {}
@@ -366,10 +379,10 @@ def assert_parity(legacy: Outcome, new: Outcome, *, phrases: Sequence[str] = ())
     same environment, the same requests to Elasticsearch, the same files, and
     the same exit status. Output may be worded differently, but must carry the
     given phrases."""
-    assert new.returncode == legacy.returncode, (legacy.output, new.output)
-    assert new.calls == legacy.calls
-    assert new.requests == legacy.requests
-    assert new.files == legacy.files
+    assert new.returncode == legacy.returncode, _diff("output", legacy.output, new.output)
+    assert new.calls == legacy.calls, _diff("calls", legacy.calls, new.calls)
+    assert new.requests == legacy.requests, _diff("requests", legacy.requests, new.requests)
+    assert new.files == legacy.files, _diff("files", legacy.files, new.files)
     for phrase in phrases:
         assert re.search(phrase, legacy.output), f"legacy lacks {phrase!r}:\n{legacy.output}"
         assert re.search(phrase, new.output), f"port lacks {phrase!r}:\n{new.output}"
@@ -397,3 +410,14 @@ def parity(
         outcomes.append(sandbox.run(*args, legacy=legacy))
     assert_parity(outcomes[0], outcomes[1], phrases=phrases)
     return outcomes[0], outcomes[1]
+
+
+def _diff(what: str, legacy: object, new: object) -> str:
+    import difflib
+    import pprint
+
+    def lines(value: object) -> list[str]:
+        return (value if isinstance(value, str) else pprint.pformat(value, width=100)).splitlines()
+
+    body = "\n".join(difflib.unified_diff(lines(legacy), lines(new), "legacy", "port", lineterm=""))
+    return f"{what} differ:\n{body}"

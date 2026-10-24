@@ -4,18 +4,13 @@ import pytest
 
 from devctlib import instance
 from devctlib.ctx import Ctx, Die
-from devctlib.testing import FakeRunner
+from devctlib.testing import FakeRunner, fake
 
 
 def fresh_ctx(tmp_path, **env) -> Ctx:
     devenv = tmp_path / "internal-tools" / "devenv"
     devenv.mkdir(parents=True)
     return Ctx(devenv=devenv, env=dict(env), runner=FakeRunner())
-
-
-def calls(ctx: Ctx) -> list[str]:
-    assert isinstance(ctx.runner, FakeRunner)
-    return ctx.runner.lines
 
 
 @pytest.mark.parametrize(
@@ -128,7 +123,7 @@ def test_ensure_runtime_creates_what_compose_needs(tmp_path):
     for name in ("es_key_ro.env", "es_key_rw.env", "probe.env"):
         assert (ctx.runtime / name).is_file()
     assert (ctx.devenv / "models" / "data" / "models.env").is_file()
-    assert calls(ctx) == [
+    assert fake(ctx).lines == [
         "docker volume inspect ge-dev-gomod",
         "docker volume inspect ge-dev-gocache",
     ]

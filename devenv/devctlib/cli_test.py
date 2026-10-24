@@ -58,3 +58,10 @@ def test_unported_commands_reach_the_bash_original_untouched(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == argv
+
+
+def test_instances_is_ls_even_for_an_unknown_name(tmp_path, capsys):
+    """The bash version resolved ports for `instances` (not for `ls`), so an
+    unknown --name made the alias fail."""
+    assert cli.main(["--name", "ghost", "instances"], str(tmp_path)) == 0
+    assert "(no instances yet" in capsys.readouterr().out
