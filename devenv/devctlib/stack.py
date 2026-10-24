@@ -27,6 +27,7 @@ from .es import (
     ES_OWNER,
     check_memory_budget,
     es_count,
+    export_api_env,
     export_api_es_env,
     owner_es_port,
     preflight_shared_es,
@@ -487,7 +488,7 @@ def cmd_restart(ctx: Ctx, args: list[str]) -> None:
         die("usage: devctl restart <service>... (whole stack: devctl up)")
     check_docker(ctx)
     resolve_live(ctx)
-    export_api_es_env(ctx)
+    export_api_env(ctx)
     if "inference" in args:
         check_model_fixture_compat(ctx)
     compose(ctx, "up", "-d", "--no-deps", "--force-recreate", *args)

@@ -271,3 +271,22 @@ def test_up_repo_root_precedence(tmp_path, monkeypatch):
 
     with pytest.raises(Die, match="repo root doesn't exist: nope"):
         stack.decide_repo_root(ctx, "nope")
+
+
+def test_restart_on_a_sharing_instance_points_the_api_at_the_owner(tmp_path):
+    """It used to look for a key of the sharer's own, find none, and stop —
+    and without the owner's endpoint the api would have come back pointing at
+    a cluster that isn't there."""
+    ctx = make_ctx(tmp_path, instance="alpha", env={"GE_DEV_SHARE_ES": "1"})
+    ctx.offset = 10
+    ctx.ports["ES"] = 9211
+    docker_on_path(ctx, tmp_path)
+    owner = ctx.devenv / ".runtime"
+    owner.mkdir()
+    (owner / "es_key_ro.env").write_text("GE_ELASTICSEARCH_API_KEY=owner-key\n")
+
+    stack.cmd_restart(ctx, ["api"])
+
+    env = fake(ctx).calls[-1].env
+    assert env["GE_DEV_ES_API_KEY"] == "owner-key"
+    assert env["GE_DEV_ES_URL"] == "http://host.docker.internal:9201"

@@ -679,6 +679,7 @@ def test_seed(tmp_path, args, setup, rules, env, phrases):
         (("restart", "api"), None, MYSKY, ["no Elasticsearch key"]),
     ],
 )
+# Not a sharing instance: the bash version can't restart one (see stack_test).
 def test_restart(tmp_path, args, setup, repos, phrases):
     parity(tmp_path, *args, setup=setup, repos=repos, phrases=phrases)
 

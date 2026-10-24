@@ -302,3 +302,11 @@ def sharers_of_owner(ctx: Ctx) -> list[str]:
         for runtime in runtime_dirs(ctx.devenv)
         if runtime.name != ".runtime" and is_sharer(runtime)
     ]
+
+
+def export_api_env(ctx: Ctx) -> None:
+    """Everything the api needs to reach the cluster it reads, for commands
+    that recreate it outside `up`: the owner's endpoint and key on a sharing
+    instance, else this instance's key."""
+    resolve_shared_es(ctx)
+    export_api_es_env(ctx)
