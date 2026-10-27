@@ -1,0 +1,3 @@
+# devctl's own dependencies, installed by the devctl launcher into
+# devenv/.venv-devctl. Changing this file makes the next devctl run re-sync.
+python-dotenv==1.2.4

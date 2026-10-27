@@ -1,0 +1,85 @@
+import pytest
+
+from devctlib import cli
+from devctlib.ctx import Die
+from devctlib.testing import Exec, FakeRunner
+
+
+@pytest.mark.parametrize(
+    ("argv", "instance", "command", "args"),
+    [
+        ([], "dev", "", []),
+        (["up"], "dev", "up", []),
+        (["--name", "alpha", "up", "--watch"], "alpha", "up", ["--watch"]),
+        (["up", "--watch", "--name", "alpha"], "alpha", "up", ["--watch"]),
+        # Everything after exec belongs to the command in the container.
+        (["exec", "api", "x", "--name", "y"], "dev", "exec", ["api", "x", "--name", "y"]),
+        (["--name", "a", "exec", "api", "x"], "a", "exec", ["api", "x"]),
+        (["exec", "--name", "a", "api", "x"], "a", "exec", ["api", "x"]),
+        (["exec", "--name", "a", "--name", "b", "api"], "b", "exec", ["api"]),
+    ],
+)
+def test_parse_global(argv, instance, command, args):
+    inv = cli.parse_global(argv, "dev")
+    assert (inv.instance, inv.command, inv.args) == (instance, command, args)
+
+
+def test_parse_global_needs_a_name_after_name():
+    with pytest.raises(Die, match="--name needs an instance name"):
+        cli.parse_global(["up", "--name"], "dev")
+
+
+@pytest.mark.parametrize("argv", [[], ["help"], ["-h"], ["--help"], ["--name", "alpha", "help"]])
+def test_help_prints_usage(tmp_path, capsys, argv):
+    assert cli.run(argv, devenv=tmp_path, environ={}) == 0
+    assert "Usage: devctl" in capsys.readouterr().out
+
+
+def test_an_invalid_instance_name_is_refused(tmp_path, capsys):
+    assert cli.main(["--name", "Bad", "help"], str(tmp_path)) == 1
+    assert "invalid instance name: 'Bad'" in capsys.readouterr().err
+
+
+def test_local_env_picks_the_instance(tmp_path, capsys):
+    (tmp_path / "devenv.local.env").write_text("GE_DEV_INSTANCE=Nope\n")
+    assert cli.main(["help"], str(tmp_path)) == 1
+    assert "'Nope'" in capsys.readouterr().err
+
+
+def test_an_unknown_command_is_refused(tmp_path, capsys):
+    assert cli.main(["nosuchcommand"], str(tmp_path)) == 1
+    assert "unknown command: nosuchcommand (try: devctl help)" in capsys.readouterr().err
+
+
+def test_instances_is_ls_even_for_an_unknown_name(tmp_path, capsys):
+    """The bash version resolved ports for `instances` (not for `ls`), so an
+    unknown --name made the alias fail."""
+    assert cli.main(["--name", "ghost", "instances"], str(tmp_path)) == 0
+    assert "(no instances yet" in capsys.readouterr().out
+
+
+def test_exec_with_name_runs_with_that_instances_state(tmp_path):
+    """`devctl exec --name alpha ...` used to load the default instance's
+    recorded state (repo root, live and share choices) before switching."""
+    devenv = tmp_path / "internal-tools" / "devenv"
+    for runtime, root in ((".runtime", "/dev-root"), (".runtime.alpha", "/alpha-root")):
+        (devenv / runtime).mkdir(parents=True)
+        (devenv / runtime / "repo_root.env").write_text(f"GE_DEV_REPO_ROOT={root}\n")
+    (devenv / ".runtime" / "share.env").write_text("GE_DEV_SHARE_ES=from-dev\n")
+    (devenv / ".runtime.alpha" / "ports.json").write_text('{"offset": 10}')
+    runner = FakeRunner(lambda argv: "api" if "ps" in argv else None)
+
+    with pytest.raises(Exec) as exc:
+        cli.run(
+            ["exec", "--name", "alpha", "api", "ls", "--name", "x"],
+            devenv=devenv,
+            environ={"PATH": "/usr/bin:/bin"},
+            runner=runner,
+        )
+
+    assert exc.value.argv[-3:] == ["ls", "--name", "x"]
+    env = runner.calls[-1].env
+    assert env["GE_DEV_NAME"] == "ge-alpha"
+    assert env["GE_DEV_REPO_ROOT"] == "/alpha-root"
+    assert "GE_DEV_SHARE_ES" not in env
+    assert env["GE_DEV_PORT_API"] == "8310"

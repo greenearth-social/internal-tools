@@ -19,6 +19,7 @@ from everything except the api — see [BridgEU](#bridgeu).
 ## Prerequisites
 
 - Docker (with Compose v2)
+- Python 3.13+ for `devctl` itself (see [Working on devctl](#working-on-devctl))
 - The sibling repos checked out next to this one (`devctl` verifies this):
 
 ```text
@@ -371,7 +372,8 @@ fresh clone should need no Google account. The bundle lands in `models/data/`
 maps, and serving manifests rewritten to local paths. inference-service then
 loads plain files: no GCS, no ClearML, no network.
 
-Unlike the fixture, the model release is **pinned** — `MODELS_TAG` in `devctl`,
+Unlike the fixture, the model release is **pinned** — `MODELS_TAG` in
+[`devctlib/assets.py`](devctlib/assets.py),
 overridable with `GE_DEV_MODELS_TAG`. The tag names the two training runs it
 holds (`models-<two-tower>-<ranker>`), so it says what's in it and re-publishing
 the same artifacts is idempotent.
@@ -974,6 +976,30 @@ GE_DEV_EUROSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
 - **During a session bridgeu-api is the tunnel's feed generator:** `BRIDGEU_HOSTNAME` is the tunnel host, `BRIDGEU_PUBLISHER_DID` is your dev account, and the dev session is off (bridg-eu refuses it on a public hostname). So `devctl feed --bridgeu` doesn't work; load the feed in a real client instead. Signed in as any account, the AppView sends that account's JWT, bridg-eu verifies it, and the local mysky api builds the slate from the seeded sample, which is real Bluesky posts that hydrate normally. `devctl restart bridgeu-api` after an edit keeps the session.
 - **One session at a time.** `bsky` and `eurosky` share the tunnel and its gateway (which joins the `bridgeu` network for this), so each refuses to start while the other's session exists.
 - **A session outlives the containers**, as with `bsky`. `devctl down` closes the tunnel and returns bridgeu-api to local, but the records stay on your account until `devctl eurosky down`; `down`, `nuke` and `eurosky status` say so. A free ngrok URL doesn't survive the restart, so end the session and start a new one rather than resuming.
+
+## Working on devctl
+
+`devctl` is a small bash launcher in front of a Python package,
+[`devctlib/`](devctlib/). The launcher finds a Python 3.13+ (`GE_DEV_PYTHON`,
+else `python3.13`, else `python3`), keeps devctl's own virtualenv in
+`.venv-devctl/` in step with [`devctl-requirements.txt`](devctl-requirements.txt)
+— creating it on first run and re-syncing whenever that file changes — and
+runs `devctlib.cli.main`.
+
+Each command lives in the module for its area (`stack.py` for
+up/seed/restart/down/nuke, `info.py` for the read-only commands, `bsky.py`,
+`eurosky.py`, `live.py`, …) and takes a `Ctx` (`ctx.py`): the instance, its
+ports, and the environment handed to docker compose. Everything external runs
+through `ctx.run`, so tests swap in `testing.FakeRunner` and assert on the
+commands that would have run. Code that has to run inside a service's
+container lives in `devctlib/incontainer/`.
+
+The tests run on the host, with the repo's own pipenv environment:
+
+```bash
+cd internal-tools
+pipenv run pytest devenv          # devctl's tests and the rest of devenv's
+```
 
 ## Service endpoints (defaults)
 
