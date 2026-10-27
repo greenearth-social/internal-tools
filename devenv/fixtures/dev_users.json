@@ -86,6 +86,16 @@
       "handle": "rd-beu-dev.eurosky.social",
       "did": "did:plc:gp2rb7avwrmxx2r4sg3slg7i",
       "owner": "raindrift"
+    },
+    {
+      "handle": "spotchi.eurosky.social",
+      "did": "did:plc:ygxc7x6f7u3smp3j4m67duvy",
+      "owner": "spotchi"
+    },
+    {
+      "handle": "sebastian.eurosky.social",
+      "did": "did:plc:ituoear7k6qx3smjfoxhufm4",
+      "owner": "sebastian"
     }
   ]
 }
