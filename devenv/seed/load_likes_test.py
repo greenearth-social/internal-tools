@@ -97,7 +97,7 @@ def test_index_and_update_items_are_both_inspected():
 def _capture_requests(monkeypatch, cat_result):
     calls = []
 
-    def fake_request(method, path, body=None, ndjson=False):
+    def fake_request(method, path, body=None, ndjson=False, **kwargs):
         calls.append((method, path, body))
         if path.startswith("/_cat/indices/posts-"):
             return cat_result
@@ -218,7 +218,7 @@ def test_like_counts_and_regular_posts_are_visible_before_backfill(monkeypatch):
     monkeypatch.setattr(load_likes, "load_likes", lambda: events.append("likes"))
     monkeypatch.setattr(load_likes, "apply_like_counts", lambda: events.append("counts"))
 
-    def fake_request(method, path, body=None, ndjson=False):
+    def fake_request(method, path, body=None, ndjson=False, **kwargs):
         events.append(path)
         if path.startswith("/_cat/indices/posts-"):
             return [{"index": "posts-2026-w32"}]
@@ -270,3 +270,88 @@ def test_like_counts_send_every_post_once_across_parallel_batches(tmp_path, monk
 
     assert sent == {f"at://p/{i}": i for i in range(total)}
     assert f"Applied like counts to {total - 3}/{total} posts" in capsys.readouterr().out
+
+
+class _Response:
+    def __init__(self, body: bytes):
+        self.body = body
+
+    def read(self):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _http_error(code: int, body: bytes = b"{}"):
+    import io
+    import urllib.error
+    from email.message import Message
+
+    return urllib.error.HTTPError("http://es", code, "err", Message(), io.BytesIO(body))
+
+
+def _urlopen_sequence(monkeypatch, outcomes):
+    """urlopen raising or answering each outcome in turn; sleeps skipped."""
+    attempts = []
+
+    def fake_urlopen(req, timeout):
+        attempts.append(timeout)
+        outcome = outcomes[len(attempts) - 1]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return _Response(outcome)
+
+    monkeypatch.setattr(load_likes.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(load_likes.time, "sleep", lambda seconds: None)
+    return attempts
+
+
+@pytest.mark.parametrize(
+    "transient",
+    [
+        TimeoutError("timed out"),
+        ConnectionResetError("reset"),
+        _http_error(429),
+        _http_error(503),
+    ],
+)
+def test_request_retries_a_busy_cluster(monkeypatch, capsys, transient):
+    """A bulk request that times out while ES is deep in GC used to end the
+    whole seed. The writes repeat safely, so wait and try again."""
+    attempts = _urlopen_sequence(monkeypatch, [transient, transient, b'{"ok": 1}'])
+
+    assert load_likes.request("POST", "/_bulk", b"x", ndjson=True) == {"ok": 1}
+    assert len(attempts) == 3
+    assert attempts[0] == load_likes.REQUEST_TIMEOUT
+    assert "retrying in 2s" in capsys.readouterr().out
+
+
+def test_request_gives_up_after_its_attempts(monkeypatch):
+    _urlopen_sequence(monkeypatch, [TimeoutError("timed out")] * load_likes.ATTEMPTS)
+
+    with pytest.raises(SystemExit, match="failed after 6 attempts"):
+        load_likes.request("POST", "/_bulk", b"x")
+
+
+def test_request_does_not_retry_a_bad_request(monkeypatch):
+    attempts = _urlopen_sequence(monkeypatch, [_http_error(400, b"mapper_parsing_exception")])
+
+    with pytest.raises(SystemExit, match="400"):
+        load_likes.request("POST", "/_bulk", b"x")
+    assert len(attempts) == 1
+
+
+def test_creating_an_index_tolerates_a_timed_out_first_attempt(monkeypatch):
+    """The first PUT may have created the index before timing out."""
+    exists = b'{"error":{"type":"resource_already_exists_exception"}}'
+    _urlopen_sequence(monkeypatch, [TimeoutError("timed out"), _http_error(400, exists)])
+
+    assert load_likes.request("PUT", "/posts-quality-2026-w44", b"{}", exists_ok=True) == {}
+
+    _urlopen_sequence(monkeypatch, [_http_error(400, exists)])
+    with pytest.raises(SystemExit, match="resource_already_exists"):
+        load_likes.request("PUT", "/posts-quality-2026-w44", b"{}")

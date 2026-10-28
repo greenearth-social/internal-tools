@@ -38,7 +38,33 @@ BATCH_SIZE = 1000
 LIKE_COUNT_WORKERS = 4
 
 
-def request(method: str, path: str, body: bytes | None = None, ndjson: bool = False) -> dict:
+# How long one request may take before it's retried. A bulk update can run
+# well past a few seconds when Elasticsearch is short of heap (the dev cluster
+# has 1GB, and spends most of its time in GC under the like-count pass on a
+# long-running instance) — slow, but still making progress.
+REQUEST_TIMEOUT = 120
+# Attempts per request; the waits between them double from 2s, about a
+# minute in all.
+ATTEMPTS = 6
+# Responses that mean "busy, try again", not "wrong".
+RETRY_STATUSES = {429, 502, 503, 504}
+
+
+def request(
+    method: str,
+    path: str,
+    body: bytes | None = None,
+    ndjson: bool = False,
+    *,
+    exists_ok: bool = False,
+) -> dict:
+    """One Elasticsearch request, retried while the cluster is busy.
+
+    Retrying is safe because every write this script makes can be repeated:
+    likes are indexed by _id, like counts are absolute, and alias updates
+    converge. The one exception is creating an index, whose retry would find
+    the index a timed-out first attempt already made — exists_ok accepts that.
+    """
     content_type = "application/x-ndjson" if ndjson else "application/json"
     req = urllib.request.Request(
         ES_URL + path,
@@ -46,15 +72,25 @@ def request(method: str, path: str, body: bytes | None = None, ndjson: bool = Fa
         data=body,
         headers={"Authorization": f"ApiKey {ES_KEY}", "Content-Type": content_type},
     )
-    for attempt in range(5):
+    for attempt in range(ATTEMPTS):
+        last = attempt == ATTEMPTS - 1
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 return json.loads(resp.read() or b"{}")
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 4:
-                time.sleep(2**attempt)
-                continue
-            sys.exit(f"FATAL: {method} {path} -> {e.code}: {e.read()[:1000]}")
+            detail = e.read()[:1000]
+            if exists_ok and e.code == 400 and b"resource_already_exists_exception" in detail:
+                return {}
+            if e.code not in RETRY_STATUSES or last:
+                sys.exit(f"FATAL: {method} {path} -> {e.code}: {detail}")
+            reason = f"HTTP {e.code}"
+        except (TimeoutError, urllib.error.URLError, ConnectionError) as e:
+            if last:
+                sys.exit(f"FATAL: {method} {path} failed after {ATTEMPTS} attempts: {e}")
+            reason = str(e) or type(e).__name__
+        delay = 2 ** (attempt + 1)
+        print(f"  {method} {path}: {reason}; retrying in {delay}s", flush=True)
+        time.sleep(delay)
     raise AssertionError("unreachable")
 
 
@@ -175,7 +211,7 @@ def update_posts_recent(*, ensure_quality: bool = False) -> None:
     if ensure_quality and not quality_indexes:
         year, week, _ = datetime.now(UTC).isocalendar()
         index = f"posts-quality-{year}-w{week:02d}"
-        request("PUT", f"/{index}", b"{}")
+        request("PUT", f"/{index}", b"{}", exists_ok=True)
         quality_indexes = [index]
 
     actions = [{"add": {"indices": post_indexes, "alias": "posts_recent"}}]
