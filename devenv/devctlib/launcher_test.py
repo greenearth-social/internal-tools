@@ -118,12 +118,35 @@ def test_launcher_names_a_python_that_is_too_old(devenv):
     assert f"GE_DEV_PYTHON={old} isn't a Python 3.13 or newer" in result.stderr
 
 
+# Only the system directories: the launcher needs their tools (dirname, cmp),
+# and the python3 there — macOS's 3.9, the CI image's 3.12 — is too old.
+SYSTEM_PATH = "/usr/bin:/bin"
+
+
+def _system_python_is_new_enough() -> bool:
+    for directory in SYSTEM_PATH.split(":"):
+        for name in ("python3.13", "python3"):
+            python = Path(directory) / name
+            if python.exists():
+                version = subprocess.run(
+                    [str(python), "-c", "import sys; print(sys.version_info >= (3, 13))"],
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+                if version == "True":
+                    return True
+    return False
+
+
+@pytest.mark.skipif(
+    _system_python_is_new_enough(), reason="this machine's system Python is already 3.13+"
+)
 def test_launcher_explains_when_no_python_is_new_enough(devenv):
     result = subprocess.run(
         ["/bin/bash", str(devenv / "devctl")],
         capture_output=True,
         text=True,
-        env={"PATH": str(devenv.parent / "nothing-here"), "HOME": str(devenv.parent)},
+        env={"PATH": SYSTEM_PATH, "HOME": str(devenv.parent)},
     )
 
     assert result.returncode == 1
