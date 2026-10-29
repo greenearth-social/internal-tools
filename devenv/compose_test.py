@@ -79,6 +79,18 @@ def test_bridgeu_services_reach_mysky_only_through_the_api():
             assert mysky_store not in env, f"{name} addresses {mysky_store} directly"
 
 
+def test_bridgeu_api_runs_from_its_service_directory():
+    compose = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())
+    api = compose["services"]["bridgeu-api"]
+
+    assert api["working_dir"] == "/app/api"
+    # Publishing dev feeds needs the parent checkout's .git directory.
+    assert "${GE_DEV_REPO_ROOT:-../..}/bridg-eu:/app" in api["volumes"]
+    assert "PIPENV_VENV_IN_PROJECT=1" in api["environment"]
+    assert "bridgeu_api_venv:/app/api/.venv" in api["volumes"]
+    assert "bridgeu_api_venv" in compose["volumes"]
+
+
 def test_bridgeu_key_issuer_is_a_mysky_side_tool():
     """The key lives in the api's Firestore, so the job writing it is mysky's."""
     mysky = yaml.safe_load(COMPOSE_FILE.read_text())["services"]

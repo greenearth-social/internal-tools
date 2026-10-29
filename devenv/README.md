@@ -897,6 +897,13 @@ next to the others (`git clone git@github.com:eurosky-social/bridg-eu.git`),
 `devctl up` starts `bridgeu-api` too; without it devctl notes the missing
 checkout and runs mysky alone.
 
+The API lives in `bridg-eu/api/`; the container mounts the whole checkout at
+`/app` and runs commands from `/app/api`. Dependencies are cached in a named
+volume at `/app/api/.venv`. If you ran the API before it moved into `api/`,
+remove its old container and `bridgeu_api_venv` volume once, then start it
+again to recreate the environment. Virtualenv scripts embed their
+installation paths, so the old cache cannot be reused at the new location.
+
 ```bash
 ./devctl test bridgeu                                   # its pytest suite
 ./devctl exec bridgeu-api pipenv run ruff check .

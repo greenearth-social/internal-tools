@@ -21,7 +21,7 @@
 services:
   bridgeu-api:
     build: ./images/pydev
-    working_dir: /app
+    working_dir: /app/api
     command:
       - bash
       - -c
@@ -61,8 +61,9 @@ services:
     ports:
       - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_BRIDGEU_API:-8400}:8000"
     volumes:
+      # Keep the checkout's .git visible for dev feed descriptions.
       - ${GE_DEV_REPO_ROOT:-../..}/bridg-eu:/app
-      - bridgeu_api_venv:/app/.venv
+      - bridgeu_api_venv:/app/api/.venv
     healthcheck:
       test:
         [
