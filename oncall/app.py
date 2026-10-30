@@ -115,12 +115,13 @@ async def alert(request: Request):
         return {"status": "ignored"}
 
     alert_id = incident["incident_id"]
-    condition_name = incident.get("condition_name", "Unknown alert")
+    # Runbooks and /runbook add use policy display names, not metric condition names.
+    policy_name = incident.get("policy_name") or incident.get("condition_name", "Unknown alert")
     severity = incident.get("severity", "WARNING").upper()
     started_at = datetime.fromtimestamp(incident.get("started_at", 0), tz=UTC)
     summary = incident.get("summary", "")
 
-    found, runbook_content = fetch_runbook(condition_name, RUNBOOKS_BRANCH)
+    found, runbook_content = fetch_runbook(policy_name, RUNBOOKS_BRANCH)
 
     if severity == "CRITICAL":
         oncall = get_current_oncall(request.app.state.db)
@@ -142,23 +143,21 @@ async def alert(request: Request):
         )
 
         message = (
-            f"🚨 **[CRITICAL]** {condition_name}\n"
+            f"🚨 **[CRITICAL]** {policy_name}\n"
             f"{oncall_line}\n"
             f"Alert ID: `{alert_id}` | {summary}\n\n"
             f"{runbook_section}"
         )
 
         try:
-            create_alert(
-                request.app.state.db, alert_id, condition_name, "critical", found, started_at
-            )
+            create_alert(request.app.state.db, alert_id, policy_name, "critical", found, started_at)
         except Exception:
             logger.exception("Firestore write failed for alert %s", alert_id)
 
     else:
         runbook_section = runbook_content if found else "No runbook found."
         message = (
-            f"⚠️ **[WARNING]** {condition_name}\n"
+            f"⚠️ **[WARNING]** {policy_name}\n"
             f"Alert ID: `{alert_id}` | {summary}\n\n"
             f"{runbook_section}"
         )
@@ -307,7 +306,7 @@ async def _handle_command(request: Request, payload: dict) -> dict:
                                     "custom_id": "policy_name",
                                     "label": "Alert policy name",
                                     "style": 1,
-                                    "placeholder": "es-storage-high",
+                                    "placeholder": "feed-low-fulfillment",
                                     "required": True,
                                 }
                             ],

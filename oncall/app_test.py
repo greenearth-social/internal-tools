@@ -1,6 +1,9 @@
 import json
 import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 def test_health(client):
@@ -12,7 +15,8 @@ def test_health(client):
 GCP_CRITICAL_PAYLOAD = {
     "incident": {
         "incident_id": "inc-abc123",
-        "condition_name": "ES Storage > 80%",
+        "policy_name": "ES Disk Usage Exceeding Capacity",
+        "condition_name": "Disk Uitlization Above 85%",
         "severity": "CRITICAL",
         "state": "open",
         "started_at": 1723320000,
@@ -23,11 +27,12 @@ GCP_CRITICAL_PAYLOAD = {
 GCP_WARNING_PAYLOAD = {
     "incident": {
         "incident_id": "inc-warn01",
-        "condition_name": "Ingest Freshness",
+        "policy_name": "feed-low-fulfillment",
+        "condition_name": "Generic Task - feed.snapshot.posts_fulfilled_ratio",
         "severity": "WARNING",
         "state": "open",
         "started_at": 1723320000,
-        "summary": "Ingest is slow",
+        "summary": "Feed fulfillment below 50%",
     }
 }
 
@@ -53,7 +58,9 @@ def test_alert_critical_posts_to_discord_and_stores(client, mock_db):
     mock_db.collection.return_value.document.return_value.get.side_effect = [oncall_doc, user_doc]
 
     with (
-        patch("app.fetch_runbook", return_value=(True, "## Steps\n1. Check storage.")),
+        patch(
+            "app.fetch_runbook", return_value=(True, "## Steps\n1. Check storage.")
+        ) as mock_fetch,
         patch("app.send_channel_message") as mock_send,
         patch("app.create_alert") as mock_create,
     ):
@@ -65,7 +72,11 @@ def test_alert_critical_posts_to_discord_and_stores(client, mock_db):
     assert "CRITICAL" in sent_content
     assert "Inseon" in sent_content
     assert "inc-abc123" in sent_content
+    assert "ES Disk Usage Exceeding Capacity" in sent_content
+    assert "1. Check storage." in sent_content
+    mock_fetch.assert_called_once_with("ES Disk Usage Exceeding Capacity", "main")
     mock_create.assert_called_once()
+    assert mock_create.call_args[0][2] == "ES Disk Usage Exceeding Capacity"
 
 
 def test_alert_warning_posts_without_mention_no_firestore(client, mock_db):
@@ -82,6 +93,66 @@ def test_alert_warning_posts_without_mention_no_firestore(client, mock_db):
     assert "WARNING" in sent_content
     assert "@" not in sent_content
     mock_create.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("policy_name", "condition_name", "filename"),
+    [
+        (
+            "feed-low-fulfillment",
+            "Generic Task - feed.snapshot.posts_fulfilled_ratio",
+            "feed-low-fulfillment.md",
+        ),
+        (
+            "ES Disk Usage Exceeding Capacity",
+            "Disk Uitlization Above 85%",
+            "es-disk-usage-exceeding-capacity.md",
+        ),
+        ("feeds-degraded", "Feed render failures", "feeds-degraded.md"),
+    ],
+)
+def test_alert_fetches_existing_runbook_by_policy_name(
+    client, policy_name, condition_name, filename
+):
+    # Different policy and condition names must still resolve the checked-in runbook.
+    payload = {
+        "incident": {
+            **GCP_WARNING_PAYLOAD["incident"],
+            "policy_name": policy_name,
+            "condition_name": condition_name,
+        }
+    }
+    runbook = (Path(__file__).parent / "runbooks" / filename).read_text()
+    mock_response = MagicMock(status_code=200, text=runbook)
+    with (
+        patch("runbooks.httpx.get", return_value=mock_response) as mock_get,
+        patch("app.send_channel_message") as mock_send,
+    ):
+        response = client.post("/alert", json=payload)
+
+    assert response.status_code == 200
+    mock_get.assert_called_once_with(
+        f"https://raw.githubusercontent.com/greenearth-social/internal-tools/main/oncall/runbooks/{filename}",
+        timeout=5.0,
+    )
+    sent_content = mock_send.call_args[0][2]
+    assert policy_name in sent_content
+    assert runbook.split("---", 2)[2].strip() in sent_content
+    assert "alert_id:" not in sent_content
+
+
+def test_alert_falls_back_to_condition_name_when_policy_name_missing(client):
+    incident = {**GCP_WARNING_PAYLOAD["incident"]}
+    del incident["policy_name"]
+    with (
+        patch("app.fetch_runbook", return_value=(False, "")) as mock_fetch,
+        patch("app.send_channel_message") as mock_send,
+    ):
+        response = client.post("/alert", json={"incident": incident})
+
+    assert response.status_code == 200
+    mock_fetch.assert_called_once_with(incident["condition_name"], "main")
+    assert incident["condition_name"] in mock_send.call_args[0][2]
 
 
 def test_alert_closed_is_ignored(client):
