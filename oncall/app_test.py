@@ -104,6 +104,11 @@ def test_alert_warning_posts_without_mention_no_firestore(client, mock_db):
             "feed-low-fulfillment.md",
         ),
         (
+            "low-candidate-generator-fill-share",
+            "low candidate generator fill share",
+            "low-candidate-generator-fill-share.md",
+        ),
+        (
             "ES Disk Usage Exceeding Capacity",
             "Disk Uitlization Above 85%",
             "es-disk-usage-exceeding-capacity.md",
