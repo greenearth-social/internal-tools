@@ -5,12 +5,18 @@ import httpx
 
 REPO = "greenearth-social/internal-tools"
 RAW_BASE = "https://raw.githubusercontent.com"
+GITHUB_BASE = "https://github.com"
 
 
 def policy_name_to_slug(name: str) -> str:
     slug = name.lower()
     slug = re.sub(r"[^a-z0-9]+", "-", slug)
     return slug.strip("-")
+
+
+def runbook_url(policy_name: str, branch: str = "main") -> str:
+    slug = policy_name_to_slug(policy_name)
+    return f"{GITHUB_BASE}/{REPO}/blob/{branch}/oncall/runbooks/{slug}.md"
 
 
 def fetch_runbook(policy_name: str, branch: str) -> tuple[bool, str]:

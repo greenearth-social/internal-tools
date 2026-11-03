@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 
-from runbooks import fetch_runbook, policy_name_to_slug
+from runbooks import fetch_runbook, policy_name_to_slug, runbook_url
 
 SAMPLE_MD = """\
 ---
@@ -54,3 +54,10 @@ def test_fetch_runbook_returns_false_on_network_error():
         found, content = fetch_runbook("ES Storage > 80%", "main")
     assert found is False
     assert content == ""
+
+
+def test_runbook_url():
+    assert runbook_url("ES Disk Usage Exceeding Capacity", "main") == (
+        "https://github.com/greenearth-social/internal-tools/blob/main/oncall/runbooks/es-disk-usage-exceeding-capacity.md"
+    )
+

@@ -22,7 +22,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --region "${GE_GCP_REGION}" \
   --project "${GE_GCP_PROJECT_ID}" \
   --platform managed \
-  --no-allow-unauthenticated \
+  --allow-unauthenticated \
   --labels="git-sha=${GIT_SHA}" \
   --set-env-vars "GE_GIT_SHA=${GIT_SHA},\
 GE_FIRESTORE_PROJECT_ID=${GE_GCP_PROJECT_ID},\
