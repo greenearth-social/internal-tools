@@ -60,4 +60,3 @@ def test_runbook_url():
     assert runbook_url("ES Disk Usage Exceeding Capacity", "main") == (
         "https://github.com/greenearth-social/internal-tools/blob/main/oncall/runbooks/es-disk-usage-exceeding-capacity.md"
     )
-
