@@ -483,26 +483,12 @@ def test_finalize_happy_path_posts_success(mock_db):
         patch("app.create_runbook_pr", return_value=_PR_RESULT) as mock_pr,
         patch("app.list_registered_users", return_value=_USERS),
         patch("app.request_pr_reviewers") as mock_reviewers,
-        patch("app.add_pr_to_project", return_value="PVTI_new") as mock_add,
-        patch("app.set_project_item_status") as mock_status,
         patch("app.edit_original_interaction_response") as mock_edit,
     ):
         _run(_finalize(mock_db))
 
     mock_pr.assert_called_once()
     mock_reviewers.assert_called_once_with(os.environ["GE_GITHUB_TOKEN"], 42, ["ian-gh", "max-gh"])
-    mock_add.assert_called_once_with(
-        os.environ["GE_GITHUB_TOKEN"],
-        os.environ["GE_ONCALL_RUNBOOK_PROJECT_ID"],
-        "PR_kwDO_abc",
-    )
-    mock_status.assert_called_once_with(
-        os.environ["GE_GITHUB_TOKEN"],
-        os.environ["GE_ONCALL_RUNBOOK_PROJECT_ID"],
-        "PVTI_new",
-        os.environ["GE_ONCALL_RUNBOOK_STATUS_FIELD_ID"],
-        os.environ["GE_ONCALL_RUNBOOK_STATUS_INREVIEW_OPTION_ID"],
-    )
     mock_edit.assert_called_once()
     followup_content = mock_edit.call_args.args[2]
     assert followup_content.startswith("✓ Runbook PR opened:")
@@ -514,8 +500,6 @@ def test_finalize_excludes_submitter_from_reviewers(mock_db):
         patch("app.create_runbook_pr", return_value=_PR_RESULT),
         patch("app.list_registered_users", return_value=_USERS),
         patch("app.request_pr_reviewers") as mock_reviewers,
-        patch("app.add_pr_to_project", return_value="PVTI_new"),
-        patch("app.set_project_item_status"),
         patch("app.edit_original_interaction_response"),
     ):
         _run(_finalize(mock_db, submitter_user_id="uid2"))  # Ian submits
@@ -529,13 +513,11 @@ def test_finalize_pr_creation_failure_reports_failure(mock_db):
     with (
         patch("app.create_runbook_pr", side_effect=RuntimeError("boom")),
         patch("app.request_pr_reviewers") as mock_reviewers,
-        patch("app.add_pr_to_project") as mock_add,
         patch("app.edit_original_interaction_response") as mock_edit,
     ):
         _run(_finalize(mock_db))
 
     mock_reviewers.assert_not_called()
-    mock_add.assert_not_called()
     mock_edit.assert_called_once()
     assert "Failed to open PR" in mock_edit.call_args.args[2]
 
@@ -545,8 +527,6 @@ def test_finalize_reviewer_failure_reported_but_pr_still_succeeds(mock_db):
         patch("app.create_runbook_pr", return_value=_PR_RESULT),
         patch("app.list_registered_users", return_value=_USERS),
         patch("app.request_pr_reviewers", side_effect=RuntimeError("no perms")),
-        patch("app.add_pr_to_project", return_value="PVTI_new"),
-        patch("app.set_project_item_status"),
         patch("app.edit_original_interaction_response") as mock_edit,
     ):
         _run(_finalize(mock_db))
@@ -557,30 +537,12 @@ def test_finalize_reviewer_failure_reported_but_pr_still_succeeds(mock_db):
     assert content.startswith("⚠")
 
 
-def test_finalize_project_failure_reported_but_pr_still_succeeds(mock_db):
-    with (
-        patch("app.create_runbook_pr", return_value=_PR_RESULT),
-        patch("app.list_registered_users", return_value=_USERS),
-        patch("app.request_pr_reviewers"),
-        patch("app.add_pr_to_project", side_effect=RuntimeError("GraphQL boom")),
-        patch("app.set_project_item_status"),
-        patch("app.edit_original_interaction_response") as mock_edit,
-    ):
-        _run(_finalize(mock_db))
-
-    content = mock_edit.call_args.args[2]
-    assert _PR_RESULT["html_url"] in content
-    assert "project" in content
-
-
 def test_finalize_no_registered_users_skips_reviewer_request(mock_db):
     """Solo submitter — reviewer pool empty after filtering out submitter."""
     with (
         patch("app.create_runbook_pr", return_value=_PR_RESULT),
         patch("app.list_registered_users", return_value=[_USERS[0]]),
         patch("app.request_pr_reviewers") as mock_reviewers,
-        patch("app.add_pr_to_project", return_value="PVTI_new"),
-        patch("app.set_project_item_status"),
         patch("app.edit_original_interaction_response") as mock_edit,
     ):
         _run(_finalize(mock_db))
