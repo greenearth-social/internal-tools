@@ -57,6 +57,11 @@ COMMANDS = [
                 ],
             },
             {"name": "who", "description": "Show who is currently on call", "type": 1},
+            {
+                "name": "list",
+                "description": "List registered oncall engineers and rotation order",
+                "type": 1,
+            },
         ],
     },
     {
