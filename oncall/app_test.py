@@ -73,7 +73,10 @@ def test_alert_critical_posts_to_discord_and_stores(client, mock_db):
     assert "Inseon" in sent_content
     assert "inc-abc123" in sent_content
     assert "ES Disk Usage Exceeding Capacity" in sent_content
-    assert "1. Check storage." in sent_content
+    assert (
+        "Runbook: https://github.com/greenearth-social/internal-tools/blob/main/oncall/runbooks/es-disk-usage-exceeding-capacity.md"
+        in sent_content
+    )
     mock_fetch.assert_called_once_with("ES Disk Usage Exceeding Capacity", "main")
     mock_create.assert_called_once()
     assert mock_create.call_args[0][2] == "ES Disk Usage Exceeding Capacity"
@@ -142,7 +145,10 @@ def test_alert_fetches_existing_runbook_by_policy_name(
     )
     sent_content = mock_send.call_args[0][2]
     assert policy_name in sent_content
-    assert runbook.split("---", 2)[2].strip() in sent_content
+    assert (
+        f"Runbook: https://github.com/greenearth-social/internal-tools/blob/main/oncall/runbooks/{filename}"
+        in sent_content
+    )
     assert "alert_id:" not in sent_content
 
 

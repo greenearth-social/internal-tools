@@ -29,7 +29,7 @@ from github_utils import (
     request_pr_reviewers,
     set_project_item_status,
 )
-from runbooks import fetch_runbook
+from runbooks import fetch_runbook, runbook_url
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,8 @@ async def alert(request: Request):
     started_at = datetime.fromtimestamp(incident.get("started_at", 0), tz=UTC)
     summary = incident.get("summary", "")
 
-    found, runbook_content = fetch_runbook(policy_name, RUNBOOKS_BRANCH)
+    found, _ = fetch_runbook(policy_name, RUNBOOKS_BRANCH)
+    rb_url = runbook_url(policy_name, RUNBOOKS_BRANCH)
 
     if severity == "CRITICAL":
         oncall = get_current_oncall(request.app.state.db)
@@ -131,15 +132,15 @@ async def alert(request: Request):
             until_dt = datetime.fromisoformat(oncall["until"])
             oncall_line = (
                 f"Oncall: {name_str} (until {format_ts(until_dt)})"
-                f" — use `/ack {alert_id}` to acknowledge"
+                f" - use `/ack {alert_id}` to acknowledge"
             )
         else:
-            oncall_line = "no oncall set — run `/oncall set` to assign someone"
+            oncall_line = "no oncall set - run `/oncall set` to assign someone"
 
         runbook_section = (
-            runbook_content
+            f"Runbook: {rb_url}"
             if found
-            else "No runbook found — run `/runbook add` to capture the fix."
+            else "No runbook found - run `/runbook add` to capture the fix."
         )
 
         message = (
@@ -155,7 +156,7 @@ async def alert(request: Request):
             logger.exception("Firestore write failed for alert %s", alert_id)
 
     else:
-        runbook_section = runbook_content if found else "No runbook found."
+        runbook_section = f"Runbook: {rb_url}" if found else "No runbook found."
         message = (
             f"⚠️ **[WARNING]** {policy_name}\n"
             f"Alert ID: `{alert_id}` | {summary}\n\n"
