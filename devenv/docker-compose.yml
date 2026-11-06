@@ -388,6 +388,8 @@ services:
       # devenv.local.env when a live search database answers slowly.
       - GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=${GE_CANDIDATE_GENERATOR_TIMEOUT_SEC:-4}
       - GE_TIMING_LOGS=${GE_DEV_TIMING_LOGS:-1}
+      - GE_POSTHOG_API_KEY=${GE_POSTHOG_API_KEY:-}
+      - GE_POSTHOG_HOST=${GE_POSTHOG_HOST:-https://us.i.posthog.com}
     env_file:
       # Written by seed; devctl guarantees it exists before `up`. The ES key
       # deliberately isn't here — see GE_ELASTICSEARCH_API_KEY above.
