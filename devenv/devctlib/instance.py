@@ -27,7 +27,7 @@ REQUIRED_REPOS = ("api", "ingex", "frontend", "inference-service")
 # one instance's `nuke` and are shared by all of them; compose won't create an
 # external volume, so we do. Also used directly by `devctl test ingex`, whose
 # ephemeral container isn't a compose service.
-GO_IMAGE = "golang:1.25"
+GO_IMAGE = "golang:1.27"
 GO_CACHE_VOLUMES = ("ge-dev-gomod", "ge-dev-gocache")
 
 
