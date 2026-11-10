@@ -454,7 +454,7 @@ services:
   # bucket that needs credentials, so devctl refuses to start it without them.
   # Everything except the keys is defaulted to what prod reads.
   megastream-ingest:
-    image: golang:1.25
+    image: golang:1.27
     profiles: ["megastream"]
     working_dir: /src
     # spool, not once: `once` drains what's there and exits, which is what the
@@ -517,7 +517,7 @@ services:
   # are mostly *not* in the local index: the firehose covers all of Bluesky,
   # the fixture is a sample of it.
   jetstream-ingest:
-    image: golang:1.25
+    image: golang:1.27
     profiles: ["jetstream"]
     working_dir: /src
     # --max-rewind caps how far back the cursor rewinds after downtime. Without
@@ -575,7 +575,7 @@ services:
   # Runs the real megastream_ingest binary (byte-identical to prod) against the
   # rebased fixtures. Uses the read-write ES key minted by es-init.
   seed-megastream:
-    image: golang:1.25
+    image: golang:1.27
     profiles: ["tools"]
     working_dir: /src
     command:
@@ -649,7 +649,7 @@ services:
   # the lean two-tower corpus. Runs after seed-likes refreshes its like counts;
   # devctl then publishes and refreshes the posts_recent_quality alias.
   seed-quality:
-    image: golang:1.25
+    image: golang:1.27
     profiles: ["tools"]
     working_dir: /src
     command: ["go", "run", "./cmd/backfill_quality_index"]
