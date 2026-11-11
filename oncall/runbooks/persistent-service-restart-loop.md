@@ -5,7 +5,7 @@ severity: critical
 
 ## Persistent Service Crash Loop / Frequent Restarts
 
-**Trigger:** More than 3 container terminations or restarts observed within 10 minutes on persistent services (`megastream-ingest-prod`, `jetstream-ingest-prod`, `greenearth-api-prod`, or `inference-service-prod`).
+**Trigger:** More than 3 container starts within 10 minutes on persistent services (`megastream-ingest-prod`, `jetstream-ingest-prod`, `greenearth-api-prod`, or `engagement-prediction-inference-prod`). Only revisions that have been running for at least 15 minutes count, so the containers a deploy starts don't trigger it. A new revision that crash-loops right after a deploy alerts once it is about 15–20 minutes old.
 
 **Meaning:** A core persistent service is repeatedly crashing or being terminated, preventing steady indexing or feed serving.
 
@@ -19,12 +19,12 @@ severity: critical
    - Filter:
      ```text
      resource.type="cloud_run_revision"
-     resource.labels.service_name=~"(megastream-ingest|jetstream-ingest|greenearth-api|inference-service)-prod"
+     resource.labels.service_name=~"(megastream-ingest|jetstream-ingest|greenearth-api|engagement-prediction-inference)-prod"
      severity>=ERROR
      ```
    - Look for `Exit code 137` (OOM kill) or `Exit code 1` / `panic: ...` (fatal runtime error).
 2. Check recent revisions:
-   - Check if a deployment occurred right before restarts began.
+   - Check if a deployment occurred in the 20 minutes before the alert. Because of the 15-minute exclusion, a bad deploy shows up as an alert on a revision that is only 15–20 minutes old.
 3. Check external dependencies:
    - Elasticsearch internal load balancer IP and cluster health.
    - Firestore connectivity.
