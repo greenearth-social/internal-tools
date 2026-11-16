@@ -91,6 +91,44 @@ def test_bridgeu_api_runs_from_its_service_directory():
     assert "bridgeu_api_venv" in compose["volumes"]
 
 
+def test_bridgeu_postgres_is_local_and_its_data_belongs_to_the_instance():
+    compose = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())
+    postgres = compose["services"]["bridgeu-postgres"]
+
+    assert postgres["image"] == "postgres:18"
+    assert set(postgres["environment"]) == {
+        "POSTGRES_USER=graph",
+        "POSTGRES_PASSWORD=graph",
+        "POSTGRES_DB=graph",
+    }
+    assert "env_file" not in postgres
+    assert postgres["ports"] == [
+        "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_BRIDGEU_POSTGRES:-55432}:5432"
+    ]
+    assert postgres["volumes"] == ["bridgeu_pgdata:/var/lib/postgresql"]
+    # Explicit global names would make separate devctl instances share data or containers.
+    assert "container_name" not in postgres
+    assert compose["volumes"]["bridgeu_pgdata"] is None
+    assert postgres["healthcheck"]["test"] == ["CMD-SHELL", "pg_isready -U graph -d graph"]
+
+
+def test_bridgeu_graph_init_migrates_the_local_database_without_starting_ingestion():
+    services = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["services"]
+    init = services["bridgeu-graph-init"]
+
+    assert init["profiles"] == ["tools"]
+    assert init["build"] == {"context": "${GE_DEV_REPO_ROOT:-../..}/bridg-eu/graph"}
+    assert init["command"] == ["ingester", "migrate"]
+    assert init["environment"] == [
+        "GRAPH_DATABASE_URL=postgres://graph:graph@bridgeu-postgres:5432/graph?sslmode=disable"
+    ]
+    # Do not inherit a checkout's production connection or Jetstream configuration.
+    assert "env_file" not in init
+    assert init["depends_on"] == {"bridgeu-postgres": {"condition": "service_healthy"}}
+    assert init["healthcheck"] == {"disable": True}
+    assert "restart" not in init
+
+
 def test_bridgeu_key_issuer_is_a_mysky_side_tool():
     """The key lives in the api's Firestore, so the job writing it is mysky's."""
     mysky = yaml.safe_load(COMPOSE_FILE.read_text())["services"]

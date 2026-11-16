@@ -19,6 +19,42 @@
 # under the repo root.
 
 services:
+  bridgeu-postgres:
+    image: postgres:18
+    environment:
+      - POSTGRES_USER=graph
+      - POSTGRES_PASSWORD=graph
+      - POSTGRES_DB=graph
+    networks:
+      - bridgeu
+    ports:
+      - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_BRIDGEU_POSTGRES:-55432}:5432"
+    volumes:
+      # Project-scoped: down preserves the database; nuke removes this instance's data.
+      - bridgeu_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U graph -d graph"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Apply the graph checkout's migrations without connecting to Jetstream.
+  # devctl runs this after Postgres is healthy; it exits once the schema is current.
+  bridgeu-graph-init:
+    profiles: [tools]
+    build:
+      context: ${GE_DEV_REPO_ROOT:-../..}/bridg-eu/graph
+    command: ["ingester", "migrate"]
+    environment:
+      - GRAPH_DATABASE_URL=postgres://graph:graph@bridgeu-postgres:5432/graph?sslmode=disable
+    depends_on:
+      bridgeu-postgres:
+        condition: service_healthy
+    networks:
+      - bridgeu
+    healthcheck:
+      disable: true
+
   bridgeu-api:
     build: ./images/pydev
     working_dir: /app/api
@@ -100,4 +136,5 @@ networks:
   bridgeu:
 
 volumes:
+  bridgeu_pgdata:
   bridgeu_api_venv:

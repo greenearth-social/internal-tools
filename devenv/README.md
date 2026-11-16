@@ -580,6 +580,7 @@ it needs a public tunnel, not just a key.
    alias queryable even when no seeded posts qualify.
 
 Fixture personas are also written to the Firestore emulator after rebasing.
+`devctl seed` does not yet load or reset BridgEU's graph database.
 
 A seeded window drifts stale as real time moves on: the api's recency windows
 are anchored to *now* (popularity looks back 24h), so from about a day after a
@@ -894,8 +895,9 @@ environment keeps that boundary instead of flattening it:
 
 It's optional, because the repo is private to another org. With the checkout
 next to the others (`git clone git@github.com:eurosky-social/bridg-eu.git`),
-`devctl up` starts `bridgeu-api` too; without it devctl notes the missing
-checkout and runs mysky alone.
+`devctl up` starts `bridgeu-api` and `bridgeu-postgres` too, and applies the
+graph schema migrations; without the checkout devctl notes it and runs mysky
+alone.
 
 The API lives in `bridg-eu/api/`; the container mounts the whole checkout at
 `/app` and runs commands from `/app/api`. Dependencies are cached in a named
@@ -915,8 +917,31 @@ curl http://127.0.0.1:8400/health
 
 `bridgeu-api` answers as `did:web:localhost` with a placeholder publisher DID;
 `GE_DEV_BRIDGEU_HOSTNAME` and `GE_DEV_BRIDGEU_PUBLISHER_DID` in
-`devenv.local.env` override them. Its datastores and fixtures will be added
-here as those components are chosen.
+`devenv.local.env` override them.
+
+### BridgEU graph database
+
+`bridgeu-postgres` runs PostgreSQL 18 on the `bridgeu` network, with database,
+user and password all `graph`. `devctl setup` pulls PostgreSQL and builds
+`bridgeu-graph-init` from `bridg-eu/graph/Dockerfile`. Each `devctl up` waits
+for the database to be healthy, rebuilds the migration image using Docker's
+cache, then runs `ingester migrate` to apply the checked-out graph schema.
+
+The default host address is `127.0.0.1:55432`; override its base port with
+`GE_DEV_PORT_BRIDGEU_POSTGRES`. BridgEU containers use
+`bridgeu-postgres:5432`. To connect from the host or inside the container:
+
+```bash
+./devctl ports bridgeu-postgres
+psql "postgres://graph:graph@127.0.0.1:$(./devctl ports bridgeu-postgres)/graph?sslmode=disable"
+./devctl exec bridgeu-postgres psql -U graph -d graph
+./devctl --name featurework ports bridgeu-postgres   # another instance's port
+```
+
+Each instance has its own database volume, including named instances that
+share `dev`'s Elasticsearch. `devctl down` preserves it; `devctl nuke`
+removes it for the selected instance. This adds the schema only: graph
+fixtures, live graph ingestion and graph export are not started here.
 
 ### BridgEU feeds
 
@@ -1024,6 +1049,7 @@ pipenv run pytest devenv          # devctl's tests and the rest of devenv's
 | megastream-ingest | internal only | `--with-ingest`; live posts from the archives |
 | jetstream-ingest | internal only | `--with-ingest`; live likes from the public firehose |
 | bridgeu-api | `http://127.0.0.1:8400` | only with bridg-eu checked out; see [BridgEU](#bridgeu) |
+| bridgeu-postgres | `127.0.0.1:55432` | database/user/password `graph`; only with bridg-eu checked out |
 
 These are the default instance's ports; a named instance's are these plus its
 offset (`devctl ports --name <n>`). Everything binds `127.0.0.1` only —
@@ -1034,7 +1060,7 @@ see [docs/remote.md](docs/remote.md).
 Override the bases in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 `GE_DEV_PORT_ES`, `GE_DEV_PORT_FIRESTORE`, `GE_DEV_PORT_FRONTEND`,
 `GE_DEV_PORT_FIREBASE_AUTH`, `GE_DEV_PORT_FUNCTIONS`, `GE_DEV_PORT_FIREBASE_UI`,
-`GE_DEV_PORT_BRIDGEU_API`.
+`GE_DEV_PORT_BRIDGEU_API`, `GE_DEV_PORT_BRIDGEU_POSTGRES`.
 Other settings in the same file: `GE_DEV_ES_HEAP`, `GE_DEV_INSTANCE` (default
 instance name, same as passing `--name`), `GE_DEV_API_RELOAD=1` /
 `GE_DEV_INFERENCE_RELOAD=1` (what `--watch` sets),

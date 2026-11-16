@@ -2,8 +2,9 @@ import json
 
 import pytest
 
-from devctlib import stack
+from devctlib import http, stack
 from devctlib.ctx import Die
+from devctlib.instance import set_instance
 from devctlib.runner import CommandFailed
 from devctlib.testing import FakeRunner, fake, make_ctx
 
@@ -29,7 +30,8 @@ def with_repos(tmp_path, *repos):
 
 
 @pytest.mark.parametrize(
-    ("bridgeu", "built"), [(False, "seed-firestore-users"), (True, "bridgeu-api")]
+    ("bridgeu", "built"),
+    [(False, "seed-firestore-users"), (True, "bridgeu-api bridgeu-graph-init")],
 )
 def test_setup_builds_pulls_and_installs(tmp_path, capsys, bridgeu, built):
     ctx = make_ctx(tmp_path)
@@ -42,10 +44,10 @@ def test_setup_builds_pulls_and_installs(tmp_path, capsys, bridgeu, built):
     calls = fake(ctx).compose_lines()
     assert calls[0].startswith("--profile tools build es-init api inference")
     assert calls[0].endswith(built)
-    assert calls[1] == (
-        "--profile tools pull elasticsearch perspective-stub dev-auth seed-rebase"
-        " seed-megastream --ignore-buildable"
-    )
+    pulled = "elasticsearch perspective-stub dev-auth seed-rebase seed-megastream"
+    if bridgeu:
+        pulled += " bridgeu-postgres"
+    assert calls[1] == f"--profile tools pull {pulled} --ignore-buildable"
     assert calls[2] == "run --rm --no-deps inference bash /inference/start.sh --install-only"
     captured = capsys.readouterr()
     assert "setup complete" in captured.out
@@ -226,6 +228,111 @@ def test_down_notes_sharers_and_published_feeds(tmp_path, capsys):
 
 
 # --- up ------------------------------------------------------------------------
+
+
+def up_ctx(tmp_path, monkeypatch, *, bridgeu=True, instance="dev", fail=""):
+    def respond(argv):
+        if fail and " ".join(argv).endswith(fail):
+            return 23
+        return None
+
+    ctx = make_ctx(tmp_path, instance=instance, runner=FakeRunner(respond))
+    set_instance(ctx, instance)
+    docker_on_path(ctx, tmp_path)
+    with_repos(tmp_path, *(["bridg-eu"] if bridgeu else []))
+    with_models(ctx)
+    (ctx.runtime / "es_key_ro.env").write_text("GE_ELASTICSEARCH_API_KEY=local-key\n")
+    if instance != "dev":
+        ctx.offset = 10
+        ctx.ports = {name: port + ctx.offset for name, port in ctx.ports.items()}
+        owner = ctx.devenv / ".runtime"
+        owner.mkdir()
+        (owner / "es_key_ro.env").write_text("GE_ELASTICSEARCH_API_KEY=owner-key\n")
+
+    def request(url, **kwargs):
+        if url.endswith("/_cluster/health"):
+            return http.Response(200)
+        if url.endswith("/posts/_count"):
+            return http.Response(200, '{"count":0}')
+        raise AssertionError(f"unexpected HTTP request: {url}")
+
+    monkeypatch.setattr(http, "request", request)
+    return ctx
+
+
+def test_up_waits_for_graph_database_and_migrates_before_starting_apps(tmp_path, monkeypatch):
+    ctx = up_ctx(tmp_path, monkeypatch)
+
+    stack.cmd_up(ctx, [])
+
+    calls = fake(ctx).compose_lines()
+    ready = next(call for call in calls if call.startswith("up -d --remove-orphans --wait "))
+    assert "bridgeu-postgres" in ready.split()
+    migrated = "run --rm --build bridgeu-graph-init"
+    started = "up -d api frontend bridgeu-api"
+    assert calls.index(ready) < calls.index(migrated) < calls.index(started)
+    assert calls.count(migrated) == 1
+
+
+def test_up_without_bridgeu_stops_its_services_and_skips_graph_initialization(
+    tmp_path, monkeypatch
+):
+    ctx = up_ctx(tmp_path, monkeypatch, bridgeu=False)
+
+    stack.cmd_up(ctx, [])
+
+    calls = fake(ctx).compose_lines()
+    assert "stop bridgeu-api bridgeu-postgres" in calls
+    assert "up -d api frontend" in calls
+    assert all("bridgeu-graph-init" not in call for call in calls)
+    assert all("bridgeu-postgres" not in call for call in calls if call.startswith("up "))
+
+
+def test_up_stops_before_apps_if_graph_migration_fails(tmp_path, monkeypatch, capsys):
+    migrated = "run --rm --build bridgeu-graph-init"
+    ctx = up_ctx(tmp_path, monkeypatch, fail=migrated)
+
+    with pytest.raises(CommandFailed) as exc:
+        stack.cmd_up(ctx, [])
+
+    assert exc.value.returncode == 23
+    calls = fake(ctx).compose_lines()
+    assert calls[-1] == migrated
+    assert not any(call.startswith("up ") and "bridgeu-api" in call.split() for call in calls)
+    assert "environment is up" not in capsys.readouterr().out
+
+
+def test_up_rechecks_graph_migrations_on_every_start(tmp_path, monkeypatch):
+    ctx = up_ctx(tmp_path, monkeypatch)
+
+    for _ in range(2):
+        fake(ctx).calls.clear()
+        stack.cmd_up(ctx, [])
+        calls = fake(ctx).compose_lines()
+        assert calls.count("run --rm --build bridgeu-graph-init") == 1
+        assert calls.index("run --rm --build bridgeu-graph-init") < calls.index(
+            "up -d api frontend bridgeu-api"
+        )
+
+
+def test_up_es_sharer_still_starts_and_migrates_its_own_graph_database(tmp_path, monkeypatch):
+    ctx = up_ctx(tmp_path, monkeypatch, instance="alpha")
+
+    stack.cmd_up(ctx, [])
+
+    calls = fake(ctx).compose_lines()
+    ready = next(call for call in calls if call.startswith("up -d --remove-orphans --wait "))
+    assert "bridgeu-postgres" in ready.split()
+    assert "elasticsearch" not in ready.split()
+    assert "run --rm es-init" not in calls
+    migrated = "run --rm --build bridgeu-graph-init"
+    started = "up -d --no-deps api frontend bridgeu-api"
+    assert calls.index(ready) < calls.index(migrated) < calls.index(started)
+    migration = next(call for call in fake(ctx).calls if call.argv[-1] == "bridgeu-graph-init")
+    assert migration.env["GE_DEV_NAME"] == "ge-alpha"
+    assert migration.env["GE_DEV_RUNTIME"] == "./.runtime.alpha"
+    assert ctx.get("GE_DEV_ES_API_KEY") == "owner-key"
+    assert ctx.port("BRIDGEU_POSTGRES") == 55442
 
 
 def test_up_flags(tmp_path):

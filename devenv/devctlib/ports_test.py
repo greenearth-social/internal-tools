@@ -47,6 +47,7 @@ def test_named_instance_gets_an_offset_and_remembers_it(devenv):
     offset, allocated = ports.allocate(devenv, "alpha", ports.BASE_PORTS)
     assert offset == ports.STRIDE
     assert allocated["API"] == ports.BASE_PORTS["API"] + ports.STRIDE
+    assert allocated["BRIDGEU_POSTGRES"] == ports.BASE_PORTS["BRIDGEU_POSTGRES"] + ports.STRIDE
     assert (devenv / ".runtime.alpha" / "ports.json").exists()
 
     # Second call is a lookup, not a new allocation.
@@ -57,6 +58,13 @@ def test_second_instance_gets_a_different_block(devenv):
     first, _ = ports.allocate(devenv, "alpha", ports.BASE_PORTS)
     second, _ = ports.allocate(devenv, "beta", ports.BASE_PORTS)
     assert first != second
+
+
+def test_postgres_port_override_is_preserved_for_named_instances(devenv):
+    bases = ports.resolve_bases({"GE_DEV_PORT_BRIDGEU_POSTGRES": "56432"})
+    first, allocated = ports.allocate(devenv, "alpha", bases)
+    assert allocated["BRIDGEU_POSTGRES"] == 56432 + first
+    assert ports.read_only(devenv, "alpha", bases) == (first, allocated)
 
 
 def test_running_instance_keeps_its_ports(devenv):
