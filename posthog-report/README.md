@@ -19,9 +19,9 @@ Sunday, US/Pacific. "Saw a post" means it stayed on screen for half a second.
 | Replies            | Taps on the reply button, whether or not a reply is posted | `interactionReply` events                                    |
 | Show more          | Taps on "Show more like this"                              | `requestMore` events                                         |
 | Show less          | Taps on "Show less like this"                              | `requestLess` events                                         |
-| 8 Weeks            | One bar per week, oldest left, scaled to the row's largest |                                                              |
-| 11-09 (a date)     | The count for the week starting that Monday                |                                                              |
-| vs Prev            | Percent change from the week before; green good, yellow not |                                                             |
+| 8 Weeks            | One bar per week, oldest left, scaled to the row's largest | Not applicable: made by the bot                              |
+| A date (e.g. 11-09)| The count for the week starting that Monday                | Not applicable: made by the bot                              |
+| vs Prev            | Percent change from the week before; green good, yellow not| Not applicable: made by the bot                              |
 
 Our own uptime check is left out of the load rows. The team's own use is not.
 
