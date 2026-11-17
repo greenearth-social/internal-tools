@@ -36,6 +36,7 @@ def test_side_has_a_header_then_one_line_per_metric_all_one_width():
         ["Show", "more", "▁█", "8", "·"],
         ["Show", "less", "▆█", "3", "+50%"],
         ["Setting", "changes", "██", "10", "+0%"],
+        ["Settings", "users", "██", "10", "+0%"],
     ]
     assert len({len(x) for x in lines}) == 1
 
@@ -50,7 +51,7 @@ def test_table_sets_the_sides_either_side_of_one_unbroken_rule():
     assert len({x.index("│") for x in lines}) == 1
     assert lines[2].split("│")[0].split()[:2] == ["Weekly", "active"]
     assert lines[2].split("│")[1].split()[0] == "Likes"
-    assert lines[-1].split("│")[1] == ""  # the right side is the shorter one
+    assert lines[-1].split("│")[1].split()[:2] == ["Settings", "users"]
 
 
 def test_report_is_the_table_between_two_rules_with_the_notes_under_them():
@@ -74,7 +75,7 @@ def test_change_is_green_when_good_yellow_when_bad_and_plain_when_flat():
     assert report.verdict(8, 0, True) is None
     lines = report.side(ROWS, RIGHT, color=True)
     assert "\x1b[33m" in lines[1] and "\x1b[32m" not in lines[1]  # likes fell
-    assert "\x1b[33m" in lines[-2] and "\x1b[32m" not in lines[-2]  # show less rose
+    assert "\x1b[33m" in lines[-3] and "\x1b[32m" not in lines[-3]  # show less rose
 
 
 def test_a_report_of_large_weeks_fits_in_one_discord_message():
