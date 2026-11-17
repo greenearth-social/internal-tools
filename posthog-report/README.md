@@ -1,8 +1,6 @@
-# posthog-report
+# posthog-report, posts MySky's weekly PostHog numbers to Discord every Monday.
 
-Posts MySky's weekly PostHog numbers to Discord every Monday.
-
-Each number is for one whole week, the one named in the column heading. 
+Each number is for one whole week. The week named in the column heading. 
 
 Weeks run Monday to Sunday, US/Pacific.
 
