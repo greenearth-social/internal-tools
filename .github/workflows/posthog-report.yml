@@ -2,7 +2,8 @@ name: PostHog weekly report
 
 on:
   schedule:
-    - cron: "0 14 * * 1" # Mondays 14:00 UTC
+    # Mondays 14:00 UTC: 6am Pacific in winter, 7am in summer (cron does not follow clock changes).
+    - cron: "0 14 * * 1"
   workflow_dispatch:
 
 permissions:
