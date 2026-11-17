@@ -4,8 +4,6 @@ Each number is for one whole week. The week named in the column heading.
 
 Weeks run Monday to Sunday, US/Pacific.
 
-Every metric except 'Setting changes' counts things that happen in Bluesky, on a MySky feed.
-
 A like, repost or reply only counts if it was made on a post a MySky feed served to that person, in the feed or after opening the post from it. 
 
 | Term in the post    | Meaning                                                     | PostHog definition                                          |
