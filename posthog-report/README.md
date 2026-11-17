@@ -1,6 +1,6 @@
 # posthog-report
 
-Posts MySky's weekly PostHog numbers to Discord every Monday, as two boxes.
+Posts MySky's weekly PostHog numbers to Discord every Monday.
 
 Every row is about MySky feeds inside the Bluesky app. Weeks run Monday to
 Sunday, US/Pacific. "Saw a post" means it stayed on screen for half a second.
@@ -19,15 +19,15 @@ Sunday, US/Pacific. "Saw a post" means it stayed on screen for half a second.
 | Replies            | Taps on the reply button, whether or not a reply is posted | `interactionReply` events                                    |
 | Show more          | Taps on "Show more like this"                              | `requestMore` events                                         |
 | Show less          | Taps on "Show less like this"                              | `requestLess` events                                         |
-| 8 Week Summary     | One bar per week, oldest left, scaled to the row's largest |                                                              |
-| Week of MM-DD      | The count for the week starting that Monday                |                                                              |
-| Change vs Prev     | Percent change from the week before; green good, yellow not |                                                             |
+| 8 Weeks            | One bar per week, oldest left, scaled to the row's largest |                                                              |
+| 11-09 (a date)     | The count for the week starting that Monday                |                                                              |
+| vs Prev            | Percent change from the week before; green good, yellow not |                                                             |
 
 Our own uptime check is left out of the load rows. The team's own use is not.
 
 ```bash
-python posthog-report/report.py           # print the boxes
-python posthog-report/report.py --post    # post them to Discord
+python posthog-report/report.py           # print the table
+python posthog-report/report.py --post    # post it to Discord
 ```
 
 Needs `POSTHOG_API_KEY`, `POSTHOG_PROJECT_ID` and `DISCORD_WEBHOOK_URL`: repo

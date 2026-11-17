@@ -1,9 +1,9 @@
-"""posthog-report: the last WEEKS whole weeks of MySky in two boxes, one row per metric:
-its weeks as a strip of bars, last week's count, and the change from the week before.
+"""posthog-report: the last WEEKS whole weeks of MySky as two tables side by side, one row per
+metric: its weeks as a strip of bars, last week's count, and the change from the week before.
 README.md says what each row means.
 
-    python report.py           print the boxes (what would be posted)
-    python report.py --post    post them to DISCORD_WEBHOOK_URL, one code block each
+    python report.py           print the table (what would be posted)
+    python report.py --post    post it to DISCORD_WEBHOOK_URL as a code block
 
 Keys come from the environment, or from .env beside this file when not set there:
 POSTHOG_API_KEY, POSTHOG_PROJECT_ID, DISCORD_WEBHOOK_URL, POSTHOG_HOST (default US cloud).
@@ -17,13 +17,12 @@ import json
 import os
 import re
 import sys
-import textwrap
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 WEEKS = 8
-PAD = 2  # columns between the box's edge and its contents
+PAD = 2  # columns between the ends of the rules and the contents
 DISCORD_LIMIT = 2000  # characters Discord accepts in one message
 # Discord turns away urllib's default User-Agent, so name ourselves.
 USER_AGENT = "greenearth-posthog-report/1.0"
@@ -68,22 +67,21 @@ FROM (SELECT person_id, min(timestamp) AS began FROM events WHERE {SEEN} GROUP B
 WHERE {LAST_WEEKS.format("began", WEEKS)}
 GROUP BY week""",
 }
-# (title, its rows) per box, in the order posted
-BOXES = [
-    (
-        "MySky · Weekly · Audience",
-        [
-            "Weekly active",
-            "Daily active (avg)",
-            "New users",
-            "Feed loads",
-            "Feed users",
-            "Explore loads",
-            "Explore users",
-        ],
-    ),
-    ("MySky · Weekly · Engagement", ["Likes", "Reposts", "Replies", "Show more", "Show less"]),
+TITLE = "MySky · Weekly"
+# the rows of the left table and of the right one, in the order printed
+SIDES = [
+    [
+        "Weekly active",
+        "Daily active (avg)",
+        "New users",
+        "Feed loads",
+        "Feed users",
+        "Explore loads",
+        "Explore users",
+    ],
+    ["Likes", "Reposts", "Replies", "Show more", "Show less"],
 ]
+RULE = "  │  "  # between the two tables
 FALL_IS_GOOD = {"Show less"}
 NOTE = "Each histogram is normalized to its own max."
 README = "https://github.com/greenearth-social/internal-tools/tree/main/posthog-report#readme"
@@ -178,10 +176,9 @@ def verdict(new: int, old: int, rise_is_good: bool) -> int | None:
     return GREEN if (new > old) == rise_is_good else YELLOW
 
 
-def table(rows: list[Week], names: list[str], color: bool = False) -> list[str]:
-    """One line per metric, a blank line between them so the bars of two rows never touch."""
-    label = max(len(name) for _, box_names in BOXES for name in box_names)  # same in every box
-    grid = [[" " * label, f"{WEEKS} Week Summary", f"Week of {rows[-1][0]}", "Change vs Prev"]]
+def side(rows: list[Week], names: list[str], color: bool) -> list[str]:
+    """A header and one line per metric, every line the same width on screen."""
+    grid = [["", f"{WEEKS} Weeks", rows[-1][0], "vs Prev"]]
     colours: list[list[int | None]] = [[None] * 4]
     for name in names:
         series = [vals[name] for _, vals in rows]
@@ -197,55 +194,60 @@ def table(rows: list[Week], names: list[str], color: bool = False) -> list[str]:
         ]
         if color:
             padded = [paint(c, t) for c, t in zip(padded, tints, strict=True)]
-        out += ["  ".join(padded), ""]
-    return out[:-1]
-
-
-def box(title: str, lines: list[str], notes: list[str]) -> str:
-    """The lines in a rounded box with the title set into its top edge, each note wrapped under."""
-    inner = max(len(title) + 2, *(shown(x) for x in lines))
-    if notes:
-        lines = [*lines, "", *(x for note in notes for x in textwrap.wrap(note, inner))]
-    width = inner + 2 * PAD
-    top = "╭─ " + title + " " + "─" * (width - len(title) - 3) + "╮"
-    mid = ["│" + " " * PAD + x + " " * (inner - shown(x) + PAD) + "│" for x in ["", *lines, ""]]
-    return "\n".join([top, *mid, "╰" + "─" * width + "╯"])
-
-
-def report(rows: list[Week], color: bool = False) -> list[str]:
-    """Every box, plain for a terminal or coloured for Discord; the notes go under the last."""
-    notes = [NOTE, LAST_BAR.format(rows[-1][0])]
-    return [
-        box(title, table(rows, names, color), notes if i == len(BOXES) - 1 else [])
-        for i, (title, names) in enumerate(BOXES)
-    ]
-
-
-def messages(rows: list[Week]) -> list[str]:
-    """One Discord message per box, each in an `ansi` code block, which keeps it monospace."""
-    out = ["```ansi\n" + x + "\n```" for x in report(rows, color=True)]
-    # Under the last box, outside the block so it is a link; <> stops Discord previewing it.
-    out[-1] += f"\n[Row definitions (README)](<{README}>)"
+        out.append("  ".join(padded))
     return out
 
 
+def table(rows: list[Week], color: bool = False) -> list[str]:
+    """The two tables with a rule between them, and a blank line between rows so the bars
+    of two rows never touch."""
+    left, right = (side(rows, names, color) for names in SIDES)
+    height = max(len(left), len(right))
+    blank = " " * shown(left[0])
+    left += [blank] * (height - len(left))
+    right += [""] * (height - len(right))
+    out = []
+    for a, b in zip(left, right, strict=True):
+        out += [(a + RULE + b).rstrip(), (blank + RULE).rstrip()]
+    return out[:-1]
+
+
+def frame(title: str, lines: list[str]) -> str:
+    """The lines between a top rule carrying the title and a bottom rule; no sides, so a
+    blank line costs nothing against Discord's limit."""
+    width = max(len(title) + 2, *(shown(x) for x in lines)) + 2 * PAD
+    top = "╭─ " + title + " " + "─" * (width - len(title) - 3) + "╮"
+    body = [" " * (PAD + 1) + x if x else "" for x in ["", *lines, ""]]
+    return "\n".join([top, *body, "╰" + "─" * width + "╯"])
+
+
+def report(rows: list[Week], color: bool = False) -> str:
+    """The framed tables with the notes under them, plain for a terminal or coloured for Discord."""
+    notes = [NOTE, LAST_BAR.format(rows[-1][0])]
+    return "\n".join([frame(TITLE, table(rows, color)), *(" " * (PAD + 1) + x for x in notes)])
+
+
+def message(rows: list[Week]) -> str:
+    """The Discord message: the table in an `ansi` code block, which keeps it monospace."""
+    # The link goes outside the block so it is clickable; <> stops Discord previewing it.
+    return f"```ansi\n{report(rows, color=True)}\n```\n[Row definitions (README)](<{README}>)"
+
+
 def main():
-    p = argparse.ArgumentParser(description="MySky weekly PostHog boxes")
+    p = argparse.ArgumentParser(description="MySky weekly PostHog table")
     p.add_argument("--post", action="store_true", help="post to Discord instead of printing")
     a = p.parse_args()
     e = env()
     rows = weeks(e)
     if not rows:
         sys.exit("no events in the last weeks")
-    contents = messages(rows)
-    longest = max(len(x) for x in contents)
-    if longest > DISCORD_LIMIT:
-        sys.exit(f"a message is {longest} characters, Discord takes {DISCORD_LIMIT}")
+    content = message(rows)
+    if len(content) > DISCORD_LIMIT:
+        sys.exit(f"message is {len(content)} characters, Discord takes {DISCORD_LIMIT}")
     if not a.post:
-        print("\n".join(report(rows)))
+        print(report(rows))
         return
-    for content in contents:
-        post_json(e["DISCORD_WEBHOOK_URL"], {"content": content})
+    post_json(e["DISCORD_WEBHOOK_URL"], {"content": content})
 
 
 if __name__ == "__main__":
