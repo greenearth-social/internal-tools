@@ -1,5 +1,5 @@
-"""posthog-report: the last WEEKS whole weeks of MySky in one box, one row per week,
-oldest at the top, and the change from the week before under it.
+"""posthog-report: the last WEEKS whole weeks of MySky in one box, one row per metric:
+its weeks as a strip of bars, last week's count, and the change from the week before.
 
     python report.py           print the box (what would be posted)
     python report.py --post    post it to DISCORD_WEBHOOK_URL as a code block
@@ -14,6 +14,7 @@ Standard library only, so the scheduled run needs no install step.
 import argparse
 import json
 import os
+import re
 import sys
 import textwrap
 import urllib.request
@@ -26,21 +27,22 @@ DISCORD_LIMIT = 2000  # characters Discord accepts in one message
 # Discord turns away urllib's default User-Agent, so name ourselves.
 USER_AGENT = "greenearth-posthog-report/1.0"
 
-# (header, HogQL aggregate) per column, in the order printed
+BARS = "▁▂▃▄▅▆▇█"
+# The colours a Discord `ansi` code block understands, by their escape number.
+GREEN, YELLOW, CYAN = 32, 33, 36
+ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+# (name, HogQL aggregate, whether a rise is good news) per metric, in the order printed
 COLUMNS = [
-    ("active", "count(distinct if(event = 'interactionSeen', person_id, null))"),
-    ("likes", "countIf(event = 'interactionLike')"),
-    ("reposts", "countIf(event = 'interactionRepost')"),
-    ("replies", "countIf(event = 'interactionReply')"),
-    ("more", "countIf(event = 'requestMore')"),
-    ("less", "countIf(event = 'requestLess')"),
-    ("sign-ins", "countIf(event = 'signInCompleted')"),
-    ("failed", "countIf(event = 'signInFailed')"),
+    ("Active", "count(distinct if(event = 'interactionSeen', person_id, null))", True),
+    ("Likes", "countIf(event = 'interactionLike')", True),
+    ("Reposts", "countIf(event = 'interactionRepost')", True),
+    ("Replies", "countIf(event = 'interactionReply')", True),
+    ("Show more", "countIf(event = 'requestMore')", True),
+    ("Show less", "countIf(event = 'requestLess')", False),
 ]
-NOTE = (
-    "active = people who saw a post · more / less = 'show me more / less like this' "
-    "· sign-ins = completed, failed = sign-in errors · Δ = last week vs the one before"
-)
+NOTE = "Each histogram is normalized to its own max."
+LAST_BAR = "The last bar is the week of {}."  # filled with that week's Monday
 
 Week = tuple[str, list[int]]
 
@@ -70,7 +72,7 @@ def post_json(url: str, payload: dict, token: str | None = None) -> Any:
 
 def weeks(e: dict[str, str]) -> list[Week]:
     """[(monday 'MM-DD', [value per column])] for the last WEEKS whole weeks, oldest first."""
-    cols = ",\n  ".join(f"{agg} AS c{i}" for i, (_, agg) in enumerate(COLUMNS))
+    cols = ",\n  ".join(f"{agg} AS c{i}" for i, (_, agg, _) in enumerate(COLUMNS))
     sql = f"""
 SELECT toStartOfWeek(timestamp, 1) AS week,
   {cols}
@@ -92,39 +94,72 @@ def change(new: int, old: int) -> str:
     return "·" if not old else f"{100 * (new - old) / old:+.0f}%"
 
 
-def table(rows: list[Week]) -> list[str]:
-    """Plain columns, week left, numbers right, with a Δ row under a rule."""
-    grid = [["week", *(h for h, _ in COLUMNS)]]
-    grid += [[w, *(f"{v:,}" for v in vals)] for w, vals in rows]
-    if len(rows) > 1:
-        grid.append(["Δ", *(change(n, o) for n, o in zip(rows[-1][1], rows[-2][1], strict=True))])
+def bars(values: list[int]) -> str:
+    """One bar per value, each as tall as its share of the highest one."""
+    top = max(values)
+    return "".join(
+        BARS[min(len(BARS) - 1, len(BARS) * v // top)] if top else BARS[0] for v in values
+    )
+
+
+def paint(text: str, colour: int | None) -> str:
+    """The text in that colour, or as it is when there is none."""
+    return f"\x1b[{colour}m{text}\x1b[0m" if colour else text
+
+
+def shown(text: str) -> int:
+    """How many columns the text takes once its colour escapes are left out."""
+    return len(ESCAPE.sub("", text))
+
+
+def verdict(new: int, old: int, rise_is_good: bool) -> int | None:
+    """Green for a change in the good direction, yellow for the other, nothing when flat."""
+    if not old or new == old:
+        return None
+    return GREEN if (new > old) == rise_is_good else YELLOW
+
+
+def table(rows: list[Week], color: bool = False) -> list[str]:
+    """One line per metric, a blank line between them so the bars of two rows never touch."""
+    grid = [["", f"{WEEKS} Week Summary", f"Week of {rows[-1][0]}", "Change vs Prev"]]
+    colours: list[list[int | None]] = [[None] * 4]
+    for i, (name, _, rise_is_good) in enumerate(COLUMNS):
+        series = [vals[i] for _, vals in rows]
+        new, old = series[-1], series[-2] if len(series) > 1 else 0
+        grid.append([name, bars(series), f"{new:,}", change(new, old)])
+        colours.append([None, CYAN, None, verdict(new, old, rise_is_good)])
     widths = [max(len(r[i]) for r in grid) for i in range(len(grid[0]))]
-
-    def line(cells: list[str]) -> str:
-        return "  ".join(
-            f"{c:<{w}}" if i == 0 else f"{c:>{w}}"
+    out = []
+    for cells, tints in zip(grid, colours, strict=True):
+        padded = [
+            f"{c:<{w}}" if i < 2 else f"{c:>{w}}"
             for i, (c, w) in enumerate(zip(cells, widths, strict=True))
-        )
+        ]
+        if color:
+            padded = [paint(c, t) for c, t in zip(padded, tints, strict=True)]
+        out += ["  ".join(padded), ""]
+    return out[:-1]
 
-    out = [line(r) for r in grid]
-    if len(rows) > 1:
-        out.insert(-1, "─" * len(out[0]))
-    return out
 
-
-def box(title: str, lines: list[str], note: str) -> str:
-    """The lines in a rounded box with the title set into its top edge, the note wrapped under."""
-    inner = max(len(title) + 2, *(len(x) for x in lines))
-    lines = [*lines, "", *textwrap.wrap(note, inner)]
+def box(title: str, lines: list[str], notes: list[str]) -> str:
+    """The lines in a rounded box with the title set into its top edge, each note wrapped under."""
+    inner = max(len(title) + 2, *(shown(x) for x in lines))
+    lines = [*lines, "", *(x for note in notes for x in textwrap.wrap(note, inner))]
     width = inner + 2 * PAD
     top = "╭─ " + title + " " + "─" * (width - len(title) - 3) + "╮"
-    mid = ["│" + " " * PAD + x.ljust(inner) + " " * PAD + "│" for x in ["", *lines, ""]]
+    mid = ["│" + " " * PAD + x + " " * (inner - shown(x) + PAD) + "│" for x in ["", *lines, ""]]
     return "\n".join([top, *mid, "╰" + "─" * width + "╯"])
 
 
+def report(rows: list[Week], color: bool = False) -> str:
+    """The whole box, plain for a terminal or coloured for Discord."""
+    notes = [NOTE, LAST_BAR.format(rows[-1][0])]
+    return box("MySky · Weekly", table(rows, color), notes)
+
+
 def message(rows: list[Week]) -> str:
-    """The Discord message: the box in a code block, so it keeps its monospace shape."""
-    return "```\n" + box("MySky · weekly, Mon–Sun", table(rows), NOTE) + "\n```"
+    """The Discord message: the coloured box in an `ansi` code block, which keeps it monospace."""
+    return "```ansi\n" + report(rows, color=True) + "\n```"
 
 
 def main():
@@ -139,7 +174,7 @@ def main():
     if len(content) > DISCORD_LIMIT:
         sys.exit(f"message is {len(content)} characters, Discord takes {DISCORD_LIMIT}")
     if not a.post:
-        print(content.removeprefix("```\n").removesuffix("\n```"))
+        print(report(rows))
         return
     post_json(e["DISCORD_WEBHOOK_URL"], {"content": content})
 
