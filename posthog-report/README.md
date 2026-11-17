@@ -5,7 +5,7 @@ Posts MySky's weekly PostHog numbers to Discord every Monday.
 Every row is about MySky feeds inside the Bluesky app. Weeks run Monday to
 Sunday, US/Pacific. "Saw a post" means it stayed on screen for half a second.
 
-| Term in the post   | Meaning                                                    | Counted as                                                   |
+| Term in the post   | Meaning                                                    | PostHog definition                                           |
 |--------------------|------------------------------------------------------------|--------------------------------------------------------------|
 | Weekly active      | People who saw at least one post during the week           | Distinct people with `interactionSeen`                       |
 | Daily active (avg) | People who saw at least one post, on an average day        | Distinct people with `interactionSeen` per day, summed, / 7  |
