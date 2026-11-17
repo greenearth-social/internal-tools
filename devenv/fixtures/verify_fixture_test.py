@@ -103,3 +103,11 @@ def test_partial_coverage_passes_and_reports_percentage(tmp_path, monkeypatch, c
     )
     assert vf.main() == 0
     assert "topic scores: 1/2 posts (50.0%)" in capsys.readouterr().out
+
+
+def test_invalid_optional_graph_fails_base_fixture_verification(tmp_path, monkeypatch, capsys):
+    _fixture(tmp_path, [{"Other": 1.0}])
+    (tmp_path / "graph").mkdir()
+    monkeypatch.setattr(sys, "argv", ["verify_fixture.py", str(tmp_path), "--offline"])
+    assert vf.main() == 1
+    assert "FAIL: graph fixture" in capsys.readouterr().out

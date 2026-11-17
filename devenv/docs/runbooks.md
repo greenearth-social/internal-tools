@@ -99,6 +99,78 @@ prod Elasticsearch access via kubectl (internal engineers only).
 5. Stale releases can be deleted from GitHub once nobody needs them; that's
    the point of releases over git history.
 
+## Capture a graph alongside a fixture
+
+Graph capture is optional and requires SSH access with sudo to the BridgEU
+Postgres host. It runs separately from ordinary `devctl fetch-fixture` and
+`devctl seed`, which need no production access. From `internal-tools/devenv`,
+extend an existing `prod-es` fixture:
+
+```bash
+python3 fixtures/generate_graph.py --fixture-dir fixtures/data \
+  --ssh-host bridgeu-prod-bridgeu-postgres-hetzner-fsn1-01.tailc2fe33.ts.net
+```
+
+To capture both parts in one regeneration, pass the graph option through the
+existing wrapper. Graph extraction runs after the base sample is written:
+
+```bash
+fixtures/regen_fixture.sh -- \
+  --graph-ssh-host bridgeu-prod-bridgeu-postgres-hetzner-fsn1-01.tailc2fe33.ts.net
+```
+
+The wrapper stages both parts in `fixtures/data.staging`. The same
+`--graph-ssh-host` option works directly with `generate_sample.py --source
+prod-es`; it is rejected with the synthetic `megastream-files` source.
+Neither command publishes a release. Publishing remains the separate,
+explicit step above.
+
+The standalone options are `--database` (default `bridgeu`), `--batch-size`
+(100), `--page-size` (10,000), and `--statement-timeout-ms` (30,000). When
+using `generate_sample.py` or the wrapper, prefix each with `--graph-`, as in
+`--graph-page-size`. Batch size, page size and timeout must be positive.
+Batching and pagination bound individual queries; they do not truncate the
+captured graph. Every selected user's active follows are paged through,
+without a per-user follow cap.
+Each SSH query also has a wall-clock deadline of its statement timeout plus
+30 seconds, so a stalled connection fails instead of waiting indefinitely.
+
+Follow roots are the union of all liker DIDs in the base likes file and every
+DID in the base manifest's `personas` and `dev_users`. The selection comes
+from the fixture, not a fixed user count. Extraction first looks up actor
+metadata for all base users, including post authors, then fetches current
+active outgoing follows only for the selected roots. Actor lookup progress
+therefore covers more users than follow extraction progress.
+
+Post authors and all captured follow targets remain in the actor file. Their
+own follow lists are not expanded unless they are also selected roots, and
+incoming follows are not fetched. An actor's `is_root` flag identifies the
+selected follow roots, not every author or neighbor. Missing base DIDs remain
+in `actors.jsonl.gz` with `in_graph` false. The output is:
+
+- `graph/actors.jsonl.gz` and `graph/follows.jsonl.gz` for the captured graph.
+- `graph/manifest.json` with the follow-root selection policy, capture
+  metadata and fingerprints tying it to the exact base fixture.
+- The existing root `likes.jsonl.gz` remains the shared like dataset; graph
+  capture does not take a separate sample of likes.
+
+The follow graph reflects the time of extraction, which may be much later
+than the base fixture's post/like window. The manifest records that
+distinction; this is not a reconstruction of follows at the historical
+window. Each short query reads committed data at its own start; the manifest
+records the capture's start and finish rather than claiming one atomic
+snapshot. This avoids a long production transaction holding back vacuum.
+Regenerating the base fixture removes any old `graph/` directory so
+unrelated captures cannot be bundled together.
+
+Every SSH query switches to `bridgeu_readonly` inside a read-only transaction
+and verifies both before reading. Extraction does not write production data,
+and no credentials are saved in the artifacts. The query interface leaves
+room for other sources or direct database authentication later.
+
+This step generates files only. Loading and rebasing them into the local
+BridgEU database through `devctl seed` is not implemented yet.
+
 ## Publish a new model bundle
 
 Needs: `gcloud` with read access to the prod model bucket.

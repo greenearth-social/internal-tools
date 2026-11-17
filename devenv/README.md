@@ -334,6 +334,17 @@ samples a real cluster through a port-forward; `--source megastream-files`
 builds from megastream archives with a synthesized like graph, no credentials
 needed. Output goes to `fixtures/data/` (gitignored).
 
+For a production sample, `--graph-ssh-host <host>` optionally captures
+BridgEU's current outgoing follows for the fixture's likers, personas and dev
+accounts into `graph/`. Post authors and follow targets are retained as actor
+records; their own follows are captured only if they are also selected users.
+An existing production sample can also be extended with
+`fixtures/generate_graph.py`; see the [graph capture runbook](docs/runbooks.md#capture-a-graph-alongside-a-fixture).
+This is a separate capture time from the posts and likes, recorded in a graph
+manifest tied to the exact base files. The graph files are not yet loaded or
+rebased by `devctl seed`. Ordinary `fetch-fixture` and `seed` need no production
+access.
+
 The full procedure — generating, sanity-checking, and publishing a fixture
 for the team — is in [docs/runbooks.md](docs/runbooks.md).
 
@@ -941,7 +952,7 @@ psql "postgres://graph:graph@127.0.0.1:$(./devctl ports bridgeu-postgres)/graph?
 Each instance has its own database volume, including named instances that
 share `dev`'s Elasticsearch. `devctl down` preserves it; `devctl nuke`
 removes it for the selected instance. This adds the schema only: graph
-fixtures, live graph ingestion and graph export are not started here.
+fixture loading, live graph ingestion and graph export are not started here.
 
 ### BridgEU feeds
 

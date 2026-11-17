@@ -37,6 +37,10 @@ command -v gh >/dev/null || die "the gh CLI is required (https://cli.github.com/
 [[ -f "$DATA_DIR/manifest.json" ]] ||
   die "no fixture set in $DATA_DIR — generate one first (see fixtures/generate_sample.py)"
 
+# A graph capture belongs to the exact base files it was extracted around.
+# Validate this optional companion before packaging or changing a release.
+python3 "$FIXTURES_DIR/graph_fixture.py" "$DATA_DIR" || die "graph fixture verification failed"
+
 # Tag from the fixture's own window end, so the release name states which slice
 # of Bluesky it holds rather than when someone happened to upload it.
 window_end="$(python3 -c "
