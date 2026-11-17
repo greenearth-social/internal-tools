@@ -168,8 +168,27 @@ and verifies both before reading. Extraction does not write production data,
 and no credentials are saved in the artifacts. The query interface leaves
 room for other sources or direct database authentication later.
 
-This step generates files only. Loading and rebasing them into the local
-BridgEU database through `devctl seed` is not implemented yet.
+Capture generates files only. With the BridgEU checkout present, run
+`devctl seed` to validate and load them into local Postgres alongside the
+ordinary Elasticsearch seed. Validation checks the original graph against
+its base fixture before any seeded data is wiped. No production access is
+needed for seeding.
+
+The seed rebases graph actor/follow timestamps from the graph capture finish
+time to the same effective window end as the post/like seed. This uses a
+separate delta from the historical base window; likes themselves are the
+same rebased rows loaded into Elasticsearch. Local actor IDs are assigned
+afresh and all follow/like references are resolved by DID. Missing captured
+actors become placeholders with status `unknown` and `first_seen_at` equal
+to that effective end. Like sequences are `0`, and no ingestion cursor is
+invented.
+
+Graph replacement runs in one transaction: repeated seeds replace prior raw
+graph data and preserve migrations, and a failed load rolls back. Choosing
+a fixture without `graph/` clears the local graph rather than retaining an
+old capture. Instances sharing Elasticsearch still cannot run `devctl seed`;
+use `--dedicated-es` when seeding a named instance's graph. Neither live graph
+ingestion nor graph export starts as part of seeding.
 
 ## Publish a new model bundle
 

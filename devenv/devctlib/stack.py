@@ -57,7 +57,10 @@ def cmd_setup(ctx: Ctx, args: list[str]) -> None:
     check_repos(ctx)
     ensure_runtime(ctx)
     print("devctl: pulling and building images (first run takes a few minutes)...")
-    builds = [*BUILT, *(["bridgeu-api", "bridgeu-graph-init"] if have_bridgeu(ctx) else [])]
+    builds = [
+        *BUILT,
+        *(["bridgeu-api", "bridgeu-graph-init", "bridgeu-graph-seed"] if have_bridgeu(ctx) else []),
+    ]
     pulls = [*PULLED, *(["bridgeu-postgres"] if have_bridgeu(ctx) else [])]
     compose(ctx, "--profile", "tools", "build", *builds)
     compose(ctx, "--profile", "tools", "pull", *pulls, "--ignore-buildable")
@@ -458,6 +461,14 @@ def cmd_seed(ctx: Ctx, args: list[str]) -> None:
         warn("devctl: note — seeding local Elasticsearch, but the api is reading")
         warn(f"        {ctx.get('GE_DEV_ES_URL')}, so this data won't appear in feeds.")
 
+    # Validate the original capture before either datastore loses its old
+    # seed. A graph belongs to the exact base fixture recorded in its manifest.
+    print("devctl: checking fixture consistency...")
+    compose(ctx, "run", "--rm", "seed-rebase", "python", "/seedscripts/rebase.py", "--check")
+    if have_bridgeu(ctx):
+        compose(ctx, "up", "-d", "--wait", "bridgeu-postgres")
+        compose(ctx, "run", "--rm", "--build", "bridgeu-graph-init")
+
     # megastream_ingest computes each post's ge_post_embedding by calling the
     # inference service, so the seed is only meaningful once that service has
     # actually loaded its models. seed-megastream can't depend_on it — whether
@@ -471,6 +482,9 @@ def cmd_seed(ctx: Ctx, args: list[str]) -> None:
     for message, run in SEED_STEPS:
         print(f"devctl: {message}")
         compose(ctx, "run", "--rm", *run)
+        if run == ("seed-rebase",) and have_bridgeu(ctx):
+            print("devctl: loading BridgEU's graph fixture...")
+            compose(ctx, "run", "--rm", "--build", "bridgeu-graph-seed")
 
     persona = env_file_value(ctx.runtime / "probe.env", "GE_PROBE_USER_DID")
     # Restart the api so it picks up the new persona from .runtime/probe.env —

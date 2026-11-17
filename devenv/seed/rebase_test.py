@@ -1,5 +1,6 @@
 import datetime as dt
 import gzip
+import hashlib
 import json
 import sqlite3
 import zipfile
@@ -303,3 +304,218 @@ def test_rebase_db_rejects_filenames_the_spooler_cannot_parse(tmp_path, monkeypa
 
     with pytest.raises(SystemExit):
         rebase.rebase_db(bad, DAY, 0)
+
+
+# Graph captures can be months newer than the posts they accompany. Their
+# own capture endpoint must anchor the shift, while likes stay shared with ES.
+def _graph_source(tmp_path, monkeypatch, *, graph=True):
+    source = tmp_path / "fixtures"
+    source.mkdir()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setattr(rebase, "FIXTURES_DIR", source)
+    monkeypatch.setattr(rebase, "OUT_DIR", runtime / "seed")
+    monkeypatch.setattr(rebase, "PROBE_ENV", runtime / "probe.env")
+    post_time = rebase.parse_iso("2026-09-14T17:00:00Z")
+    chunk = source / "mega_jetstream_20260914_170000.db.zip"
+    _make_db_zip(
+        chunk, post_time.isoformat(), int(post_time.timestamp() * 1e6), "2026-09-14 17:00:00"
+    )
+    author = "did:plc:author0000000000000000"
+    liker = "did:plc:liker"
+    manifest = {
+        "source": "prod-es",
+        "window_end": "2026-09-14T18:00:00Z",
+        "personas": [{"did": liker}],
+        "dev_users": [],
+    }
+    (source / "manifest.json").write_text(json.dumps(manifest))
+    _write_jsonl(
+        source / "likes.jsonl.gz",
+        [
+            {
+                "at_uri": f"at://{liker}/app.bsky.feed.like/l1",
+                "author_did": liker,
+                "subject_uri": f"at://{author}/app.bsky.feed.post/3abc",
+                "created_at": "2026-09-14T17:05:00Z",
+                "indexed_at": "2026-09-14T17:05:01Z",
+            }
+        ],
+    )
+    if not graph:
+        return source
+    graph_dir = source / "graph"
+    graph_dir.mkdir()
+    captured = "2026-11-17T12:00:00.123456Z"
+    _write_jsonl(
+        graph_dir / "actors.jsonl.gz",
+        [
+            {
+                "did": author,
+                "status": "active",
+                "status_at": None,
+                "first_seen_at": captured,
+                "is_root": False,
+                "in_graph": True,
+            },
+            {
+                "did": liker,
+                "status": "active",
+                "status_at": captured,
+                "first_seen_at": captured,
+                "is_root": True,
+                "in_graph": True,
+            },
+            {
+                "did": "did:plc:missing",
+                "status": None,
+                "status_at": None,
+                "first_seen_at": None,
+                "is_root": False,
+                "in_graph": False,
+            },
+        ],
+    )
+    _write_jsonl(
+        graph_dir / "follows.jsonl.gz",
+        [
+            {
+                "follower_did": liker,
+                "subject_did": author,
+                "rkey": f"f{i}",
+                "created_at": captured if i == 0 else None,
+                "indexed_at": captured,
+                "deleted_at": None,
+                "seq": 42 + i,
+            }
+            for i in range(2)
+        ],
+    )
+    graph_manifest = {
+        "schema_version": 1,
+        "source": "postgres",
+        "selection": {
+            "roots": "likers-personas-dev-users",
+            "direction": "outgoing",
+            "hops": 1,
+            "active_only": True,
+        },
+        "capture_started_at": captured,
+        "capture_finished_at": captured,
+        "base_files": {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in (source / "manifest.json", source / "likes.jsonl.gz", chunk)
+        },
+        "likes_file": "../likes.jsonl.gz",
+        "counts": {"roots": 1, "actors": 3, "follows": 2, "likes": 1, "missing_roots": 0},
+    }
+    (graph_dir / "manifest.json").write_text(json.dumps(graph_manifest))
+    assert rebase.validate_graph_fixture(source) == []
+    return source
+
+
+def _write_jsonl(path, rows):
+    with gzip.open(path, "wt") as stream:
+        for row in rows:
+            stream.write(json.dumps(row) + "\n")
+
+
+def _jsonl_rows(path):
+    with gzip.open(path, "rt") as stream:
+        return [json.loads(line) for line in stream]
+
+
+def test_graph_uses_its_capture_end_and_shares_exact_rebased_likes(tmp_path, monkeypatch):
+    source = _graph_source(tmp_path, monkeypatch)
+    original_manifest = json.loads((source / "graph" / "manifest.json").read_text())
+
+    rebase.main([])
+
+    base = json.loads((rebase.OUT_DIR / "manifest.json").read_text())
+    graph = json.loads((rebase.OUT_DIR / "graph" / "manifest.json").read_text())
+    effective = rebase.parse_iso(base["rebased"]["effective_window_end"])
+    delta = effective - rebase.parse_iso(original_manifest["capture_finished_at"])
+    assert graph["rebased"]["delta_seconds"] == delta.total_seconds()
+    assert graph["rebased"]["delta_seconds"] != base["rebased"]["delta_seconds"]
+    assert graph["rebased"]["seeded_at"] == base["rebased"]["seeded_at"]
+    assert graph["rebased"]["effective_capture_finished_at"] == effective.isoformat()
+    assert graph["base_files"] == original_manifest["base_files"]
+    shared_likes = rebase.OUT_DIR / "likes.jsonl.gz"
+    assert graph["rebased"]["likes_sha256"] == hashlib.sha256(shared_likes.read_bytes()).hexdigest()
+    assert graph["rebased"]["files_sha256"] == {
+        name: hashlib.sha256((rebase.OUT_DIR / "graph" / name).read_bytes()).hexdigest()
+        for name in ("actors.jsonl.gz", "follows.jsonl.gz")
+    }
+    assert not (rebase.OUT_DIR / "graph" / "likes.jsonl.gz").exists()
+    (like,) = _jsonl_rows(shared_likes)
+    assert rebase.parse_iso(like["created_at"]) == effective - dt.timedelta(minutes=55)
+
+
+def test_graph_negative_shift_preserves_microseconds_nulls_and_record_identity(
+    tmp_path, monkeypatch
+):
+    source = _graph_source(tmp_path, monkeypatch)
+    output = tmp_path / "out"
+    output.mkdir()
+    likes = b"the shared rebased likes bytes"
+    (output / "likes.jsonl.gz").write_bytes(likes)
+    effective = rebase.parse_iso("2026-11-17T11:00:00.654321Z")
+    seeded = effective + HOUR
+
+    rebase.rebase_graph(source, output, effective, seeded)
+
+    manifest = json.loads((output / "graph" / "manifest.json").read_text())
+    assert manifest["rebased"]["delta_seconds"] == -3599.469135
+    assert manifest["rebased"]["likes_sha256"] == hashlib.sha256(likes).hexdigest()
+    for name, fields in (
+        ("actors", ("status_at", "first_seen_at")),
+        ("follows", ("created_at", "indexed_at", "deleted_at")),
+    ):
+        originals = _jsonl_rows(source / "graph" / f"{name}.jsonl.gz")
+        shifted = _jsonl_rows(output / "graph" / f"{name}.jsonl.gz")
+        assert (
+            manifest["rebased"]["files_sha256"][f"{name}.jsonl.gz"]
+            == hashlib.sha256((output / "graph" / f"{name}.jsonl.gz").read_bytes()).hexdigest()
+        )
+        for before, after in zip(originals, shifted, strict=True):
+            for key, value in before.items():
+                if key in fields and value is not None:
+                    assert rebase.parse_iso(after[key]) == effective
+                else:
+                    assert after[key] == value
+
+
+@pytest.mark.parametrize("args", [[], ["--check"]])
+def test_invalid_graph_leaves_existing_runtime_untouched(tmp_path, monkeypatch, args):
+    source = _graph_source(tmp_path, monkeypatch)
+    rebase.OUT_DIR.mkdir()
+    saved = rebase.OUT_DIR / "existing-data"
+    saved.write_text("keep")
+    (source / "graph" / "actors.jsonl.gz").unlink()
+
+    with pytest.raises(SystemExit, match="graph fixture validation failed"):
+        rebase.main(args)
+
+    assert saved.read_text() == "keep"
+    assert not rebase.PROBE_ENV.exists()
+
+
+def test_check_validates_without_writing_runtime(tmp_path, monkeypatch):
+    _graph_source(tmp_path, monkeypatch)
+    rebase.main(["--check"])
+    assert not rebase.OUT_DIR.exists()
+    assert not rebase.PROBE_ENV.exists()
+
+
+def test_graphless_fixture_clears_stale_runtime_graph_and_still_rebases(tmp_path, monkeypatch):
+    _graph_source(tmp_path, monkeypatch, graph=False)
+    stale = rebase.OUT_DIR / "graph"
+    stale.mkdir(parents=True)
+    (stale / "manifest.json").write_text("stale")
+
+    rebase.main([])
+
+    assert not stale.exists()
+    assert (rebase.OUT_DIR / "manifest.json").exists()
+    assert (rebase.OUT_DIR / "likes.jsonl.gz").exists()
+    assert rebase.PROBE_ENV.read_text() == "GE_PROBE_USER_DID=did:plc:liker\n"

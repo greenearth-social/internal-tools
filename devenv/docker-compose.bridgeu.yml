@@ -55,6 +55,26 @@ services:
     healthcheck:
       disable: true
 
+  # Load the rebased companion graph into this instance's local database.
+  # The loader fixes the connection target; no production configuration is read.
+  bridgeu-graph-seed:
+    profiles: [tools]
+    build: ./images/graph-seed
+    command: ["python3", "/seedscripts/load_graph.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/fixturetools
+    depends_on:
+      bridgeu-postgres:
+        condition: service_healthy
+    networks:
+      - bridgeu
+    volumes:
+      - ./seed:/seedscripts:ro
+      - ./fixtures:/fixturetools:ro
+      - ./fixtures/data:/fixtures:ro
+      - ${GE_DEV_RUNTIME:-./.runtime}:/runtime:ro
+
   bridgeu-api:
     build: ./images/pydev
     working_dir: /app/api
