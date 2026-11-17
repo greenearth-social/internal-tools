@@ -91,6 +91,8 @@ def test_weeks_merges_the_replies_of_every_query(monkeypatch):
 
     def fake_post_json(url, payload, token=None):
         sql = payload["query"]["query"]
+        assert payload["query"]["filters"] == {"filterTestAccounts": True}
+        assert sql.count(report.TEAM_OUT) == 1
         sent.append((url, token, sql))
         if sql in report.QUERIES.values():  # one value per week, the second week missing
             return {"results": [["2026-11-02", 7.0]]}

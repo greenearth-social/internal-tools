@@ -54,17 +54,21 @@ COUNTS = {
     "Show less": "countIf(event = 'requestLess')",
     "Setting changes": "countIf(event = 'feedControlChanged')",
 }
+# PostHog swaps this for the project's "internal and test users" filter, which leaves the team out.
+TEAM_OUT = "{filters}"
 LAST_WEEKS = "{0} >= toStartOfWeek(now(), 1) - INTERVAL {1} WEEK AND {0} < toStartOfWeek(now(), 1)"
 # name -> HogQL returning (week, value); these need more than one pass over the events
 QUERIES = {
     "Daily active (avg)": f"""
 SELECT toStartOfWeek(day, 1) AS week, round(sum(people) / 7)
 FROM (SELECT toDate(timestamp) AS day, count(distinct person_id) AS people
-      FROM events WHERE {SEEN} AND {LAST_WEEKS.format("timestamp", WEEKS)} GROUP BY day)
+      FROM events WHERE {SEEN} AND {LAST_WEEKS.format("timestamp", WEEKS)} AND {TEAM_OUT}
+      GROUP BY day)
 GROUP BY week""",
     "New users": f"""
 SELECT toStartOfWeek(began, 1) AS week, count()
-FROM (SELECT person_id, min(timestamp) AS began FROM events WHERE {SEEN} GROUP BY person_id)
+FROM (SELECT person_id, min(timestamp) AS began FROM events WHERE {SEEN} AND {TEAM_OUT}
+      GROUP BY person_id)
 WHERE {LAST_WEEKS.format("began", WEEKS)}
 GROUP BY week""",
 }
@@ -119,7 +123,7 @@ def query(e: dict[str, str], sql: str) -> list[list]:
     host = e.get("POSTHOG_HOST", "https://us.posthog.com").rstrip("/")
     reply = post_json(
         f"{host}/api/projects/{e['POSTHOG_PROJECT_ID']}/query/",
-        {"query": {"kind": "HogQLQuery", "query": sql}},
+        {"query": {"kind": "HogQLQuery", "query": sql, "filters": {"filterTestAccounts": True}}},
         token=e["POSTHOG_API_KEY"],
     )
     return reply["results"]
@@ -137,7 +141,7 @@ def weeks(e: dict[str, str]) -> list[Week]:
 SELECT toStartOfWeek(timestamp, 1) AS week,
   {cols}
 FROM events
-WHERE {LAST_WEEKS.format("timestamp", WEEKS)}
+WHERE {LAST_WEEKS.format("timestamp", WEEKS)} AND {TEAM_OUT}
 GROUP BY week ORDER BY week"""
     rows = [(monday(r[0]), dict(zip(COUNTS, r[1:], strict=True))) for r in query(e, sql)]
     for name, sql in QUERIES.items():
