@@ -1,10 +1,15 @@
-# posthog-report, posts MySky's weekly PostHog numbers to Discord every Monday.
+Posts MySky's weekly PostHog numbers to Discord every Monday.
+
+# Report's row definitions
 
 Each number is for one whole week: the one named in the column heading.
 
 Weeks run Monday to Sunday, US/Pacific.
 
 A like, repost or reply only counts if it was made on a post a MySky feed served to that person, in the feed or after opening the post from it.
+
+The team's own use is left out of every metric (via PostHog's "internal and test users" filter), 'Setting changes' included.
+
 
 | Term in the post    | Meaning                                                     | PostHog definition                                          |
 |---------------------|-------------------------------------------------------------|-------------------------------------------------------------|
@@ -27,8 +32,7 @@ A like, repost or reply only counts if it was made on a post a MySky feed served
 
 [^1]: "Saw a post" means it stayed on screen for half a second.
 
-The team's own use is left out of every metric (via PostHog's "internal and test
-users" filter), 'Setting changes' included.
+# usage 
 
 ```bash
 python posthog-report/report.py           # print the table
