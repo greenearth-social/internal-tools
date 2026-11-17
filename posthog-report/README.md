@@ -1,10 +1,10 @@
 # posthog-report, posts MySky's weekly PostHog numbers to Discord every Monday.
 
-Each number is for one whole week. The week named in the column heading. 
+Each number is for one whole week: the one named in the column heading.
 
 Weeks run Monday to Sunday, US/Pacific.
 
-A like, repost or reply only counts if it was made on a post a MySky feed served to that person, in the feed or after opening the post from it. 
+A like, repost or reply only counts if it was made on a post a MySky feed served to that person, in the feed or after opening the post from it.
 
 | Term in the post    | Meaning                                                     | PostHog definition                                          |
 |---------------------|-------------------------------------------------------------|-------------------------------------------------------------|
