@@ -52,6 +52,7 @@ COUNTS = {
     "Replies": "countIf(event = 'interactionReply')",
     "Show more": "countIf(event = 'requestMore')",
     "Show less": "countIf(event = 'requestLess')",
+    "Setting changes": "countIf(event = 'feedControlChanged')",
 }
 LAST_WEEKS = "{0} >= toStartOfWeek(now(), 1) - INTERVAL {1} WEEK AND {0} < toStartOfWeek(now(), 1)"
 # name -> HogQL returning (week, value); these need more than one pass over the events
@@ -79,7 +80,7 @@ SIDES = [
         "Explore loads",
         "Explore users",
     ],
-    ["Likes", "Reposts", "Replies", "Show more", "Show less"],
+    ["Likes", "Reposts", "Replies", "Show more", "Show less", "Setting changes"],
 ]
 RULE = "  │  "  # between the two tables
 FALL_IS_GOOD = {"Show less"}

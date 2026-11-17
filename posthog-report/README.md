@@ -2,8 +2,8 @@
 
 Posts MySky's weekly PostHog numbers to Discord every Monday.
 
-Every row is about MySky feeds inside the Bluesky app. Weeks run Monday to
-Sunday, US/Pacific. "Saw a post" means it stayed on screen for half a second.
+Every row but the last metric is about MySky feeds inside the Bluesky app.
+Weeks run Monday to Sunday, US/Pacific. "Saw a post" means it stayed on screen for half a second.
 
 | Term in the post   | Meaning                                                    | PostHog definition                                           |
 |--------------------|------------------------------------------------------------|--------------------------------------------------------------|
@@ -19,6 +19,7 @@ Sunday, US/Pacific. "Saw a post" means it stayed on screen for half a second.
 | Replies            | Taps on the reply button, whether or not a reply is posted | `interactionReply` events                                    |
 | Show more          | Taps on "Show more like this"                              | `requestMore` events                                         |
 | Show less          | Taps on "Show less like this"                              | `requestLess` events                                         |
+| Setting changes    | Feed settings changed and saved on the MySky website       | `feedControlChanged` events, one per setting changed          |
 | 8 Weeks            | One bar per week, oldest left, scaled to the row's largest | Not applicable                                               |
 | A date (e.g. 11-09)| The count for the week starting that Monday                | Not applicable                                               |
 | vs Prev            | Percent change from the week before; green good, yellow not| Not applicable                                               |

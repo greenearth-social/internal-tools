@@ -35,6 +35,7 @@ def test_side_has_a_header_then_one_line_per_metric_all_one_width():
         ["Replies", "█▁", "0", "-100%"],
         ["Show", "more", "▁█", "8", "·"],
         ["Show", "less", "▆█", "3", "+50%"],
+        ["Setting", "changes", "██", "10", "+0%"],
     ]
     assert len({len(x) for x in lines}) == 1
 
@@ -73,7 +74,7 @@ def test_change_is_green_when_good_yellow_when_bad_and_plain_when_flat():
     assert report.verdict(8, 0, True) is None
     lines = report.side(ROWS, RIGHT, color=True)
     assert "\x1b[33m" in lines[1] and "\x1b[32m" not in lines[1]  # likes fell
-    assert "\x1b[33m" in lines[-1] and "\x1b[32m" not in lines[-1]  # show less rose
+    assert "\x1b[33m" in lines[-2] and "\x1b[32m" not in lines[-2]  # show less rose
 
 
 def test_a_report_of_large_weeks_fits_in_one_discord_message():
