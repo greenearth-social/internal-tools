@@ -26,6 +26,7 @@ The team's own use is left out of every metric (via PostHog's "internal and test
 | Show more           | Taps on "Show more like this"                               | `requestMore` events                                        |
 | Show less           | Taps on "Show less like this"                               | `requestLess` events                                        |
 | Setting changes     | Feed settings changed and saved on the MySky website        | `feedControlChanged` events, one per setting changed        |
+| Settings users      | People who changed and saved at least one feed setting      | Distinct people with `feedControlChanged`                   |
 | 8 Weeks             | One bar per week, oldest left, scaled to the row's largest  | Not applicable                                              |
 | A date (e.g. 11-09) | The count for the week starting that Monday                 | Not applicable                                              |
 | vs Prev             | Percent change from the week before; green good, yellow not | Not applicable                                              |

@@ -53,6 +53,7 @@ COUNTS = {
     "Show more": "countIf(event = 'requestMore')",
     "Show less": "countIf(event = 'requestLess')",
     "Setting changes": "countIf(event = 'feedControlChanged')",
+    "Settings users": "count(distinct if(event = 'feedControlChanged', person_id, null))",
 }
 # PostHog swaps this for the project's "internal and test users" filter, which leaves the team out.
 TEAM_OUT = "{filters}"
@@ -84,7 +85,7 @@ SIDES = [
         "Explore loads",
         "Explore users",
     ],
-    ["Likes", "Reposts", "Replies", "Show more", "Show less", "Setting changes"],
+    ["Likes", "Reposts", "Replies", "Show more", "Show less", "Setting changes", "Settings users"],
 ]
 RULE = "  │  "  # between the two tables
 FALL_IS_GOOD = {"Show less"}
