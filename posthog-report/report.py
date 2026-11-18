@@ -1,5 +1,5 @@
-"""posthog-report: the last WEEKS whole weeks of MySky as two tables side by side, one row per
-metric: its weeks as a strip of bars, last week's count, and the change from the week before.
+"""posthog-report: the last WEEKS whole weeks of MySky as one table, one row per metric: its
+weeks as a strip of bars, last week's count, and the change from the week before.
 README.md says what each row means.
 
     python report.py           print the table (what would be posted)
@@ -74,21 +74,25 @@ WHERE {LAST_WEEKS.format("began", WEEKS)}
 GROUP BY week""",
 }
 TITLE = "MySky · Weekly"
-# the rows of the left table and of the right one, in the order printed
-SIDES = [
-    [
-        "Weekly active",
-        "Daily active (avg)",
-        "New users",
-        "Feed loads",
-        "Feed users",
-        "Explore loads",
-        "Explore users",
-    ],
-    ["Likes", "Reposts", "Replies", "Show more", "Show less", "Setting changes", "Settings users"],
+# the rows, in the order printed
+METRICS = [
+    "Weekly active",
+    "Daily active (avg)",
+    "New users",
+    "Feed loads",
+    "Feed users",
+    "Explore loads",
+    "Explore users",
+    "Likes",
+    "Reposts",
+    "Replies",
+    "Show more",
+    "Show less",
+    "Setting changes",
+    "Settings users",
 ]
-RULE = "  │  "  # between the two tables
 FALL_IS_GOOD = {"Show less"}
+SMALL = 10  # a change under this many percent gets no colour
 NOTE = "Each histogram is normalized to its own max."
 README = "https://github.com/greenearth-social/internal-tools/tree/main/posthog-report#readme"
 LAST_BAR = "The last bar is the week of {}."  # filled with that week's Monday
@@ -176,17 +180,18 @@ def shown(text: str) -> int:
 
 
 def verdict(new: int, old: int, rise_is_good: bool) -> int | None:
-    """Green for a change in the good direction, yellow for the other, nothing when flat."""
-    if not old or new == old:
+    """Green for a change in the good direction, yellow for the other, nothing when small."""
+    if not old or abs(round(100 * (new - old) / old)) < SMALL:
         return None
     return GREEN if (new > old) == rise_is_good else YELLOW
 
 
-def side(rows: list[Week], names: list[str], color: bool) -> list[str]:
-    """A header and one line per metric, every line the same width on screen."""
+def table(rows: list[Week], color: bool = False) -> list[str]:
+    """A header and one line per metric, with a blank line between rows so the bars of two
+    rows never touch."""
     grid = [["", f"{WEEKS} Weeks", rows[-1][0], "vs Prev"]]
     colours: list[list[int | None]] = [[None] * 4]
-    for name in names:
+    for name in METRICS:
         series = [vals[name] for _, vals in rows]
         new, old = series[-1], series[-2] if len(series) > 1 else 0
         grid.append([name, bars(series), f"{new:,}", change(new, old)])
@@ -200,21 +205,7 @@ def side(rows: list[Week], names: list[str], color: bool) -> list[str]:
         ]
         if color:
             padded = [paint(c, t) for c, t in zip(padded, tints, strict=True)]
-        out.append("  ".join(padded))
-    return out
-
-
-def table(rows: list[Week], color: bool = False) -> list[str]:
-    """The two tables with a rule between them, and a blank line between rows so the bars
-    of two rows never touch."""
-    left, right = (side(rows, names, color) for names in SIDES)
-    height = max(len(left), len(right))
-    blank = " " * shown(left[0])
-    left += [blank] * (height - len(left))
-    right += [""] * (height - len(right))
-    out = []
-    for a, b in zip(left, right, strict=True):
-        out += [(a + RULE + b).rstrip(), (blank + RULE).rstrip()]
+        out += ["  ".join(padded), ""]
     return out[:-1]
 
 
@@ -228,7 +219,7 @@ def frame(title: str, lines: list[str]) -> str:
 
 
 def report(rows: list[Week], color: bool = False) -> str:
-    """The framed tables with the notes under them, plain for a terminal or coloured for Discord."""
+    """The framed table with the notes under them, plain for a terminal or coloured for Discord."""
     notes = [NOTE, LAST_BAR.format(rows[-1][0])]
     return "\n".join([frame(TITLE, table(rows, color)), *(" " * (PAD + 1) + x for x in notes)])
 

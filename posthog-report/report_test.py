@@ -1,7 +1,6 @@
 import report
 
-LEFT, RIGHT = report.SIDES
-NAMES = LEFT + RIGHT
+NAMES = report.METRICS
 ROWS = [
     ("11-02", dict.fromkeys(NAMES, 10) | {"Likes": 40, "Replies": 5, "Show more": 0}),
     ("11-09", dict.fromkeys(NAMES, 10) | {"Likes": 30, "Replies": 0, "Show more": 8}),
@@ -26,32 +25,21 @@ def test_bars_scale_to_the_highest_value_and_stay_flat_when_all_are_zero():
     assert report.bars([0, 0]) == "▁▁"
 
 
-def test_side_has_a_header_then_one_line_per_metric_all_one_width():
-    lines = report.side(ROWS, RIGHT, color=False)
-    assert [x.split() for x in lines] == [
-        ["8", "Weeks", "11-09", "vs", "Prev"],
-        ["Likes", "█▇", "30", "-25%"],
-        ["Reposts", "██", "10", "+0%"],
-        ["Replies", "█▁", "0", "-100%"],
-        ["Show", "more", "▁█", "8", "·"],
-        ["Show", "less", "▆█", "3", "+50%"],
-        ["Setting", "changes", "██", "10", "+0%"],
-        ["Settings", "users", "██", "10", "+0%"],
-    ]
+def test_table_has_a_header_then_one_line_per_metric_all_one_width():
+    lines = report.table(ROWS)
+    assert all(not x for x in lines[1::2])  # a blank line between rows
+    lines = lines[::2]
+    assert lines[0].split() == ["8", "Weeks", "11-09", "vs", "Prev"]
+    assert [x.split()[:-3] for x in lines[1:]] == [n.split() for n in NAMES]
+    assert lines[1 + NAMES.index("Likes")].split() == ["Likes", "█▇", "30", "-25%"]
+    assert lines[1 + NAMES.index("Replies")].split() == ["Replies", "█▁", "0", "-100%"]
+    assert lines[1 + NAMES.index("Show more")].split() == ["Show", "more", "▁█", "8", "·"]
+    assert lines[1 + NAMES.index("Show less")].split() == ["Show", "less", "▆█", "3", "+50%"]
     assert len({len(x) for x in lines}) == 1
 
 
-def test_side_of_a_single_week_has_no_change_to_show():
-    assert [x.split()[-1] for x in report.side(ROWS[:1], LEFT, False)[1:]] == ["·"] * len(LEFT)
-
-
-def test_table_sets_the_sides_either_side_of_one_unbroken_rule():
-    lines = report.table(ROWS)
-    assert len(lines) == 2 * (1 + max(len(LEFT), len(RIGHT))) - 1
-    assert len({x.index("│") for x in lines}) == 1
-    assert lines[2].split("│")[0].split()[:2] == ["Weekly", "active"]
-    assert lines[2].split("│")[1].split()[0] == "Likes"
-    assert lines[-1].split("│")[1].split()[:2] == ["Settings", "users"]
+def test_table_of_a_single_week_has_no_change_to_show():
+    assert [x.split()[-1] for x in report.table(ROWS[:1])[2::2]] == ["·"] * len(NAMES)
 
 
 def test_report_is_the_table_between_two_rules_with_the_notes_under_them():
@@ -66,16 +54,19 @@ def test_colour_changes_nothing_but_the_escapes():
     assert report.ESCAPE.sub("", report.report(ROWS, color=True)) == report.report(ROWS)
 
 
-def test_change_is_green_when_good_yellow_when_bad_and_plain_when_flat():
+def test_change_is_green_when_good_yellow_when_bad_and_plain_when_small():
     assert report.verdict(150, 100, True) == report.GREEN
     assert report.verdict(30, 40, True) == report.YELLOW
     assert report.verdict(3, 2, False) == report.YELLOW
     assert report.verdict(2, 3, False) == report.GREEN
     assert report.verdict(10, 10, True) is None
+    assert report.verdict(109, 100, True) is None
+    assert report.verdict(91, 100, True) is None
+    assert report.verdict(90, 100, True) == report.YELLOW
     assert report.verdict(8, 0, True) is None
-    lines = report.side(ROWS, RIGHT, color=True)
-    assert "\x1b[33m" in lines[1] and "\x1b[32m" not in lines[1]  # likes fell
-    assert "\x1b[33m" in lines[-3] and "\x1b[32m" not in lines[-3]  # show less rose
+    lines = report.table(ROWS, color=True)[::2]
+    assert "\x1b[33m" in lines[8] and "\x1b[32m" not in lines[8]  # likes fell
+    assert "\x1b[33m" in lines[12] and "\x1b[32m" not in lines[12]  # show less rose
 
 
 def test_a_report_of_large_weeks_fits_in_one_discord_message():

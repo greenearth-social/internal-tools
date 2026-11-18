@@ -29,7 +29,7 @@ The team's own use is left out of every metric (via PostHog's "internal and test
 | Settings users      | People who changed and saved at least one feed setting      | Distinct people with `feedControlChanged`                   |
 | 8 Weeks             | One bar per week, oldest left, scaled to the row's largest  | Not applicable                                              |
 | A date (e.g. 11-09) | The count for the week starting that Monday                 | Not applicable                                              |
-| vs Prev             | Percent change from the week before; green good, yellow not | Not applicable                                              |
+| vs Prev             | Percent change from the week before; green good, yellow not, no colour under 10% | Not applicable                                              |
 
 [^1]: "Saw a post" means it stayed on screen for half a second.
 
