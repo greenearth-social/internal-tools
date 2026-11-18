@@ -30,8 +30,7 @@ def with_repos(tmp_path, *repos):
 
 
 @pytest.mark.parametrize(
-    ("bridgeu", "built"),
-    [(False, "seed-firestore-users"), (True, "bridgeu-api bridgeu-graph-init bridgeu-graph-seed")],
+    ("bridgeu", "built"), [(False, "seed-firestore-users"), (True, "bridgeu-api")]
 )
 def test_setup_builds_pulls_and_installs(tmp_path, capsys, bridgeu, built):
     ctx = make_ctx(tmp_path)
@@ -69,7 +68,7 @@ def test_setup_stops_if_the_inference_install_fails(tmp_path):
 # --- seed ----------------------------------------------------------------------
 
 
-def seed_ctx(tmp_path, fail: str = "", running: bool = True, *, bridgeu=False, instance="dev"):
+def seed_ctx(tmp_path, fail: str = "", running: bool = True):
     def respond(argv):
         line = " ".join(argv)
         if fail and line.endswith(fail):
@@ -78,10 +77,7 @@ def seed_ctx(tmp_path, fail: str = "", running: bool = True, *, bridgeu=False, i
             return "api" if running else ""
         return None
 
-    ctx = make_ctx(tmp_path, runner=FakeRunner(respond), instance=instance)
-    set_instance(ctx, instance)
-    if bridgeu:
-        (tmp_path / "bridg-eu" / ".git").mkdir(parents=True)
+    ctx = make_ctx(tmp_path, runner=FakeRunner(respond))
     docker_on_path(ctx, tmp_path)
     fixtures = ctx.devenv / "fixtures" / "data"
     fixtures.mkdir(parents=True)
@@ -104,7 +100,6 @@ def test_seed_backfills_quality_after_likes_before_publishing_aliases_and_restar
     stack.cmd_seed(ctx, [])
 
     assert service_calls(ctx) == [
-        "run --rm seed-rebase python /seedscripts/rebase.py --check",
         "up -d --wait inference",
         "run --rm seed-wipe",
         "run --rm seed-rebase",
@@ -116,88 +111,6 @@ def test_seed_backfills_quality_after_likes_before_publishing_aliases_and_restar
         "up -d --force-recreate api",
     ]
     assert "seed complete (persona: did:plc:p)" in capsys.readouterr().out
-
-
-def test_seed_graphless_fixture_still_loads_graph_after_rebase(tmp_path):
-    """The graph loader must clear old graph data when the new fixture has none."""
-    ctx = seed_ctx(tmp_path, bridgeu=True)
-    assert not (ctx.devenv / "fixtures/data/graph").exists()
-
-    stack.cmd_seed(ctx, [])
-
-    assert service_calls(ctx) == [
-        "run --rm seed-rebase python /seedscripts/rebase.py --check",
-        "up -d --wait bridgeu-postgres",
-        "run --rm --build bridgeu-graph-init",
-        "up -d --wait inference",
-        "run --rm seed-wipe",
-        "run --rm seed-rebase",
-        "run --rm --build bridgeu-graph-seed",
-        "run --rm seed-firestore-users",
-        "run --rm seed-megastream",
-        "run --rm seed-likes",
-        "run --rm seed-quality",
-        "run --rm seed-likes python /seedscripts/load_likes.py --aliases-only",
-        "up -d --force-recreate api",
-    ]
-
-
-def test_seed_invalid_capture_stops_before_wiping_or_touching_postgres(tmp_path, capsys):
-    check = "run --rm seed-rebase python /seedscripts/rebase.py --check"
-    ctx = seed_ctx(tmp_path, fail=check, bridgeu=True)
-
-    with pytest.raises(CommandFailed):
-        stack.cmd_seed(ctx, [])
-
-    assert service_calls(ctx) == [check]
-    assert "seed complete" not in capsys.readouterr().out
-
-
-@pytest.mark.parametrize(
-    "failed_command",
-    ["up -d --wait bridgeu-postgres", "run --rm --build bridgeu-graph-init"],
-)
-def test_seed_graph_database_failure_stops_before_wiping(tmp_path, failed_command):
-    ctx = seed_ctx(tmp_path, fail=failed_command, bridgeu=True)
-
-    with pytest.raises(CommandFailed):
-        stack.cmd_seed(ctx, [])
-
-    calls = service_calls(ctx)
-    assert calls[0] == "run --rm seed-rebase python /seedscripts/rebase.py --check"
-    assert calls[-1] == failed_command
-    assert "run --rm seed-wipe" not in calls
-    assert "run --rm --build bridgeu-graph-seed" not in calls
-
-
-def test_seed_graph_load_failure_stops_before_remaining_loaders(tmp_path, capsys):
-    load = "run --rm --build bridgeu-graph-seed"
-    ctx = seed_ctx(tmp_path, fail=load, bridgeu=True)
-
-    with pytest.raises(CommandFailed):
-        stack.cmd_seed(ctx, [])
-
-    calls = service_calls(ctx)
-    assert calls[-1] == load
-    assert "run --rm seed-firestore-users" not in calls
-    assert "up -d --force-recreate api" not in calls
-    assert "seed complete" not in capsys.readouterr().out
-
-
-def test_seed_dedicated_instance_uses_its_own_graph_and_rebased_files(tmp_path):
-    ctx = seed_ctx(tmp_path, bridgeu=True, instance="alpha")
-
-    stack.cmd_seed(ctx, [])
-
-    graph_calls = [
-        call
-        for call in fake(ctx).calls
-        if call.argv[-1] in ("bridgeu-postgres", "bridgeu-graph-init", "bridgeu-graph-seed")
-    ]
-    assert len(graph_calls) == 3
-    for call in graph_calls:
-        assert call.env["GE_DEV_NAME"] == "ge-alpha"
-        assert call.env["GE_DEV_RUNTIME"] == "./.runtime.alpha"
 
 
 @pytest.mark.parametrize(
@@ -229,12 +142,11 @@ def test_seed_leaves_a_stopped_api_stopped(tmp_path, capsys):
 
 
 def test_a_sharing_instance_cannot_seed(tmp_path):
-    ctx = seed_ctx(tmp_path, bridgeu=True)
+    ctx = seed_ctx(tmp_path)
     ctx.instance = "alpha"
     ctx.env["GE_DEV_SHARE_ES"] = "1"
     with pytest.raises(Die, match="read-only here"):
         stack.cmd_seed(ctx, [])
-    assert not fake(ctx).compose_lines()
 
 
 # --- BridgEU's key ------------------------------------------------------------
@@ -347,7 +259,7 @@ def up_ctx(tmp_path, monkeypatch, *, bridgeu=True, instance="dev", fail=""):
     return ctx
 
 
-def test_up_waits_for_graph_database_and_migrates_before_starting_apps(tmp_path, monkeypatch):
+def test_up_waits_for_postgres_before_starting_apps(tmp_path, monkeypatch):
     ctx = up_ctx(tmp_path, monkeypatch)
 
     stack.cmd_up(ctx, [])
@@ -355,15 +267,11 @@ def test_up_waits_for_graph_database_and_migrates_before_starting_apps(tmp_path,
     calls = fake(ctx).compose_lines()
     ready = next(call for call in calls if call.startswith("up -d --remove-orphans --wait "))
     assert "bridgeu-postgres" in ready.split()
-    migrated = "run --rm --build bridgeu-graph-init"
     started = "up -d api frontend bridgeu-api"
-    assert calls.index(ready) < calls.index(migrated) < calls.index(started)
-    assert calls.count(migrated) == 1
+    assert calls.index(ready) < calls.index(started)
 
 
-def test_up_without_bridgeu_stops_its_services_and_skips_graph_initialization(
-    tmp_path, monkeypatch
-):
+def test_up_without_bridgeu_stops_its_services(tmp_path, monkeypatch):
     ctx = up_ctx(tmp_path, monkeypatch, bridgeu=False)
 
     stack.cmd_up(ctx, [])
@@ -371,38 +279,27 @@ def test_up_without_bridgeu_stops_its_services_and_skips_graph_initialization(
     calls = fake(ctx).compose_lines()
     assert "stop bridgeu-api bridgeu-postgres" in calls
     assert "up -d api frontend" in calls
-    assert all("bridgeu-graph-init" not in call for call in calls)
     assert all("bridgeu-postgres" not in call for call in calls if call.startswith("up "))
 
 
-def test_up_stops_before_apps_if_graph_migration_fails(tmp_path, monkeypatch, capsys):
-    migrated = "run --rm --build bridgeu-graph-init"
-    ctx = up_ctx(tmp_path, monkeypatch, fail=migrated)
+def test_up_stops_before_apps_if_database_startup_fails(tmp_path, monkeypatch, capsys):
+    ready = (
+        "up -d --remove-orphans --wait firebase dev-auth bridgeu-postgres "
+        "elasticsearch inference perspective-stub"
+    )
+    ctx = up_ctx(tmp_path, monkeypatch, fail=ready)
 
     with pytest.raises(CommandFailed) as exc:
         stack.cmd_up(ctx, [])
 
     assert exc.value.returncode == 23
     calls = fake(ctx).compose_lines()
-    assert calls[-1] == migrated
+    assert calls[-1] == ready
     assert not any(call.startswith("up ") and "bridgeu-api" in call.split() for call in calls)
     assert "environment is up" not in capsys.readouterr().out
 
 
-def test_up_rechecks_graph_migrations_on_every_start(tmp_path, monkeypatch):
-    ctx = up_ctx(tmp_path, monkeypatch)
-
-    for _ in range(2):
-        fake(ctx).calls.clear()
-        stack.cmd_up(ctx, [])
-        calls = fake(ctx).compose_lines()
-        assert calls.count("run --rm --build bridgeu-graph-init") == 1
-        assert calls.index("run --rm --build bridgeu-graph-init") < calls.index(
-            "up -d api frontend bridgeu-api"
-        )
-
-
-def test_up_es_sharer_still_starts_and_migrates_its_own_graph_database(tmp_path, monkeypatch):
+def test_up_es_sharer_still_starts_its_own_postgres(tmp_path, monkeypatch):
     ctx = up_ctx(tmp_path, monkeypatch, instance="alpha")
 
     stack.cmd_up(ctx, [])
@@ -412,12 +309,11 @@ def test_up_es_sharer_still_starts_and_migrates_its_own_graph_database(tmp_path,
     assert "bridgeu-postgres" in ready.split()
     assert "elasticsearch" not in ready.split()
     assert "run --rm es-init" not in calls
-    migrated = "run --rm --build bridgeu-graph-init"
     started = "up -d --no-deps api frontend bridgeu-api"
-    assert calls.index(ready) < calls.index(migrated) < calls.index(started)
-    migration = next(call for call in fake(ctx).calls if call.argv[-1] == "bridgeu-graph-init")
-    assert migration.env["GE_DEV_NAME"] == "ge-alpha"
-    assert migration.env["GE_DEV_RUNTIME"] == "./.runtime.alpha"
+    assert calls.index(ready) < calls.index(started)
+    startup = next(call for call in fake(ctx).calls if "bridgeu-postgres" in call.argv)
+    assert startup.env["GE_DEV_NAME"] == "ge-alpha"
+    assert startup.env["GE_DEV_RUNTIME"] == "./.runtime.alpha"
     assert ctx.get("GE_DEV_ES_API_KEY") == "owner-key"
     assert ctx.port("BRIDGEU_POSTGRES") == 55442
 

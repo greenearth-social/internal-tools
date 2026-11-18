@@ -334,17 +334,6 @@ samples a real cluster through a port-forward; `--source megastream-files`
 builds from megastream archives with a synthesized like graph, no credentials
 needed. Output goes to `fixtures/data/` (gitignored).
 
-For a production sample, `--graph-ssh-host <host>` optionally captures
-BridgEU's current outgoing follows for the fixture's likers, personas and dev
-accounts into `graph/`. Post authors and follow targets are retained as actor
-records; their own follows are captured only if they are also selected users.
-An existing production sample can also be extended with
-`fixtures/generate_graph.py`; see the [graph capture runbook](docs/runbooks.md#capture-a-graph-alongside-a-fixture).
-This is a separate capture time from the posts and likes, recorded in a graph
-manifest tied to the exact base files. With BridgEU checked out, `devctl seed`
-rebases and loads these files into local Postgres. Ordinary `fetch-fixture`
-and `seed` need no production access.
-
 The full procedure — generating, sanity-checking, and publishing a fixture
 for the team — is in [docs/runbooks.md](docs/runbooks.md).
 
@@ -569,32 +558,21 @@ it needs a public tunnel, not just a key.
 
 ## Seeding and time rebasing
 
-`devctl seed` checks the original fixture before wiping any seeded data. If
-an optional graph capture is present, its files and base-fixture fingerprints
-must validate. With BridgEU checked out, the command also waits for its local
-Postgres database and applies the current graph migrations before loading.
-It then runs these one-shot steps:
+`devctl seed` wipes the previous seed, then runs these one-shot steps:
 
-1. **seed-rebase** — copies fixtures into `.runtime/seed/` with post and like
-   timestamps shifted forward by one uniform delta so the capture window ends
+1. **seed-rebase** — copies fixtures into `.runtime/seed/` with every
+   timestamp shifted forward by one uniform delta so the capture window ends
    an hour before now. Code anchored to `now` (recency windows, popularity
    decay) sees a full window of data; relative structure (inter-post spacing,
    like-after-post ordering) is preserved exactly.
-2. **bridgeu-graph-seed**, when BridgEU is checked out — replaces the local
-   graph actors, follows and likes in one transaction. It uses the same
-   rebased likes as Elasticsearch. Actor and follow timestamps use a separate
-   delta from the graph capture's finish time to the same effective window
-   end, since graph capture can happen later than the post/like capture.
-   A fixture without `graph/` clears previous graph data instead of leaving
-   it paired with unrelated posts.
-3. **seed-megastream** — runs the real `megastream_ingest` binary from your
+2. **seed-megastream** — runs the real `megastream_ingest` binary from your
    `ingex` checkout (`go run`, byte-identical code path to prod) against the
    rebased fixtures. Post-tower embeddings come from whichever inference
    service is running, which is why switching between them needs a re-seed.
-4. **seed-likes** — bulk-loads likes (prod document identity: `_id=at_uri`,
+3. **seed-likes** — bulk-loads likes (prod document identity: `_id=at_uri`,
    routing=`author_did`) and applies per-post `like_count`, which the
    popularity generator ranks on.
-5. **seed-quality** — runs ingex's `backfill_quality_index` to copy eligible
+4. **seed-quality** — runs ingex's `backfill_quality_index` to copy eligible
    posts and their tower vectors into `posts-quality-*`. It uses ingex's
    quality threshold and retention defaults (currently 10 likes and 14 days).
    The seed then publishes and refreshes `posts_recent_quality`, the alias
@@ -602,6 +580,7 @@ It then runs these one-shot steps:
    alias queryable even when no seeded posts qualify.
 
 Fixture personas are also written to the Firestore emulator after rebasing.
+`devctl seed` does not yet load or reset BridgEU's Postgres database.
 
 A seeded window drifts stale as real time moves on: the api's recency windows
 are anchored to *now* (popularity looks back 24h), so from about a day after a
@@ -916,9 +895,8 @@ environment keeps that boundary instead of flattening it:
 
 It's optional, because the repo is private to another org. With the checkout
 next to the others (`git clone git@github.com:eurosky-social/bridg-eu.git`),
-`devctl up` starts `bridgeu-api` and `bridgeu-postgres` too, and applies the
-graph schema migrations; without the checkout devctl notes it and runs mysky
-alone.
+`devctl up` starts `bridgeu-api` and `bridgeu-postgres` too; without the
+checkout devctl notes it and runs mysky alone.
 
 The API lives in `bridg-eu/api/`; the container mounts the whole checkout at
 `/app` and runs commands from `/app/api`. Dependencies are cached in a named
@@ -940,14 +918,11 @@ curl http://127.0.0.1:8400/health
 `GE_DEV_BRIDGEU_HOSTNAME` and `GE_DEV_BRIDGEU_PUBLISHER_DID` in
 `devenv.local.env` override them.
 
-### BridgEU graph database
+### BridgEU Postgres database
 
 `bridgeu-postgres` runs PostgreSQL 18 on the `bridgeu` network, with database,
-user and password all `graph`. `devctl setup` pulls PostgreSQL and builds
-`bridgeu-graph-init` from `bridg-eu/graph/Dockerfile`, plus the graph seed
-image containing Python and `psql`. Each `devctl up` waits
-for the database to be healthy, rebuilds the migration image using Docker's
-cache, then runs `ingester migrate` to apply the checked-out graph schema.
+user and password all `graph`. `devctl setup` pulls PostgreSQL. Each
+`devctl up` waits for the database to be healthy before starting the APIs.
 
 The default host address is `127.0.0.1:55432`; override its base port with
 `GE_DEV_PORT_BRIDGEU_POSTGRES`. BridgEU containers use
@@ -962,23 +937,9 @@ psql "postgres://graph:graph@127.0.0.1:$(./devctl ports bridgeu-postgres)/graph?
 
 Each instance has its own database volume, including named instances that
 share `dev`'s Elasticsearch. `devctl down` preserves it; `devctl nuke`
-removes it for the selected instance. `devctl seed` loads an optional graph
-capture with new local actor IDs, resolving every follow and like endpoint
-by DID. It replaces raw graph data, including any previous verifications,
-reposts and ingestion cursor, while preserving schema migrations. Graph
-replacement rolls back on failure; seeding does not merge with old data.
-
-Actors missing from the production capture are kept as placeholders with
-status `unknown` and `first_seen_at` set to the rebased effective window end.
-Likes have sequence `0` because the ES fixture has no Jetstream sequence;
-the ingestion cursor remains empty. The seed service uses a fixed local
-connection and reads mounted files only: it neither connects to production
-nor starts live graph ingestion or export.
-
-The existing shared-Elasticsearch restriction still applies to `devctl
-seed`. To seed a named instance's graph, start that instance with
-`--dedicated-es`; graph-only seeding for an Elasticsearch sharer is not
-provided. Without the BridgEU checkout, ordinary seeding skips graph loading.
+removes it for the selected instance. A fresh volume contains the database
+without application tables. Schema creation and DA-score seeding are separate
+steps; no graph migrations, ingestion or export run here.
 
 ### BridgEU feeds
 

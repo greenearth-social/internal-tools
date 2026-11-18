@@ -38,43 +38,6 @@ services:
       timeout: 3s
       retries: 20
 
-  # Apply the graph checkout's migrations without connecting to Jetstream.
-  # devctl runs this after Postgres is healthy; it exits once the schema is current.
-  bridgeu-graph-init:
-    profiles: [tools]
-    build:
-      context: ${GE_DEV_REPO_ROOT:-../..}/bridg-eu/graph
-    command: ["ingester", "migrate"]
-    environment:
-      - GRAPH_DATABASE_URL=postgres://graph:graph@bridgeu-postgres:5432/graph?sslmode=disable
-    depends_on:
-      bridgeu-postgres:
-        condition: service_healthy
-    networks:
-      - bridgeu
-    healthcheck:
-      disable: true
-
-  # Load the rebased companion graph into this instance's local database.
-  # The loader fixes the connection target; no production configuration is read.
-  bridgeu-graph-seed:
-    profiles: [tools]
-    build: ./images/graph-seed
-    command: ["python3", "/seedscripts/load_graph.py"]
-    environment:
-      - PYTHONUNBUFFERED=1
-      - PYTHONPATH=/fixturetools
-    depends_on:
-      bridgeu-postgres:
-        condition: service_healthy
-    networks:
-      - bridgeu
-    volumes:
-      - ./seed:/seedscripts:ro
-      - ./fixtures:/fixturetools:ro
-      - ./fixtures/data:/fixtures:ro
-      - ${GE_DEV_RUNTIME:-./.runtime}:/runtime:ro
-
   bridgeu-api:
     build: ./images/pydev
     working_dir: /app/api

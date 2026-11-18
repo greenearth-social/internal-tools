@@ -567,10 +567,8 @@ services:
     command: ["python", "/seedscripts/rebase.py"]
     environment:
       - PYTHONUNBUFFERED=1
-      - PYTHONPATH=/fixturetools
     volumes:
       - ./seed:/seedscripts:ro
-      - ./fixtures:/fixturetools:ro
       - ./fixtures/data:/fixtures:ro
       - ${GE_DEV_RUNTIME:-./.runtime}:/runtime
 

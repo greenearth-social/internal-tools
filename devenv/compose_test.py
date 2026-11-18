@@ -112,52 +112,6 @@ def test_bridgeu_postgres_is_local_and_its_data_belongs_to_the_instance():
     assert postgres["healthcheck"]["test"] == ["CMD-SHELL", "pg_isready -U graph -d graph"]
 
 
-def test_bridgeu_graph_init_migrates_the_local_database_without_starting_ingestion():
-    services = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["services"]
-    init = services["bridgeu-graph-init"]
-
-    assert init["profiles"] == ["tools"]
-    assert init["build"] == {"context": "${GE_DEV_REPO_ROOT:-../..}/bridg-eu/graph"}
-    assert init["command"] == ["ingester", "migrate"]
-    assert init["environment"] == [
-        "GRAPH_DATABASE_URL=postgres://graph:graph@bridgeu-postgres:5432/graph?sslmode=disable"
-    ]
-    # Do not inherit a checkout's production connection or Jetstream configuration.
-    assert "env_file" not in init
-    assert init["depends_on"] == {"bridgeu-postgres": {"condition": "service_healthy"}}
-    assert init["healthcheck"] == {"disable": True}
-    assert "restart" not in init
-
-
-def test_graph_seed_reads_fixture_files_without_inheriting_connection_configuration():
-    services = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["services"]
-    seed = services["bridgeu-graph-seed"]
-
-    assert seed["profiles"] == ["tools"]
-    assert seed["build"] == "./images/graph-seed"
-    assert seed["command"] == ["python3", "/seedscripts/load_graph.py"]
-    assert set(seed["environment"]) == {"PYTHONUNBUFFERED=1", "PYTHONPATH=/fixturetools"}
-    assert "env_file" not in seed
-    assert seed["depends_on"] == {"bridgeu-postgres": {"condition": "service_healthy"}}
-    assert seed["networks"] == ["bridgeu"]
-    assert set(seed["volumes"]) == {
-        "./seed:/seedscripts:ro",
-        "./fixtures:/fixturetools:ro",
-        "./fixtures/data:/fixtures:ro",
-        "${GE_DEV_RUNTIME:-./.runtime}:/runtime:ro",
-    }
-
-
-def test_rebase_can_validate_original_graph_before_writing_seed_files():
-    services = yaml.safe_load(COMPOSE_FILE.read_text())["services"]
-    rebase = services["seed-rebase"]
-
-    assert "PYTHONPATH=/fixturetools" in rebase["environment"]
-    assert "./fixtures:/fixturetools:ro" in rebase["volumes"]
-    assert "./fixtures/data:/fixtures:ro" in rebase["volumes"]
-    assert "${GE_DEV_RUNTIME:-./.runtime}:/runtime" in rebase["volumes"]
-
-
 def test_bridgeu_key_issuer_is_a_mysky_side_tool():
     """The key lives in the api's Firestore, so the job writing it is mysky's."""
     mysky = yaml.safe_load(COMPOSE_FILE.read_text())["services"]

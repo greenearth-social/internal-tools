@@ -8,10 +8,8 @@ import json
 import re
 import sqlite3
 import struct
-import sys
 import zipfile
 import zlib
-from types import SimpleNamespace
 
 import generate_sample as gs
 import pytest
@@ -268,28 +266,6 @@ def test_regenerating_into_a_directory_clears_old_chunks(tmp_path, monkeypatch):
     gs.write_fixture_set(tmp_path, "prod-es", _posts(2), [], [], [], *args)
 
     assert len(list(tmp_path.glob("*.db.zip"))) == 1
-
-
-def test_regenerating_clears_graph_captured_for_the_old_fixture(tmp_path):
-    graph_dir = tmp_path / "graph"
-    graph_dir.mkdir()
-    (graph_dir / "manifest.json").write_text('{"base_fixture": "old"}')
-    gs.write_jsonl_gz(graph_dir / "actors.jsonl.gz", [{"did": "did:plc:old"}])
-
-    gs.write_fixture_set(
-        tmp_path,
-        "prod-es",
-        _posts(1),
-        [],
-        [],
-        [],
-        dt.datetime(2026, 7, 22, tzinfo=dt.UTC),
-        dt.datetime(2026, 7, 23, tzinfo=dt.UTC),
-        0,
-    )
-
-    assert not graph_dir.exists()
-    assert json.loads((tmp_path / "manifest.json").read_text())["counts"]["posts"] == 1
 
 
 # --------------------------------------------------------------------------
@@ -731,159 +707,3 @@ def test_megastream_mode_gives_dev_users_a_synthesized_history(tmp_path, monkeyp
     assert dev_row["did"] == DEV_DID
     assert dev_row["likes"] >= args.min_likes
     assert DEV_DID not in [persona["did"] for persona in manifest["personas"]]
-
-
-@pytest.mark.parametrize("source", ["prod-es", "megastream-files"])
-def test_main_does_not_capture_graph_without_opt_in(tmp_path, monkeypatch, source):
-    calls = []
-
-    def graph_not_requested(*args, **kwargs):
-        pytest.fail("graph capture must be explicitly enabled")
-
-    monkeypatch.setitem(
-        sys.modules, "generate_graph", SimpleNamespace(extract_graph=graph_not_requested)
-    )
-    monkeypatch.setitem(
-        sys.modules, "graph_source", SimpleNamespace(SshGraphSource=graph_not_requested)
-    )
-    monkeypatch.setattr(gs, "run_prod_es", lambda args, out, users: calls.append(("prod-es", out)))
-    monkeypatch.setattr(
-        gs, "run_megastream_files", lambda args, out, users: calls.append(("megastream-files", out))
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["generate_sample.py", "--source", source, "--out", str(tmp_path), "--no-dev-users"],
-    )
-
-    gs.main()
-
-    assert calls == [(source, tmp_path)]
-
-
-@pytest.mark.parametrize(
-    ("extra_args", "database", "batch_size", "page_size", "timeout"),
-    [
-        ([], "bridgeu", 100, 10_000, 30_000),
-        (
-            [
-                "--graph-database",
-                "custom",
-                "--graph-batch-size",
-                "25",
-                "--graph-page-size",
-                "500",
-                "--graph-statement-timeout-ms",
-                "15000",
-            ],
-            "custom",
-            25,
-            500,
-            15_000,
-        ),
-    ],
-)
-def test_main_captures_graph_after_writing_base_fixture(
-    tmp_path, monkeypatch, extra_args, database, batch_size, page_size, timeout
-):
-    calls = []
-    source = object()
-
-    def graph_source(**kwargs):
-        calls.append(("source", kwargs))
-        return source
-
-    def extract_graph(*args):
-        calls.append(("graph", args))
-
-    monkeypatch.setitem(sys.modules, "generate_graph", SimpleNamespace(extract_graph=extract_graph))
-    monkeypatch.setitem(sys.modules, "graph_source", SimpleNamespace(SshGraphSource=graph_source))
-    monkeypatch.setattr(gs, "run_prod_es", lambda args, out, users: calls.append(("base", out)))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "generate_sample.py",
-            "--out",
-            str(tmp_path),
-            "--no-dev-users",
-            "--graph-ssh-host",
-            "graph-host",
-            *extra_args,
-        ],
-    )
-
-    gs.main()
-
-    assert calls == [
-        ("base", tmp_path),
-        ("source", {"host": "graph-host", "database": database, "statement_timeout_ms": timeout}),
-        ("graph", (tmp_path, source, batch_size, page_size)),
-    ]
-
-
-def test_main_does_not_capture_graph_after_failed_base_generation(tmp_path, monkeypatch):
-    def fail_generation(*args):
-        raise RuntimeError("base fixture failed")
-
-    def graph_not_ready(*args, **kwargs):
-        pytest.fail("graph capture must wait for successful base generation")
-
-    monkeypatch.setattr(gs, "run_prod_es", fail_generation)
-    monkeypatch.setitem(
-        sys.modules, "graph_source", SimpleNamespace(SshGraphSource=graph_not_ready)
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "generate_sample.py",
-            "--out",
-            str(tmp_path),
-            "--no-dev-users",
-            "--graph-ssh-host",
-            "graph-host",
-        ],
-    )
-
-    with pytest.raises(RuntimeError, match="base fixture failed"):
-        gs.main()
-
-
-def test_main_rejects_graph_capture_for_synthetic_data_before_loading_users(monkeypatch, capsys):
-    def no_contacts(*args):
-        pytest.fail("invalid graph options must fail before resolving users or contacting sources")
-
-    monkeypatch.setattr(gs, "load_dev_users", no_contacts)
-    monkeypatch.setattr(gs, "run_megastream_files", no_contacts)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "generate_sample.py",
-            "--source",
-            "megastream-files",
-            "--graph-ssh-host",
-            "graph-host",
-        ],
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        gs.main()
-
-    assert exc.value.code == 2
-    assert "--graph-ssh-host requires --source prod-es" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize(
-    "flag", ["--graph-batch-size", "--graph-page-size", "--graph-statement-timeout-ms"]
-)
-@pytest.mark.parametrize("value", ["0", "-1"])
-def test_main_rejects_nonpositive_graph_options(monkeypatch, capsys, flag, value):
-    monkeypatch.setattr(sys, "argv", ["generate_sample.py", flag, value])
-
-    with pytest.raises(SystemExit) as exc:
-        gs.main()
-
-    assert exc.value.code == 2
-    assert f"argument {flag}: must be a positive integer" in capsys.readouterr().err

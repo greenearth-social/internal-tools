@@ -7,7 +7,6 @@ Produces, in fixtures/data/:
 - likes.jsonl.gz        — like documents (LikeDoc schema)
 - like_counts.jsonl.gz  — per-post like_count to apply after ingest
 - manifest.json         — window, counts, dev personas, generation metadata
-- graph/                — optional current follow graph for the fixture's DIDs
 
 Two source modes:
 
@@ -32,13 +31,6 @@ Two source modes:
       frontend as yourself gives a personalized feed instead of an empty one;
     - only posts with MiniLM embeddings (post_similarity / two_tower need
       them), keeping the popularity head and the long tail alike.
-
-    --graph-ssh-host also captures current active outgoing follows for the
-    fixture's likers, personas and dev accounts from BridgEU's Postgres after
-    writing the base fixture. Post authors and follow targets are retained
-    as actors without expanding their follows unless they are selected users
-    too. This uses SSH/sudo access on that host; ordinary generation does not
-    contact the graph database.
 
 --source megastream-files
     Builds the fixture from existing megastream .db.zip files (default: the
@@ -83,7 +75,6 @@ import http.client
 import json
 import os
 import random
-import shutil
 import sqlite3
 import ssl
 import struct
@@ -345,11 +336,6 @@ def write_fixture_set(
     dev_users: list[dict] | None = None,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Graph captures refer to the exact base files, so replacing those files
-    # invalidates an earlier graph even when this run does not capture one.
-    graph_dir = out_dir / "graph"
-    if graph_dir.exists():
-        shutil.rmtree(graph_dir)
     for stale in out_dir.glob("*.db.zip"):
         stale.unlink()
 
@@ -865,13 +851,6 @@ def run_megastream_files(args: argparse.Namespace, out_dir: Path, dev_users: lis
 # --------------------------------------------------------------------------
 
 
-def positive_int(value: str) -> int:
-    number = int(value)
-    if number <= 0:
-        raise argparse.ArgumentTypeError("must be a positive integer")
-    return number
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     parser.add_argument("--source", choices=["prod-es", "megastream-files"], default="prod-es")
@@ -894,14 +873,6 @@ def main() -> None:
     # sample window to add up to anything. Prod keeps likes and posts for 60
     # days, which bounds how far back this can usefully reach.
     parser.add_argument("--dev-user-lookback-days", type=int, default=30)
-    parser.add_argument(
-        "--graph-ssh-host",
-        help="capture follows for fixture likers/personas/dev users via SSH/sudo on this host",
-    )
-    parser.add_argument("--graph-database", default="bridgeu")
-    parser.add_argument("--graph-batch-size", type=positive_int, default=100)
-    parser.add_argument("--graph-page-size", type=positive_int, default=10_000)
-    parser.add_argument("--graph-statement-timeout-ms", type=positive_int, default=30_000)
     # megastream-files options
     parser.add_argument(
         "--input",
@@ -925,24 +896,12 @@ def main() -> None:
         help="don't mix the dev team's own accounts into the sample",
     )
     args = parser.parse_args()
-    if args.graph_ssh_host and args.source != "prod-es":
-        parser.error("--graph-ssh-host requires --source prod-es")
 
     dev_users = [] if args.no_dev_users else load_dev_users(Path(args.dev_users).expanduser())
 
     out_dir = Path(args.out).expanduser()
     if args.source == "prod-es":
         run_prod_es(args, out_dir, dev_users)
-        if args.graph_ssh_host:
-            from generate_graph import extract_graph
-            from graph_source import SshGraphSource
-
-            source = SshGraphSource(
-                host=args.graph_ssh_host,
-                database=args.graph_database,
-                statement_timeout_ms=args.graph_statement_timeout_ms,
-            )
-            extract_graph(out_dir, source, args.graph_batch_size, args.graph_page_size)
     else:
         run_megastream_files(args, out_dir, dev_users)
 

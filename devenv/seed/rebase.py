@@ -2,9 +2,9 @@
 
 Replaying a stale capture window verbatim would break everything anchored to
 "now" (recency filters, popularity decay, candidate windows). This script
-copies the fixtures from /fixtures into /runtime/seed with post and like
-timestamps shifted forward by one uniform delta chosen so the fixture window
-ends one hour before now:
+copies the fixtures from /fixtures into /runtime/seed with every timestamp
+shifted forward by one uniform delta chosen so the fixture window ends one
+hour before now:
 
     delta = (now_utc - 1h) - manifest.window_end
 
@@ -21,9 +21,6 @@ What gets shifted:
   (`message.time_us`, `message.commit.record.createdAt`), and the filename
   timestamp (the spooler orders/filters files by it).
 - likes.jsonl.gz: `created_at` / `indexed_at` per like.
-- graph/: actor and follow timestamps use a separate shift, aligning the
-  graph capture's end to the rebased post window's end. The graph can be
-  newer than the post fixture, so its shift may be negative.
 - like_counts.jsonl.gz: copied unchanged (no timestamps).
 - manifest.json: copied with a `rebased` block recording the shift.
 
@@ -36,10 +33,8 @@ also clears megastream_ingest's cursor state file so re-seeds re-process.
 Runs on a stock python image; stdlib only.
 """
 
-import argparse
 import datetime as dt
 import gzip
-import hashlib
 import json
 import re
 import shutil
@@ -48,11 +43,6 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path
-
-# In a checkout the validator is a sibling script; the seed container mounts
-# the same helpers at /fixturetools and supplies that directory on PYTHONPATH.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fixtures"))
-from graph_fixture import validate_graph_fixture  # noqa: E402
 
 FIXTURES_DIR = Path("/fixtures")
 OUT_DIR = Path("/runtime/seed")
@@ -168,48 +158,7 @@ def rebase_jsonl(src: Path, dest: Path, delta: dt.timedelta, fields: tuple[str, 
     return count
 
 
-def rebase_graph(
-    src_dir: Path, dest_dir: Path, effective_end: dt.datetime, seeded_at: dt.datetime
-) -> None:
-    """Rebase a validated graph capture while sharing the rebased likes file."""
-    source = src_dir / "graph"
-    if not source.exists():
-        return
-    manifest = json.loads((source / "manifest.json").read_text())
-    delta = effective_end - parse_iso(manifest["capture_finished_at"])
-    destination = dest_dir / "graph"
-    destination.mkdir(parents=True, exist_ok=True)
-    files_sha256 = {}
-    for name, fields in (
-        ("actors", ("status_at", "first_seen_at")),
-        ("follows", ("created_at", "indexed_at", "deleted_at")),
-    ):
-        count = rebase_jsonl(
-            source / f"{name}.jsonl.gz", destination / f"{name}.jsonl.gz", delta, fields
-        )
-        with (destination / f"{name}.jsonl.gz").open("rb") as stream:
-            files_sha256[f"{name}.jsonl.gz"] = hashlib.file_digest(stream, "sha256").hexdigest()
-        print(f"  graph/{name}.jsonl.gz: {count} rows rebased")
-    with (dest_dir / "likes.jsonl.gz").open("rb") as stream:
-        likes_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
-    # base_files remains the original capture's provenance. Payload hashes
-    # bind the derived graph and shared likes to the exact files loaders read.
-    manifest["rebased"] = {
-        "delta_seconds": delta.total_seconds(),
-        "seeded_at": seeded_at.isoformat(),
-        "effective_capture_finished_at": effective_end.isoformat(),
-        "likes_sha256": likes_sha256,
-        "files_sha256": files_sha256,
-    }
-    (destination / "manifest.json").write_text(json.dumps(manifest, indent=2))
-
-
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--check", action="store_true", help="validate graph inputs without writing"
-    )
-    args = parser.parse_args(argv)
+def main() -> None:
     manifest_path = FIXTURES_DIR / "manifest.json"
     if not manifest_path.exists():
         sys.exit(
@@ -217,12 +166,6 @@ def main(argv: list[str] | None = None) -> None:
             "Generate one with fixtures/generate_sample.py — see devenv/README.md."
         )
     manifest = json.loads(manifest_path.read_text())
-    failures = validate_graph_fixture(FIXTURES_DIR)
-    if failures:
-        sys.exit("FATAL: graph fixture validation failed: " + "; ".join(failures))
-    if args.check:
-        print("Fixture graph validation passed")
-        return
 
     now = dt.datetime.now(dt.UTC)
     window_end = parse_iso(manifest["window_end"])
@@ -268,7 +211,6 @@ def main(argv: list[str] | None = None) -> None:
     if counts_src.exists():
         shutil.copyfile(counts_src, OUT_DIR / "like_counts.jsonl.gz")
 
-    rebase_graph(FIXTURES_DIR, OUT_DIR, window_end + delta, now)
     manifest["rebased"] = {
         "delta_seconds": delta_seconds,
         "seeded_at": now.isoformat(),

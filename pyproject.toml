@@ -44,7 +44,7 @@ include = ["velocity", "devenv"]
 # extraPaths are searched before site-packages — so `import app` keeps meaning
 # dev-auth's app.py even when the shell has a sibling repo's virtualenv active
 # (the api installs itself editable under exactly that name).
-extraPaths = ["devenv", "devenv/firebase", "devenv/dev-auth", "devenv/fixtures"]
+extraPaths = ["devenv", "devenv/firebase", "devenv/dev-auth"]
 # Same exclusion as ruff: notebook cells re-import and shadow freely.
 exclude = ["velocity/notebooks", "**/__pycache__", "devenv/.venv-devctl"]
 pythonVersion = "3.13"

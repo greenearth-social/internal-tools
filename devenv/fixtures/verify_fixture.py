@@ -35,8 +35,6 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-from graph_fixture import validate_graph_fixture
-
 PLC_DIRECTORY = "https://plc.directory"
 PERSONAS_TO_CHECK = 5
 
@@ -132,7 +130,6 @@ def main() -> int:
     d: Path = args.fixture_dir
     failures: list[str] = []
     warnings: list[str] = []
-    failures.extend(validate_graph_fixture(d))
 
     manifest_path = d / "manifest.json"
     if not manifest_path.exists():
