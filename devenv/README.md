@@ -922,7 +922,14 @@ curl http://127.0.0.1:8400/health
 
 `bridgeu-postgres` runs PostgreSQL 18 on the `bridgeu` network, with database,
 user and password all `graph`. `devctl setup` pulls PostgreSQL. Each
-`devctl up` waits for the database to be healthy before starting the APIs.
+`devctl up` waits for the database to be healthy, then runs `bridgeu-db-init`
+to apply `bridg-eu/db/001_da_post_scores.sql` before starting the APIs. The
+table definition lives in the BridgEU checkout; applying it again preserves
+existing rows. A SQL error stops startup before the APIs are started.
+
+`bridgeu-api` receives `BRIDGEU_DATABASE_URL` pointing at this instance's
+local database. This overrides any value in the checkout's `.env` and stays
+local even with `--live mysky`.
 
 The default host address is `127.0.0.1:55432`; override its base port with
 `GE_DEV_PORT_BRIDGEU_POSTGRES`. BridgEU containers use
@@ -938,8 +945,8 @@ psql "postgres://graph:graph@127.0.0.1:$(./devctl ports bridgeu-postgres)/graph?
 Each instance has its own database volume, including named instances that
 share `dev`'s Elasticsearch. `devctl down` preserves it; `devctl nuke`
 removes it for the selected instance. A fresh volume contains the database
-without application tables. Schema creation and DA-score seeding are separate
-steps; no graph migrations, ingestion or export run here.
+and an empty `da_post_scores` table after `devctl up`. `devctl seed` does not
+yet populate DA scores; no graph migrations, ingestion or export run here.
 
 ### BridgEU feeds
 

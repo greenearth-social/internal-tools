@@ -33,10 +33,32 @@ services:
       # Project-scoped: down preserves the database; nuke removes this instance's data.
       - bridgeu_pgdata:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U graph -d graph"]
+      # The image's temporary initialization server accepts Unix sockets
+      # only. Wait for TCP so other containers can connect too.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U graph -d graph"]
       interval: 5s
       timeout: 3s
       retries: 20
+
+  # Apply the serving schema from the bridg-eu checkout on every `devctl up`,
+  # including existing volumes. The SQL is idempotent and preserves rows.
+  bridgeu-db-init:
+    image: postgres:18
+    profiles: ["tools"]
+    depends_on:
+      bridgeu-postgres:
+        condition: service_healthy
+    command:
+      - psql
+      - -X
+      - --set=ON_ERROR_STOP=1
+      - --single-transaction
+      - --dbname=postgresql://graph:graph@bridgeu-postgres:5432/graph?sslmode=disable
+      - --file=/schema/001_da_post_scores.sql
+    networks:
+      - bridgeu
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/bridg-eu/db:/schema:ro
 
   bridgeu-api:
     build: ./images/pydev
@@ -55,6 +77,9 @@ services:
       # pipenv would load it over this environment. The app reads .env too,
       # but there the environment already wins.
       - PIPENV_DONT_LOAD_ENV=1
+      # Always use this instance's local database, even if the checkout's
+      # .env points at production or mysky is running in live mode.
+      - BRIDGEU_DATABASE_URL=postgresql://graph:graph@bridgeu-postgres:5432/graph?sslmode=disable
       # did:web:localhost, like the mysky api's local default. Nothing here
       # publishes feed records, so the publisher is a well-formed placeholder.
       - BRIDGEU_HOSTNAME=${GE_DEV_BRIDGEU_HOSTNAME:-localhost}

@@ -259,7 +259,7 @@ def up_ctx(tmp_path, monkeypatch, *, bridgeu=True, instance="dev", fail=""):
     return ctx
 
 
-def test_up_waits_for_postgres_before_starting_apps(tmp_path, monkeypatch):
+def test_up_initializes_postgres_before_issuing_key_and_starting_apps(tmp_path, monkeypatch):
     ctx = up_ctx(tmp_path, monkeypatch)
 
     stack.cmd_up(ctx, [])
@@ -267,8 +267,29 @@ def test_up_waits_for_postgres_before_starting_apps(tmp_path, monkeypatch):
     calls = fake(ctx).compose_lines()
     ready = next(call for call in calls if call.startswith("up -d --remove-orphans --wait "))
     assert "bridgeu-postgres" in ready.split()
+    initialized = "run --rm bridgeu-db-init"
+    issued_key = "run --rm issue-bridgeu-key"
     started = "up -d api frontend bridgeu-api"
-    assert calls.index(ready) < calls.index(started)
+    assert (
+        calls.index(ready)
+        < calls.index(initialized)
+        < calls.index(issued_key)
+        < calls.index(started)
+    )
+
+
+def test_up_reinitializes_postgres_on_each_run(tmp_path, monkeypatch):
+    ctx = up_ctx(tmp_path, monkeypatch)
+
+    stack.cmd_up(ctx, [])
+    first_calls = len(fake(ctx).calls)
+    stack.cmd_up(ctx, [])
+
+    assert fake(ctx).compose_lines().count("run --rm bridgeu-db-init") == 2
+    assert any(
+        call.argv[-3:] == ["run", "--rm", "bridgeu-db-init"]
+        for call in fake(ctx).calls[first_calls:]
+    )
 
 
 def test_up_without_bridgeu_stops_its_services(tmp_path, monkeypatch):
@@ -278,23 +299,30 @@ def test_up_without_bridgeu_stops_its_services(tmp_path, monkeypatch):
 
     calls = fake(ctx).compose_lines()
     assert "stop bridgeu-api bridgeu-postgres" in calls
+    assert "run --rm bridgeu-db-init" not in calls
     assert "up -d api frontend" in calls
     assert all("bridgeu-postgres" not in call for call in calls if call.startswith("up "))
 
 
-def test_up_stops_before_apps_if_database_startup_fails(tmp_path, monkeypatch, capsys):
-    ready = (
+@pytest.mark.parametrize(
+    "failed",
+    [
         "up -d --remove-orphans --wait firebase dev-auth bridgeu-postgres "
-        "elasticsearch inference perspective-stub"
-    )
-    ctx = up_ctx(tmp_path, monkeypatch, fail=ready)
+        "elasticsearch inference perspective-stub",
+        "run --rm bridgeu-db-init",
+    ],
+    ids=["database-startup", "schema-init"],
+)
+def test_up_stops_before_apps_if_database_startup_fails(tmp_path, monkeypatch, capsys, failed):
+    ctx = up_ctx(tmp_path, monkeypatch, fail=failed)
 
     with pytest.raises(CommandFailed) as exc:
         stack.cmd_up(ctx, [])
 
     assert exc.value.returncode == 23
     calls = fake(ctx).compose_lines()
-    assert calls[-1] == ready
+    assert calls[-1] == failed
+    assert "run --rm issue-bridgeu-key" not in calls
     assert not any(call.startswith("up ") and "bridgeu-api" in call.split() for call in calls)
     assert "environment is up" not in capsys.readouterr().out
 
@@ -309,11 +337,15 @@ def test_up_es_sharer_still_starts_its_own_postgres(tmp_path, monkeypatch):
     assert "bridgeu-postgres" in ready.split()
     assert "elasticsearch" not in ready.split()
     assert "run --rm es-init" not in calls
+    initialized = "run --rm bridgeu-db-init"
     started = "up -d --no-deps api frontend bridgeu-api"
-    assert calls.index(ready) < calls.index(started)
+    assert calls.index(ready) < calls.index(initialized) < calls.index(started)
     startup = next(call for call in fake(ctx).calls if "bridgeu-postgres" in call.argv)
     assert startup.env["GE_DEV_NAME"] == "ge-alpha"
     assert startup.env["GE_DEV_RUNTIME"] == "./.runtime.alpha"
+    initializer = next(call for call in fake(ctx).calls if call.argv[-1] == "bridgeu-db-init")
+    assert initializer.env["GE_DEV_NAME"] == "ge-alpha"
+    assert initializer.env["GE_DEV_RUNTIME"] == "./.runtime.alpha"
     assert ctx.get("GE_DEV_ES_API_KEY") == "owner-key"
     assert ctx.port("BRIDGEU_POSTGRES") == 55442
 

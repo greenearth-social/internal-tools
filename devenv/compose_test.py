@@ -109,7 +109,40 @@ def test_bridgeu_postgres_is_local_and_its_data_belongs_to_the_instance():
     # Explicit global names would make separate devctl instances share data or containers.
     assert "container_name" not in postgres
     assert compose["volumes"]["bridgeu_pgdata"] is None
-    assert postgres["healthcheck"]["test"] == ["CMD-SHELL", "pg_isready -U graph -d graph"]
+    assert postgres["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        "pg_isready -h 127.0.0.1 -U graph -d graph",
+    ]
+
+
+def test_bridgeu_schema_init_applies_the_checkout_sql_to_the_local_database():
+    services = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["services"]
+    init = services["bridgeu-db-init"]
+
+    # setup already pulls the server image; schema setup needs no extra build.
+    assert init["image"] == services["bridgeu-postgres"]["image"]
+    assert init["profiles"] == ["tools"]
+    assert init["depends_on"] == {"bridgeu-postgres": {"condition": "service_healthy"}}
+    assert init["volumes"] == ["${GE_DEV_REPO_ROOT:-../..}/bridg-eu/db:/schema:ro"]
+    assert "env_file" not in init
+    assert init["command"] == [
+        "psql",
+        "-X",
+        "--set=ON_ERROR_STOP=1",
+        "--single-transaction",
+        "--dbname=postgresql://graph:graph@bridgeu-postgres:5432/graph?sslmode=disable",
+        "--file=/schema/001_da_post_scores.sql",
+    ]
+
+
+def test_bridgeu_api_database_url_overrides_the_checkouts_env_with_its_local_database():
+    api = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["services"]["bridgeu-api"]
+
+    assert "PIPENV_DONT_LOAD_ENV=1" in api["environment"]
+    assert (
+        "BRIDGEU_DATABASE_URL=postgresql://graph:graph@bridgeu-postgres:5432/graph?sslmode=disable"
+        in api["environment"]
+    )
 
 
 def test_bridgeu_key_issuer_is_a_mysky_side_tool():

@@ -243,6 +243,10 @@ def cmd_up(ctx: Ctx, args: list[str]) -> None:
     # --wait because the api doesn't depends_on the swappable ones, so this is
     # what guarantees they're serving before it starts.
     compose(ctx, "up", "-d", "--remove-orphans", "--wait", *local_services)
+    if have_bridgeu(ctx):
+        # Run the idempotent schema initializer on every up, including when
+        # this instance already has a persistent PostgreSQL volume.
+        compose(ctx, "run", "--rm", "bridgeu-db-init")
     # Before the api starts: on a first run both would otherwise install the
     # api's dependencies into the same volume at once.
     issue_bridgeu_key(ctx)
