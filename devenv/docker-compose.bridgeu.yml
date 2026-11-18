@@ -71,6 +71,7 @@ services:
         pipenv install --dev
         exec pipenv run uvicorn src.app.main:app --host 0.0.0.0 --port 8000 ${GE_DEV_API_RELOAD:+--reload}
     environment:
+      - ENVIRONMENT=local
       - PYTHONUNBUFFERED=1
       - PIPENV_VENV_IN_PROJECT=1
       # As with the mysky api: the checkout may carry a developer's .env, and

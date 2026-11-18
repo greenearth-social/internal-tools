@@ -87,6 +87,7 @@ def test_bridgeu_api_runs_from_its_service_directory():
     # Publishing dev feeds needs the parent checkout's .git directory.
     assert "${GE_DEV_REPO_ROOT:-../..}/bridg-eu:/app" in api["volumes"]
     assert "PIPENV_VENV_IN_PROJECT=1" in api["environment"]
+    assert "ENVIRONMENT=local" in api["environment"]
     assert "bridgeu_api_venv:/app/api/.venv" in api["volumes"]
     assert "bridgeu_api_venv" in compose["volumes"]
 
