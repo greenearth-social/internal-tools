@@ -6,6 +6,7 @@ Produces, in fixtures/data/:
   (chunked), ingested by the real megastream_ingest binary at seed time
 - likes.jsonl.gz        — like documents (LikeDoc schema)
 - like_counts.jsonl.gz  — per-post like_count to apply after ingest
+- da_post_scores.jsonl.gz — synthetic Diverse Approval scores for every post
 - manifest.json         — window, counts, dev personas, generation metadata
 
 Two source modes:
@@ -40,6 +41,9 @@ Two source modes:
     use. Deterministic under --seed. Liker DIDs here are invented, apart from
     the dev-team accounts, which get a synthesized history like everyone else
     so that logging in as yourself works in this mode too.
+
+Both modes add reproducible random Diverse Approval scores in [0, 1], using
+--seed. These are fixture data, not scores calculated from the social graph.
 
 Identities are real
 -------------------
@@ -88,6 +92,8 @@ import zipfile
 import zlib
 from collections import Counter
 from pathlib import Path
+
+import generate_da_scores
 
 EMBED_MODEL = "all-MiniLM-L12-v2"
 EMBED_FIELD = "embeddings.all_MiniLM_L12_v2"
@@ -334,6 +340,8 @@ def write_fixture_set(
     window_end: dt.datetime,
     cohort_size: int,
     dev_users: list[dict] | None = None,
+    *,
+    da_seed: int = generate_da_scores.DEFAULT_SEED,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("*.db.zip"):
@@ -364,6 +372,9 @@ def write_fixture_set(
         "dev_users": dev_users or [],
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    # Read the finished chunks so DA rows match the exact post set and
+    # timestamps that the Elasticsearch seed will ingest.
+    generate_da_scores.generate(out_dir, seed=da_seed)
     print(f"Fixture set written to {out_dir}")
     print(f"  posts={len(posts)} likes={len(likes)} cohort={cohort_size}")
     for persona in personas:
@@ -676,6 +687,7 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path, dev_users: list[dict]) 
         window_end,
         len(cohort),
         dev_user_rows,
+        da_seed=args.seed,
     )
 
 
@@ -845,6 +857,7 @@ def run_megastream_files(args: argparse.Namespace, out_dir: Path, dev_users: lis
         window_end,
         len(cohort),
         dev_user_rows,
+        da_seed=args.seed,
     )
 
 
@@ -882,8 +895,13 @@ def main() -> None:
     parser.add_argument("--cohort", type=int, default=50)
     parser.add_argument("--min-likes", type=int, default=30)
     parser.add_argument("--max-likes", type=int, default=80)
-    parser.add_argument("--seed", type=int, default=42)
     # common
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=generate_da_scores.DEFAULT_SEED,
+        help="random seed for DA scores in both modes and synthetic megastream-file likes",
+    )
     parser.add_argument("--personas", type=int, default=5)
     parser.add_argument(
         "--dev-users",

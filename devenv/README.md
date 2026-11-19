@@ -337,6 +337,31 @@ needed. Output goes to `fixtures/data/` (gitignored).
 The full procedure — generating, sanity-checking, and publishing a fixture
 for the team — is in [docs/runbooks.md](docs/runbooks.md).
 
+### Synthetic Diverse Approval scores
+
+Both source modes also write `da_post_scores.jsonl.gz`: one row per unique
+fixture post, with `post_uri`, a random `score` between 0 and 1, and the post's
+original `created_at`, normalized to UTC seconds as ES ingestion does.
+These scores are synthetic test data, not calculated
+from the social graph. The same posts and `--seed` produce the same scores;
+the default seed is 42. The manifest's `diverse_approval` block records the
+source, seed, filename, and count.
+
+To add or regenerate scores for an existing downloaded fixture without
+fetching posts again, run from `devenv/`:
+
+```bash
+python3 fixtures/generate_da_scores.py fixtures/data --seed 42
+```
+
+The sidecar is included automatically when the fixture directory is published
+and fetched through the existing archive. Fetching replaces `fixtures/data/`,
+so local scores are replaced by the downloaded bundle too.
+
+This prepares the fixture only: `devctl seed` does not yet rebase or load DA
+scores into Postgres. That step must shift their `created_at` by the same
+delta as the Elasticsearch posts, leaving URIs and scores unchanged.
+
 ## Models
 
 The environment runs the real `inference-service` from your checkout, serving
