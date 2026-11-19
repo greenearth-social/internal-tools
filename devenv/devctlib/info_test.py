@@ -12,11 +12,18 @@ def test_ports_lists_this_instance(tmp_path, capsys):
     assert out[0] == "instance      dev (compose project ge-dev, offset 0)"
     assert "api           8300" in out
     assert "bridgeu-api   8400" in out
+    assert "bridgeu-postgres 55432" in out
 
 
 @pytest.mark.parametrize(
     ("name", "port"),
-    [("api", "8300"), ("elasticsearch", "9201"), ("auth", "9099"), ("bridgeu-api", "8400")],
+    [
+        ("api", "8300"),
+        ("elasticsearch", "9201"),
+        ("auth", "9099"),
+        ("bridgeu-api", "8400"),
+        ("bridgeu-postgres", "55432"),
+    ],
 )
 def test_ports_prints_one_number_by_service(tmp_path, capsys, name, port):
     ctx = make_ctx(
@@ -28,6 +35,7 @@ def test_ports_prints_one_number_by_service(tmp_path, capsys, name, port):
                 ("ES", "9201"),
                 ("FIREBASE_AUTH", "9099"),
                 ("BRIDGEU_API", "8400"),
+                ("BRIDGEU_POSTGRES", "55432"),
             ]
         },
     )
@@ -45,6 +53,7 @@ def test_ports_ssh_forwards_every_client_port(tmp_path, capsys):
     flags = capsys.readouterr().out.split()
     assert flags[:2] == ["-L", "3000:127.0.0.1:3000"]
     assert "4041:127.0.0.1:4041" not in flags  # ngrok's inspection API stays local
+    assert "55432:127.0.0.1:55432" in flags
     assert len(flags) == 2 * len(info.SSH_PORTS)
 
 

@@ -2,8 +2,9 @@ import json
 
 import pytest
 
-from devctlib import stack
+from devctlib import http, stack
 from devctlib.ctx import Die
+from devctlib.instance import set_instance
 from devctlib.runner import CommandFailed
 from devctlib.testing import FakeRunner, fake, make_ctx
 
@@ -29,7 +30,8 @@ def with_repos(tmp_path, *repos):
 
 
 @pytest.mark.parametrize(
-    ("bridgeu", "built"), [(False, "seed-firestore-users"), (True, "bridgeu-api")]
+    ("bridgeu", "built"),
+    [(False, "seed-firestore-users"), (True, "bridgeu-api bridgeu-seed-da-scores")],
 )
 def test_setup_builds_pulls_and_installs(tmp_path, capsys, bridgeu, built):
     ctx = make_ctx(tmp_path)
@@ -42,10 +44,10 @@ def test_setup_builds_pulls_and_installs(tmp_path, capsys, bridgeu, built):
     calls = fake(ctx).compose_lines()
     assert calls[0].startswith("--profile tools build es-init api inference")
     assert calls[0].endswith(built)
-    assert calls[1] == (
-        "--profile tools pull elasticsearch perspective-stub dev-auth seed-rebase"
-        " seed-megastream --ignore-buildable"
-    )
+    pulled = "elasticsearch perspective-stub dev-auth seed-rebase seed-megastream"
+    if bridgeu:
+        pulled += " bridgeu-postgres"
+    assert calls[1] == f"--profile tools pull {pulled} --ignore-buildable"
     assert calls[2] == "run --rm --no-deps inference bash /inference/start.sh --install-only"
     captured = capsys.readouterr()
     assert "setup complete" in captured.out
@@ -67,7 +69,7 @@ def test_setup_stops_if_the_inference_install_fails(tmp_path):
 # --- seed ----------------------------------------------------------------------
 
 
-def seed_ctx(tmp_path, fail: str = "", running: bool = True):
+def seed_ctx(tmp_path, fail: str = "", running: bool = True, *, bridgeu: bool = False):
     def respond(argv):
         line = " ".join(argv)
         if fail and line.endswith(fail):
@@ -78,6 +80,8 @@ def seed_ctx(tmp_path, fail: str = "", running: bool = True):
 
     ctx = make_ctx(tmp_path, runner=FakeRunner(respond))
     docker_on_path(ctx, tmp_path)
+    if bridgeu:
+        (tmp_path / "bridg-eu" / ".git").mkdir(parents=True)
     fixtures = ctx.devenv / "fixtures" / "data"
     fixtures.mkdir(parents=True)
     (fixtures / "manifest.json").write_text("{}")
@@ -91,10 +95,9 @@ def service_calls(ctx):
     return [c for c in fake(ctx).compose_lines() if not c.startswith("ps ")]
 
 
-def test_seed_backfills_quality_after_likes_before_publishing_aliases_and_restarting_api(
-    tmp_path, capsys
-):
-    ctx = seed_ctx(tmp_path)
+@pytest.mark.parametrize("bridgeu", [False, True])
+def test_seed_runs_post_loaders_before_optional_da_and_api_restart(tmp_path, capsys, bridgeu):
+    ctx = seed_ctx(tmp_path, bridgeu=bridgeu)
 
     stack.cmd_seed(ctx, [])
 
@@ -107,6 +110,7 @@ def test_seed_backfills_quality_after_likes_before_publishing_aliases_and_restar
         "run --rm seed-likes",
         "run --rm seed-quality",
         "run --rm seed-likes python /seedscripts/load_likes.py --aliases-only",
+        *(["run --rm bridgeu-db-init", "run --rm bridgeu-seed-da-scores"] if bridgeu else []),
         "up -d --force-recreate api",
     ]
     assert "seed complete (persona: did:plc:p)" in capsys.readouterr().out
@@ -117,12 +121,12 @@ def test_seed_backfills_quality_after_likes_before_publishing_aliases_and_restar
     [
         "run --rm seed-quality",
         "run --rm seed-likes python /seedscripts/load_likes.py --aliases-only",
+        "run --rm bridgeu-db-init",
+        "run --rm bridgeu-seed-da-scores",
     ],
 )
-def test_seed_stops_if_quality_backfill_or_alias_publication_fails(
-    tmp_path, capsys, failed_command
-):
-    ctx = seed_ctx(tmp_path, fail=failed_command)
+def test_seed_stops_if_a_loader_or_schema_init_fails(tmp_path, capsys, failed_command):
+    ctx = seed_ctx(tmp_path, fail=failed_command, bridgeu=True)
 
     with pytest.raises(CommandFailed) as exc:
         stack.cmd_seed(ctx, [])
@@ -133,19 +137,22 @@ def test_seed_stops_if_quality_backfill_or_alias_publication_fails(
     assert "seed complete" not in capsys.readouterr().out
 
 
-def test_seed_leaves_a_stopped_api_stopped(tmp_path, capsys):
-    ctx = seed_ctx(tmp_path, running=False)
+@pytest.mark.parametrize("bridgeu", [False, True])
+def test_seed_leaves_a_stopped_api_stopped(tmp_path, capsys, bridgeu):
+    ctx = seed_ctx(tmp_path, running=False, bridgeu=bridgeu)
     stack.cmd_seed(ctx, [])
     assert "up -d --force-recreate api" not in service_calls(ctx)
     assert "The api isn't running" in capsys.readouterr().out
 
 
-def test_a_sharing_instance_cannot_seed(tmp_path):
-    ctx = seed_ctx(tmp_path)
+@pytest.mark.parametrize("bridgeu", [False, True])
+def test_a_sharing_instance_cannot_seed(tmp_path, bridgeu):
+    ctx = seed_ctx(tmp_path, bridgeu=bridgeu)
     ctx.instance = "alpha"
     ctx.env["GE_DEV_SHARE_ES"] = "1"
     with pytest.raises(Die, match="read-only here"):
         stack.cmd_seed(ctx, [])
+    assert fake(ctx).compose_lines() == []
 
 
 # --- BridgEU's key ------------------------------------------------------------
@@ -226,6 +233,130 @@ def test_down_notes_sharers_and_published_feeds(tmp_path, capsys):
 
 
 # --- up ------------------------------------------------------------------------
+
+
+def up_ctx(tmp_path, monkeypatch, *, bridgeu=True, instance="dev", fail=""):
+    def respond(argv):
+        if fail and " ".join(argv).endswith(fail):
+            return 23
+        return None
+
+    ctx = make_ctx(tmp_path, instance=instance, runner=FakeRunner(respond))
+    set_instance(ctx, instance)
+    docker_on_path(ctx, tmp_path)
+    with_repos(tmp_path, *(["bridg-eu"] if bridgeu else []))
+    with_models(ctx)
+    (ctx.runtime / "es_key_ro.env").write_text("GE_ELASTICSEARCH_API_KEY=local-key\n")
+    if instance != "dev":
+        ctx.offset = 10
+        ctx.ports = {name: port + ctx.offset for name, port in ctx.ports.items()}
+        owner = ctx.devenv / ".runtime"
+        owner.mkdir()
+        (owner / "es_key_ro.env").write_text("GE_ELASTICSEARCH_API_KEY=owner-key\n")
+
+    def request(url, **kwargs):
+        if url.endswith("/_cluster/health"):
+            return http.Response(200)
+        if url.endswith("/posts/_count"):
+            return http.Response(200, '{"count":0}')
+        raise AssertionError(f"unexpected HTTP request: {url}")
+
+    monkeypatch.setattr(http, "request", request)
+    return ctx
+
+
+def test_up_initializes_postgres_before_issuing_key_and_starting_apps(
+    tmp_path, monkeypatch, capsys
+):
+    ctx = up_ctx(tmp_path, monkeypatch)
+
+    stack.cmd_up(ctx, [])
+
+    calls = fake(ctx).compose_lines()
+    ready = next(call for call in calls if call.startswith("up -d --remove-orphans --wait "))
+    assert "bridgeu-postgres" in ready.split()
+    initialized = "run --rm bridgeu-db-init"
+    issued_key = "run --rm issue-bridgeu-key"
+    started = "up -d api frontend bridgeu-api"
+    assert (
+        calls.index(ready)
+        < calls.index(initialized)
+        < calls.index(issued_key)
+        < calls.index(started)
+    )
+    assert "(database bridgeu, user bridgeu / bridgeu)" in capsys.readouterr().out
+
+
+def test_up_reinitializes_postgres_on_each_run(tmp_path, monkeypatch):
+    ctx = up_ctx(tmp_path, monkeypatch)
+
+    stack.cmd_up(ctx, [])
+    first_calls = len(fake(ctx).calls)
+    stack.cmd_up(ctx, [])
+
+    assert fake(ctx).compose_lines().count("run --rm bridgeu-db-init") == 2
+    assert any(
+        call.argv[-3:] == ["run", "--rm", "bridgeu-db-init"]
+        for call in fake(ctx).calls[first_calls:]
+    )
+
+
+def test_up_without_bridgeu_stops_its_services(tmp_path, monkeypatch):
+    ctx = up_ctx(tmp_path, monkeypatch, bridgeu=False)
+
+    stack.cmd_up(ctx, [])
+
+    calls = fake(ctx).compose_lines()
+    assert "stop bridgeu-api bridgeu-postgres" in calls
+    assert "run --rm bridgeu-db-init" not in calls
+    assert "up -d api frontend" in calls
+    assert all("bridgeu-postgres" not in call for call in calls if call.startswith("up "))
+
+
+@pytest.mark.parametrize(
+    "failed",
+    [
+        "up -d --remove-orphans --wait firebase dev-auth bridgeu-postgres "
+        "elasticsearch inference perspective-stub",
+        "run --rm bridgeu-db-init",
+    ],
+    ids=["database-startup", "schema-init"],
+)
+def test_up_stops_before_apps_if_database_startup_fails(tmp_path, monkeypatch, capsys, failed):
+    ctx = up_ctx(tmp_path, monkeypatch, fail=failed)
+
+    with pytest.raises(CommandFailed) as exc:
+        stack.cmd_up(ctx, [])
+
+    assert exc.value.returncode == 23
+    calls = fake(ctx).compose_lines()
+    assert calls[-1] == failed
+    assert "run --rm issue-bridgeu-key" not in calls
+    assert not any(call.startswith("up ") and "bridgeu-api" in call.split() for call in calls)
+    assert "environment is up" not in capsys.readouterr().out
+
+
+def test_up_es_sharer_still_starts_its_own_postgres(tmp_path, monkeypatch):
+    ctx = up_ctx(tmp_path, monkeypatch, instance="alpha")
+
+    stack.cmd_up(ctx, [])
+
+    calls = fake(ctx).compose_lines()
+    ready = next(call for call in calls if call.startswith("up -d --remove-orphans --wait "))
+    assert "bridgeu-postgres" in ready.split()
+    assert "elasticsearch" not in ready.split()
+    assert "run --rm es-init" not in calls
+    initialized = "run --rm bridgeu-db-init"
+    started = "up -d --no-deps api frontend bridgeu-api"
+    assert calls.index(ready) < calls.index(initialized) < calls.index(started)
+    startup = next(call for call in fake(ctx).calls if "bridgeu-postgres" in call.argv)
+    assert startup.env["GE_DEV_NAME"] == "ge-alpha"
+    assert startup.env["GE_DEV_RUNTIME"] == "./.runtime.alpha"
+    initializer = next(call for call in fake(ctx).calls if call.argv[-1] == "bridgeu-db-init")
+    assert initializer.env["GE_DEV_NAME"] == "ge-alpha"
+    assert initializer.env["GE_DEV_RUNTIME"] == "./.runtime.alpha"
+    assert ctx.get("GE_DEV_ES_API_KEY") == "owner-key"
+    assert ctx.port("BRIDGEU_POSTGRES") == 55442
 
 
 def test_up_flags(tmp_path):

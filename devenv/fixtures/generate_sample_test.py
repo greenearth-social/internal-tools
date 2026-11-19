@@ -249,11 +249,17 @@ def test_manifest_counts_match_the_written_data(tmp_path):
     assert manifest["counts"]["posts"] == 3
     assert manifest["counts"]["likes"] == 2
     assert manifest["counts"]["cohort"] == 7
+    assert manifest["diverse_approval"] == {
+        "source": "synthetic-random",
+        "seed": 42,
+        "file": "da_post_scores.jsonl.gz",
+        "count": 3,
+    }
     # seed/rebase.py reads window_end to compute the shift.
     assert manifest["window_end"] == "2026-07-23T00:00:00Z"
 
 
-def test_regenerating_into_a_directory_clears_old_chunks(tmp_path, monkeypatch):
+def test_regenerating_into_a_directory_clears_old_chunks_and_da_scores(tmp_path, monkeypatch):
     # Leftover chunks from a previous, larger sample would be ingested too,
     # mixing two unrelated post/like graphs.
     monkeypatch.setattr(gs, "CHUNK_ROWS", 2)
@@ -266,6 +272,12 @@ def test_regenerating_into_a_directory_clears_old_chunks(tmp_path, monkeypatch):
     gs.write_fixture_set(tmp_path, "prod-es", _posts(2), [], [], [], *args)
 
     assert len(list(tmp_path.glob("*.db.zip"))) == 1
+    with gzip.open(tmp_path / "da_post_scores.jsonl.gz", "rt") as stream:
+        scores = [json.loads(line) for line in stream]
+    assert {row["post_uri"] for row in scores} == {post["at_uri"] for post in _posts(2)}
+    assert len(scores) == 2
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["diverse_approval"]["count"] == 2
 
 
 # --------------------------------------------------------------------------
@@ -596,6 +608,7 @@ def _prod_es_args(**overrides):
         "max_cohort": 300,
         "dev_user_lookback_days": 30,
         "personas": 5,
+        "seed": 42,
     }
     return argparse.Namespace(**{**defaults, **overrides})
 
@@ -707,3 +720,43 @@ def test_megastream_mode_gives_dev_users_a_synthesized_history(tmp_path, monkeyp
     assert dev_row["did"] == DEV_DID
     assert dev_row["likes"] >= args.min_likes
     assert DEV_DID not in [persona["did"] for persona in manifest["personas"]]
+
+
+@pytest.mark.parametrize("source", ["prod-es", "megastream-files"])
+def test_source_modes_generate_matching_da_scores_with_custom_seed(tmp_path, monkeypatch, source):
+    output = tmp_path / "output"
+    seed = 73
+    if source == "prod-es":
+        _run_prod_es(output, monkeypatch, DEV_USERS, seed=seed)
+    else:
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        gs.write_megastream_chunks(input_dir, _posts(20))
+        gs.run_megastream_files(
+            argparse.Namespace(
+                input=str(input_dir),
+                window_hours=48,
+                cohort=3,
+                min_likes=2,
+                max_likes=4,
+                seed=seed,
+                personas=5,
+            ),
+            output,
+            DEV_USERS,
+        )
+
+    # This includes hydrated old posts in prod mode and the compressed
+    # timestamps in offline mode, not just the source's original window.
+    # ES ingestion normalizes record.createdAt to UTC with second precision.
+    posts = gs.read_megastream_posts(output)
+    with gzip.open(output / "da_post_scores.jsonl.gz", "rt") as stream:
+        scores = [json.loads(line) for line in stream]
+    assert len(scores) == len(posts)
+    assert {row["post_uri"]: row["created_at"] for row in scores} == {
+        post["at_uri"]: gs.iso_z(post["created_at"].replace(microsecond=0)) for post in posts
+    }
+    assert all(0 <= row["score"] <= 1 for row in scores)
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["diverse_approval"]["seed"] == seed
+    assert manifest["diverse_approval"]["count"] == len(posts)
