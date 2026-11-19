@@ -1,6 +1,7 @@
 import report
 
 NAMES = report.METRICS
+ENV = {"POSTHOG_PROJECT_ID": "42"}
 ROWS = [
     ("11-02", dict.fromkeys(NAMES, 10) | {"Likes": 40, "Replies": 5, "Show more": 0}),
     ("11-09", dict.fromkeys(NAMES, 10) | {"Likes": 30, "Replies": 0, "Show more": 8}),
@@ -71,11 +72,14 @@ def test_change_is_green_when_good_yellow_when_bad_and_plain_when_small():
 
 def test_a_report_of_large_weeks_fits_in_one_discord_message():
     rows = [(f"01-{d:02}", dict.fromkeys(NAMES, 9_999_999)) for d in range(1, report.WEEKS + 1)]
-    assert len(report.message(rows)) <= report.DISCORD_LIMIT
+    assert len(report.message(rows, ENV)) <= report.DISCORD_LIMIT
 
 
-def test_the_message_ends_with_a_link_to_the_readme():
-    assert report.message(ROWS).endswith(f"[Row definitions (README)](<{report.README}>)")
+def test_the_message_ends_with_links_to_the_readme_and_the_posthog_dashboard():
+    assert report.message(ROWS, ENV).endswith(
+        f"[Row definitions (README)](<{report.README}>) · "
+        f"[More detail (PostHog)](<https://us.posthog.com/project/42/dashboard/{report.DASHBOARD}>)"
+    )
 
 
 def test_weeks_merges_the_replies_of_every_query(monkeypatch):
