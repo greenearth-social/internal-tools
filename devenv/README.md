@@ -956,8 +956,8 @@ curl http://127.0.0.1:8400/health
 
 ### BridgEU Postgres database
 
-`bridgeu-postgres` runs PostgreSQL 18 on the `bridgeu` network, with database,
-user and password all `graph`. `devctl setup` pulls PostgreSQL. Each
+`bridgeu-postgres` runs PostgreSQL 18 on the `bridgeu` network, with database
+`bridgeu`, username `graph`, and password `graph`. `devctl setup` pulls PostgreSQL. Each
 `devctl up` waits for the database to be healthy, then runs `bridgeu-db-init`
 to apply `bridg-eu/db/001_da_post_scores.sql` before starting the APIs. The
 table definition lives in the BridgEU checkout; applying it again preserves
@@ -973,8 +973,8 @@ The default host address is `127.0.0.1:55432`; override its base port with
 
 ```bash
 ./devctl ports bridgeu-postgres
-psql "postgres://graph:graph@127.0.0.1:$(./devctl ports bridgeu-postgres)/graph?sslmode=disable"
-./devctl exec bridgeu-postgres psql -U graph -d graph
+psql "postgres://graph:graph@127.0.0.1:$(./devctl ports bridgeu-postgres)/bridgeu?sslmode=disable"
+./devctl exec bridgeu-postgres psql -U graph -d bridgeu
 ./devctl --name featurework ports bridgeu-postgres   # another instance's port
 ```
 
@@ -1092,7 +1092,7 @@ pipenv run pytest devenv          # devctl's tests and the rest of devenv's
 | megastream-ingest | internal only | `--with-ingest`; live posts from the archives |
 | jetstream-ingest | internal only | `--with-ingest`; live likes from the public firehose |
 | bridgeu-api | `http://127.0.0.1:8400` | only with bridg-eu checked out; see [BridgEU](#bridgeu) |
-| bridgeu-postgres | `127.0.0.1:55432` | database/user/password `graph`; only with bridg-eu checked out |
+| bridgeu-postgres | `127.0.0.1:55432` | database `bridgeu`, username/password `graph`; only with bridg-eu checked out |
 
 These are the default instance's ports; a named instance's are these plus its
 offset (`devctl ports --name <n>`). Everything binds `127.0.0.1` only —

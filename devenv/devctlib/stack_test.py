@@ -265,7 +265,9 @@ def up_ctx(tmp_path, monkeypatch, *, bridgeu=True, instance="dev", fail=""):
     return ctx
 
 
-def test_up_initializes_postgres_before_issuing_key_and_starting_apps(tmp_path, monkeypatch):
+def test_up_initializes_postgres_before_issuing_key_and_starting_apps(
+    tmp_path, monkeypatch, capsys
+):
     ctx = up_ctx(tmp_path, monkeypatch)
 
     stack.cmd_up(ctx, [])
@@ -282,6 +284,7 @@ def test_up_initializes_postgres_before_issuing_key_and_starting_apps(tmp_path, 
         < calls.index(issued_key)
         < calls.index(started)
     )
+    assert "(database bridgeu, user graph / graph)" in capsys.readouterr().out
 
 
 def test_up_reinitializes_postgres_on_each_run(tmp_path, monkeypatch):

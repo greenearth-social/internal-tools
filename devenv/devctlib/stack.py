@@ -344,7 +344,7 @@ def print_up_summary(ctx: Ctx, opts: UpOptions) -> None:
         )
         print(
             f"  bridgeu-postgres 127.0.0.1:{p('BRIDGEU_POSTGRES')}"
-            "    (database graph, user graph / graph)"
+            "    (database bridgeu, user graph / graph)"
         )
     if ctx.live_has("mysky"):
         url = ctx.get("GE_DEV_BRIDGEU_MYSKY_API_URL")

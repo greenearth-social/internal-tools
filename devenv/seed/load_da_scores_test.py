@@ -276,7 +276,7 @@ def test_main_uses_fixed_local_database_regardless_of_environment(
     loader.main()
 
     module.connect.assert_called_once_with(
-        "postgresql://graph:graph@bridgeu-postgres:5432/graph?sslmode=disable", connect_timeout=10
+        "postgresql://graph:graph@bridgeu-postgres:5432/bridgeu?sslmode=disable", connect_timeout=10
     )
     load.assert_called_once_with(conn, tmp_path)
     conn.__exit__.assert_called_once_with(None, None, None)
