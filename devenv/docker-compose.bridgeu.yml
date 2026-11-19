@@ -22,8 +22,8 @@ services:
   bridgeu-postgres:
     image: postgres:18
     environment:
-      - POSTGRES_USER=graph
-      - POSTGRES_PASSWORD=graph
+      - POSTGRES_USER=bridgeu
+      - POSTGRES_PASSWORD=bridgeu
       - POSTGRES_DB=bridgeu
     networks:
       - bridgeu
@@ -35,7 +35,7 @@ services:
     healthcheck:
       # The image's temporary initialization server accepts Unix sockets
       # only. Wait for TCP so other containers can connect too.
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U graph -d bridgeu"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U bridgeu -d bridgeu"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -53,7 +53,7 @@ services:
       - -X
       - --set=ON_ERROR_STOP=1
       - --single-transaction
-      - --dbname=postgresql://graph:graph@bridgeu-postgres:5432/bridgeu?sslmode=disable
+      - --dbname=postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable
       - --file=/schema/001_da_post_scores.sql
     networks:
       - bridgeu
@@ -108,7 +108,7 @@ services:
       - PIPENV_DONT_LOAD_ENV=1
       # Always use this instance's local database, even if the checkout's
       # .env points at production or mysky is running in live mode.
-      - BRIDGEU_DATABASE_URL=postgresql://graph:graph@bridgeu-postgres:5432/bridgeu?sslmode=disable
+      - BRIDGEU_DATABASE_URL=postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable
       # did:web:localhost, like the mysky api's local default. Nothing here
       # publishes feed records, so the publisher is a well-formed placeholder.
       - BRIDGEU_HOSTNAME=${GE_DEV_BRIDGEU_HOSTNAME:-localhost}

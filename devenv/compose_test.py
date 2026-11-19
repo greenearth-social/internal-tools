@@ -98,8 +98,8 @@ def test_bridgeu_postgres_is_local_and_its_data_belongs_to_the_instance():
 
     assert postgres["image"] == "postgres:18"
     assert set(postgres["environment"]) == {
-        "POSTGRES_USER=graph",
-        "POSTGRES_PASSWORD=graph",
+        "POSTGRES_USER=bridgeu",
+        "POSTGRES_PASSWORD=bridgeu",
         "POSTGRES_DB=bridgeu",
     }
     assert "env_file" not in postgres
@@ -112,7 +112,7 @@ def test_bridgeu_postgres_is_local_and_its_data_belongs_to_the_instance():
     assert compose["volumes"]["bridgeu_pgdata"] is None
     assert postgres["healthcheck"]["test"] == [
         "CMD-SHELL",
-        "pg_isready -h 127.0.0.1 -U graph -d bridgeu",
+        "pg_isready -h 127.0.0.1 -U bridgeu -d bridgeu",
     ]
 
 
@@ -131,7 +131,7 @@ def test_bridgeu_schema_init_applies_the_checkout_sql_to_the_local_database():
         "-X",
         "--set=ON_ERROR_STOP=1",
         "--single-transaction",
-        "--dbname=postgresql://graph:graph@bridgeu-postgres:5432/bridgeu?sslmode=disable",
+        "--dbname=postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable",
         "--file=/schema/001_da_post_scores.sql",
     ]
 
@@ -141,7 +141,7 @@ def test_bridgeu_api_database_url_overrides_the_checkouts_env_with_its_local_dat
 
     assert "PIPENV_DONT_LOAD_ENV=1" in api["environment"]
     assert (
-        "BRIDGEU_DATABASE_URL=postgresql://graph:graph@bridgeu-postgres:5432/bridgeu?sslmode=disable"
+        "BRIDGEU_DATABASE_URL=postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable"
         in api["environment"]
     )
 

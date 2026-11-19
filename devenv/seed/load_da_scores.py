@@ -23,7 +23,7 @@ SEED_DIR = Path("/runtime/seed")
 SCORES_FILE = "da_post_scores.jsonl.gz"
 # Deliberately independent of .env, live mode, and the API's configuration.
 # The Compose service can only resolve this instance's Postgres container.
-DATABASE_URL = "postgresql://graph:graph@bridgeu-postgres:5432/bridgeu?sslmode=disable"
+DATABASE_URL = "postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable"
 
 
 def parse_row(line: str, line_number: int) -> tuple[str, float, datetime]:
