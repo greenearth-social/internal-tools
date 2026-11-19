@@ -95,6 +95,7 @@ FALL_IS_GOOD = {"Show less"}
 SMALL = 10  # a change under this many percent gets no colour
 NOTE = "Each histogram is normalized to its own max."
 README = "https://github.com/greenearth-social/internal-tools/tree/main/posthog-report#readme"
+DASHBOARD = 1837147  # the "Growth" dashboard in PostHog
 LAST_BAR = "The last bar is the week of {}."  # filled with that week's Monday
 
 Week = tuple[str, dict[str, int]]
@@ -224,10 +225,13 @@ def report(rows: list[Week], color: bool = False) -> str:
     return "\n".join([frame(TITLE, table(rows, color)), *(" " * (PAD + 1) + x for x in notes)])
 
 
-def message(rows: list[Week]) -> str:
+def message(rows: list[Week], e: dict[str, str]) -> str:
     """The Discord message: the table in an `ansi` code block, which keeps it monospace."""
-    # The link goes outside the block so it is clickable; <> stops Discord previewing it.
-    return f"```ansi\n{report(rows, color=True)}\n```\n[Row definitions (README)](<{README}>)"
+    # The links go outside the block so they are clickable; <> stops Discord previewing them.
+    host = e.get("POSTHOG_HOST", "https://us.posthog.com").rstrip("/")
+    dashboard = f"{host}/project/{e['POSTHOG_PROJECT_ID']}/dashboard/{DASHBOARD}"
+    links = f"[Row definitions (README)](<{README}>) · [More detail (PostHog)](<{dashboard}>)"
+    return f"```ansi\n{report(rows, color=True)}\n```\n{links}"
 
 
 def main():
@@ -238,7 +242,7 @@ def main():
     rows = weeks(e)
     if not rows:
         sys.exit("no events in the last weeks")
-    content = message(rows)
+    content = message(rows, e)
     if len(content) > DISCORD_LIMIT:
         sys.exit(f"message is {len(content)} characters, Discord takes {DISCORD_LIMIT}")
     if not a.post:
