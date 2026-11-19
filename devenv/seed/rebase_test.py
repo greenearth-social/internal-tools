@@ -303,3 +303,88 @@ def test_rebase_db_rejects_filenames_the_spooler_cannot_parse(tmp_path, monkeypa
 
     with pytest.raises(SystemExit):
         rebase.rebase_db(bad, DAY, 0)
+
+
+@pytest.fixture
+def main_fixture(tmp_path, monkeypatch):
+    source = tmp_path / "fixture"
+    source.mkdir()
+    output = tmp_path / "runtime" / "seed"
+    monkeypatch.setattr(rebase, "FIXTURES_DIR", source)
+    monkeypatch.setattr(rebase, "OUT_DIR", output)
+    monkeypatch.setattr(rebase, "PROBE_ENV", output.parent / "probe.env")
+    uri = "at://did:plc:author0000000000000000/app.bsky.feed.post/3abc"
+    created = "2026-07-22T10:00:00.123456Z"
+    _make_db_zip(
+        source / "mega_jetstream_20260722_100000.db.zip",
+        created,
+        int(rebase.parse_iso(created).timestamp() * 1_000_000),
+    )
+    score = {"post_uri": uri, "score": 0.3141592653589793, "created_at": "2026-07-22T10:00:00Z"}
+    like = {
+        "subject_uri": uri,
+        "created_at": "2026-07-22T10:00:01.123456Z",
+        "indexed_at": "2026-07-22T10:00:02.123456Z",
+    }
+    for filename, row in [("da_post_scores.jsonl.gz", score), ("likes.jsonl.gz", like)]:
+        with gzip.open(source / filename, "wt") as stream:
+            stream.write(json.dumps(row) + "\n")
+    manifest = {
+        "window_end": "2026-07-22T11:00:00Z",
+        "source": "test",
+        "counts": {"posts": 1, "likes": 1},
+        "personas": [{"did": "did:plc:viewer"}],
+        "diverse_approval": {
+            "source": "synthetic-random",
+            "seed": 42,
+            "file": "da_post_scores.jsonl.gz",
+            "count": 1,
+        },
+    }
+    (source / "manifest.json").write_text(json.dumps(manifest))
+    return source, output, manifest, score, like
+
+
+def test_main_shifts_da_scores_with_posts_and_likes_and_preserves_metadata(main_fixture, tmp_path):
+    source, output, manifest, score, like = main_fixture
+    original_files = {path.name: path.read_bytes() for path in source.iterdir()}
+
+    rebase.main()
+
+    rebased_manifest = json.loads((output / "manifest.json").read_text())
+    delta = dt.timedelta(seconds=rebased_manifest.pop("rebased")["delta_seconds"])
+    assert rebased_manifest == manifest
+    with gzip.open(output / "da_post_scores.jsonl.gz", "rt") as stream:
+        (rebased_score,) = [json.loads(line) for line in stream]
+    assert rebased_score == {
+        **score,
+        "created_at": rebase.shift_iso(score["created_at"], delta),
+    }
+    with gzip.open(output / "likes.jsonl.gz", "rt") as stream:
+        (rebased_like,) = [json.loads(line) for line in stream]
+    for field in ("created_at", "indexed_at"):
+        assert rebase.parse_iso(rebased_like[field]) - rebase.parse_iso(like[field]) == delta
+
+    (chunk,) = output.glob("*.db.zip")
+    ((_, raw, _),) = _read_rows(chunk, tmp_path)
+    record_created = rebase.parse_iso(json.loads(raw)["message"]["commit"]["record"]["createdAt"])
+    assert record_created - rebase.parse_iso("2026-07-22T10:00:00.123456Z") == delta
+    # ES normalizes the shifted raw creation timestamp to UTC whole seconds.
+    assert rebase.parse_iso(rebased_score["created_at"]) == record_created.replace(microsecond=0)
+    assert {path.name: path.read_bytes() for path in source.iterdir()} == original_files
+
+
+def test_main_without_da_scores_removes_stale_runtime_file_and_warns(main_fixture, capsys):
+    source, output, manifest, _, _ = main_fixture
+    (source / "da_post_scores.jsonl.gz").unlink()
+    del manifest["diverse_approval"]
+    (source / "manifest.json").write_text(json.dumps(manifest))
+    output.mkdir(parents=True)
+    (output / "da_post_scores.jsonl.gz").write_bytes(b"previous fixture's scores")
+
+    rebase.main()
+
+    assert not (output / "da_post_scores.jsonl.gz").exists()
+    assert "diverse_approval" not in json.loads((output / "manifest.json").read_text())
+    assert list(output.glob("*.db.zip"))
+    assert "WARNING: no da_post_scores.jsonl.gz fixture" in capsys.readouterr().out

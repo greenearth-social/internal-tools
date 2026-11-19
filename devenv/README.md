@@ -358,9 +358,9 @@ The sidecar is included automatically when the fixture directory is published
 and fetched through the existing archive. Fetching replaces `fixtures/data/`,
 so local scores are replaced by the downloaded bundle too.
 
-This prepares the fixture only: `devctl seed` does not yet rebase or load DA
-scores into Postgres. That step must shift their `created_at` by the same
-delta as the Elasticsearch posts, leaving URIs and scores unchanged.
+With `bridg-eu` checked out, `./devctl seed` loads these scores into the local
+Postgres database. It shifts `created_at` by the same delta as the
+Elasticsearch posts, leaving URIs and scores unchanged.
 
 ## Models
 
@@ -603,9 +603,20 @@ it needs a public tunnel, not just a key.
    The seed then publishes and refreshes `posts_recent_quality`, the alias
    searched by two-tower retrieval. An empty, mapped quality index keeps this
    alias queryable even when no seeded posts qualify.
+5. **bridgeu-seed-da-scores** — when the `bridg-eu` checkout is present,
+   applies its DA table definition, then replaces `da_post_scores` with the
+   rebased `da_post_scores.jsonl.gz`. This uses the API's Python dev runner
+   and psycopg dependency. The connection always targets this instance's
+   local Postgres, including in live mode.
 
 Fixture personas are also written to the Firestore emulator after rebasing.
-`devctl seed` does not yet load or reset BridgEU's Postgres database.
+DA replacement is transactional: malformed rows, duplicate URIs, or a count
+mismatch roll back that load and preserve the previous scores. An older
+fixture with neither a DA file nor DA manifest metadata clears the DA table
+with a notice, so stale candidates don't refer to the previous ES fixture.
+A fixture that declares DA scores but is missing its file fails instead.
+Other Postgres tables are untouched. The whole ES/Firestore/Postgres seed
+pipeline is not a single transaction; fix a failed step and rerun `devctl seed`.
 
 A seeded window drifts stale as real time moves on: the api's recency windows
 are anchored to *now* (popularity looks back 24h), so from about a day after a
@@ -970,8 +981,10 @@ psql "postgres://graph:graph@127.0.0.1:$(./devctl ports bridgeu-postgres)/graph?
 Each instance has its own database volume, including named instances that
 share `dev`'s Elasticsearch. `devctl down` preserves it; `devctl nuke`
 removes it for the selected instance. A fresh volume contains the database
-and an empty `da_post_scores` table after `devctl up`. `devctl seed` does not
-yet populate DA scores; no graph migrations, ingestion or export run here.
+and an empty `da_post_scores` table after `devctl up`. `devctl seed` populates
+it from the DA fixture; no graph migrations, ingestion or export run here.
+Instances sharing Elasticsearch still cannot run `devctl seed`; use a
+dedicated-ES instance to seed both its posts and its own DA table together.
 
 ### BridgEU feeds
 

@@ -60,6 +60,34 @@ services:
     volumes:
       - ${GE_DEV_REPO_ROOT:-../..}/bridg-eu/db:/schema:ro
 
+  # Reuse the API's dev runner and psycopg dependency, like seed-firestore-users
+  # does for mysky. The loader has a fixed local DSN and only replaces DA rows.
+  bridgeu-seed-da-scores:
+    build: ./images/pydev
+    profiles: ["tools"]
+    working_dir: /app/api
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        pipenv install --dev
+        exec pipenv run python /seedscripts/load_da_scores.py
+    depends_on:
+      bridgeu-postgres:
+        condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PIPENV_VENV_IN_PROJECT=1
+      - PIPENV_DONT_LOAD_ENV=1
+    networks:
+      - bridgeu
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/bridg-eu:/app
+      - bridgeu_api_venv:/app/api/.venv
+      - ./seed:/seedscripts:ro
+      - ${GE_DEV_RUNTIME:-./.runtime}/seed:/runtime/seed:ro
+
   bridgeu-api:
     build: ./images/pydev
     working_dir: /app/api

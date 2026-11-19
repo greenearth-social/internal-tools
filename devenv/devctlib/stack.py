@@ -57,7 +57,10 @@ def cmd_setup(ctx: Ctx, args: list[str]) -> None:
     check_repos(ctx)
     ensure_runtime(ctx)
     print("devctl: pulling and building images (first run takes a few minutes)...")
-    builds = [*BUILT, *(["bridgeu-api"] if have_bridgeu(ctx) else [])]
+    builds = [
+        *BUILT,
+        *(["bridgeu-api", "bridgeu-seed-da-scores"] if have_bridgeu(ctx) else []),
+    ]
     pulls = [*PULLED, *(["bridgeu-postgres"] if have_bridgeu(ctx) else [])]
     compose(ctx, "--profile", "tools", "build", *builds)
     compose(ctx, "--profile", "tools", "pull", *pulls, "--ignore-buildable")
@@ -470,6 +473,13 @@ def cmd_seed(ctx: Ctx, args: list[str]) -> None:
     for message, run in SEED_STEPS:
         print(f"devctl: {message}")
         compose(ctx, "run", "--rm", *run)
+
+    if have_bridgeu(ctx):
+        # The DA scores reference the posts just loaded into Elasticsearch.
+        # Reapply the idempotent schema before loading this instance's scores.
+        compose(ctx, "run", "--rm", "bridgeu-db-init")
+        print("devctl: loading Diverse Approval scores into local Postgres...")
+        compose(ctx, "run", "--rm", "bridgeu-seed-da-scores")
 
     persona = env_file_value(ctx.runtime / "probe.env", "GE_PROBE_USER_DID")
     # Restart the api so it picks up the new persona from .runtime/probe.env —

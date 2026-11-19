@@ -30,7 +30,8 @@ def with_repos(tmp_path, *repos):
 
 
 @pytest.mark.parametrize(
-    ("bridgeu", "built"), [(False, "seed-firestore-users"), (True, "bridgeu-api")]
+    ("bridgeu", "built"),
+    [(False, "seed-firestore-users"), (True, "bridgeu-api bridgeu-seed-da-scores")],
 )
 def test_setup_builds_pulls_and_installs(tmp_path, capsys, bridgeu, built):
     ctx = make_ctx(tmp_path)
@@ -68,7 +69,7 @@ def test_setup_stops_if_the_inference_install_fails(tmp_path):
 # --- seed ----------------------------------------------------------------------
 
 
-def seed_ctx(tmp_path, fail: str = "", running: bool = True):
+def seed_ctx(tmp_path, fail: str = "", running: bool = True, *, bridgeu: bool = False):
     def respond(argv):
         line = " ".join(argv)
         if fail and line.endswith(fail):
@@ -79,6 +80,8 @@ def seed_ctx(tmp_path, fail: str = "", running: bool = True):
 
     ctx = make_ctx(tmp_path, runner=FakeRunner(respond))
     docker_on_path(ctx, tmp_path)
+    if bridgeu:
+        (tmp_path / "bridg-eu" / ".git").mkdir(parents=True)
     fixtures = ctx.devenv / "fixtures" / "data"
     fixtures.mkdir(parents=True)
     (fixtures / "manifest.json").write_text("{}")
@@ -92,10 +95,9 @@ def service_calls(ctx):
     return [c for c in fake(ctx).compose_lines() if not c.startswith("ps ")]
 
 
-def test_seed_backfills_quality_after_likes_before_publishing_aliases_and_restarting_api(
-    tmp_path, capsys
-):
-    ctx = seed_ctx(tmp_path)
+@pytest.mark.parametrize("bridgeu", [False, True])
+def test_seed_runs_post_loaders_before_optional_da_and_api_restart(tmp_path, capsys, bridgeu):
+    ctx = seed_ctx(tmp_path, bridgeu=bridgeu)
 
     stack.cmd_seed(ctx, [])
 
@@ -108,6 +110,7 @@ def test_seed_backfills_quality_after_likes_before_publishing_aliases_and_restar
         "run --rm seed-likes",
         "run --rm seed-quality",
         "run --rm seed-likes python /seedscripts/load_likes.py --aliases-only",
+        *(["run --rm bridgeu-db-init", "run --rm bridgeu-seed-da-scores"] if bridgeu else []),
         "up -d --force-recreate api",
     ]
     assert "seed complete (persona: did:plc:p)" in capsys.readouterr().out
@@ -118,12 +121,12 @@ def test_seed_backfills_quality_after_likes_before_publishing_aliases_and_restar
     [
         "run --rm seed-quality",
         "run --rm seed-likes python /seedscripts/load_likes.py --aliases-only",
+        "run --rm bridgeu-db-init",
+        "run --rm bridgeu-seed-da-scores",
     ],
 )
-def test_seed_stops_if_quality_backfill_or_alias_publication_fails(
-    tmp_path, capsys, failed_command
-):
-    ctx = seed_ctx(tmp_path, fail=failed_command)
+def test_seed_stops_if_a_loader_or_schema_init_fails(tmp_path, capsys, failed_command):
+    ctx = seed_ctx(tmp_path, fail=failed_command, bridgeu=True)
 
     with pytest.raises(CommandFailed) as exc:
         stack.cmd_seed(ctx, [])
@@ -134,19 +137,22 @@ def test_seed_stops_if_quality_backfill_or_alias_publication_fails(
     assert "seed complete" not in capsys.readouterr().out
 
 
-def test_seed_leaves_a_stopped_api_stopped(tmp_path, capsys):
-    ctx = seed_ctx(tmp_path, running=False)
+@pytest.mark.parametrize("bridgeu", [False, True])
+def test_seed_leaves_a_stopped_api_stopped(tmp_path, capsys, bridgeu):
+    ctx = seed_ctx(tmp_path, running=False, bridgeu=bridgeu)
     stack.cmd_seed(ctx, [])
     assert "up -d --force-recreate api" not in service_calls(ctx)
     assert "The api isn't running" in capsys.readouterr().out
 
 
-def test_a_sharing_instance_cannot_seed(tmp_path):
-    ctx = seed_ctx(tmp_path)
+@pytest.mark.parametrize("bridgeu", [False, True])
+def test_a_sharing_instance_cannot_seed(tmp_path, bridgeu):
+    ctx = seed_ctx(tmp_path, bridgeu=bridgeu)
     ctx.instance = "alpha"
     ctx.env["GE_DEV_SHARE_ES"] = "1"
     with pytest.raises(Die, match="read-only here"):
         stack.cmd_seed(ctx, [])
+    assert fake(ctx).compose_lines() == []
 
 
 # --- BridgEU's key ------------------------------------------------------------

@@ -146,6 +146,28 @@ def test_bridgeu_api_database_url_overrides_the_checkouts_env_with_its_local_dat
     )
 
 
+def test_bridgeu_da_seed_reuses_api_dependencies_and_reads_only_rebased_fixtures():
+    services = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["services"]
+    seed = services["bridgeu-seed-da-scores"]
+
+    assert seed["build"] == services["bridgeu-api"]["build"]
+    assert seed["working_dir"] == "/app/api"
+    assert seed["profiles"] == ["tools"]
+    assert seed["depends_on"] == {"bridgeu-postgres": {"condition": "service_healthy"}}
+    assert seed["networks"] == ["bridgeu"]
+    assert seed["volumes"] == [
+        "${GE_DEV_REPO_ROOT:-../..}/bridg-eu:/app",
+        "bridgeu_api_venv:/app/api/.venv",
+        "./seed:/seedscripts:ro",
+        "${GE_DEV_RUNTIME:-./.runtime}/seed:/runtime/seed:ro",
+    ]
+    assert "PIPENV_DONT_LOAD_ENV=1" in seed["environment"]
+    assert "PIPENV_VENV_IN_PROJECT=1" in seed["environment"]
+    assert "env_file" not in seed
+    assert "pipenv install --dev" in seed["command"][2]
+    assert "exec pipenv run python /seedscripts/load_da_scores.py" in seed["command"][2]
+
+
 def test_bridgeu_key_issuer_is_a_mysky_side_tool():
     """The key lives in the api's Firestore, so the job writing it is mysky's."""
     mysky = yaml.safe_load(COMPOSE_FILE.read_text())["services"]

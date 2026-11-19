@@ -8,8 +8,8 @@ Diverse Approval algorithm.
 
 Usage: python3 generate_da_scores.py [fixture-dir] [--seed 42]
 
-Timestamps stay in the fixture's original time window. A future seeder must
-shift them by the same delta as the Elasticsearch posts.
+Timestamps stay in the fixture's original time window. The seed rebase step
+shifts them by the same delta as the Elasticsearch posts.
 """
 
 from __future__ import annotations

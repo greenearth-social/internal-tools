@@ -30,7 +30,7 @@ Run the stack:
                      --dedicated-es                   own Elasticsearch, not shared
                      --repo-root <dir>                mount checkouts from another
                        working copy (sticks per instance; default: this repo's parent)
-  seed             load fixtures: rebase timestamps, ingest posts, load likes
+  seed             load fixtures: rebase timestamps, ingest posts, load likes/DA scores
   restart <svc>    recreate one service, picking up code and config changes
   down             stop containers (data volumes survive)
   nuke             stop and delete everything (volumes, minted keys, seed state)
