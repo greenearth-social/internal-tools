@@ -24,10 +24,8 @@ from firestore import (
     set_current_oncall,
 )
 from github_utils import (
-    add_pr_to_project,
     create_runbook_pr,
     request_pr_reviewers,
-    set_project_item_status,
 )
 from runbooks import fetch_runbook, runbook_url
 
@@ -39,9 +37,6 @@ DISCORD_ONCALL_CHANNEL_ID = os.environ["GE_DISCORD_ONCALL_CHANNEL_ID"]
 DISCORD_PUBLIC_KEY = os.environ["GE_DISCORD_PUBLIC_KEY"]
 RUNBOOKS_BRANCH = os.environ.get("GE_ONCALL_RUNBOOKS_BRANCH", "main")
 GITHUB_TOKEN = os.environ["GE_GITHUB_TOKEN"]
-RUNBOOK_PROJECT_ID = os.environ["GE_ONCALL_RUNBOOK_PROJECT_ID"]
-RUNBOOK_STATUS_FIELD_ID = os.environ["GE_ONCALL_RUNBOOK_STATUS_FIELD_ID"]
-RUNBOOK_STATUS_INREVIEW_OPTION_ID = os.environ["GE_ONCALL_RUNBOOK_STATUS_INREVIEW_OPTION_ID"]
 
 # Interaction types
 _PING = 1
@@ -418,19 +413,6 @@ async def _finalize_runbook_pr(
         except Exception:
             logger.exception("Failed to request reviewers for PR %s", pr_url)
             warnings.append("couldn't attach reviewers")
-
-    try:
-        item_id = add_pr_to_project(GITHUB_TOKEN, RUNBOOK_PROJECT_ID, pr["node_id"])
-        set_project_item_status(
-            GITHUB_TOKEN,
-            RUNBOOK_PROJECT_ID,
-            item_id,
-            RUNBOOK_STATUS_FIELD_ID,
-            RUNBOOK_STATUS_INREVIEW_OPTION_ID,
-        )
-    except Exception:
-        logger.exception("Failed to attach PR %s to project", pr_url)
-        warnings.append("couldn't attach to project")
 
     if warnings:
         message = (
