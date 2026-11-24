@@ -93,7 +93,7 @@ METRICS = [
 ]
 FALL_IS_GOOD = {"Show less"}
 SMALL = 10  # a change under this many percent gets no colour
-NOTE = "Each histogram is normalized to its own max."
+NOTE = "Each histogram runs from 0 to its own max."
 README = "https://github.com/greenearth-social/internal-tools/tree/main/posthog-report#readme"
 DASHBOARD = 1837147  # the "Growth" dashboard in PostHog
 LAST_BAR = "The last bar is the week of {}."  # filled with that week's Monday
