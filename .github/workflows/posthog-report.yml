@@ -2,9 +2,9 @@ name: PostHog weekly report
 
 on:
   schedule:
-    # Mondays 17:17 UTC: 9:17am Pacific in winter, 10:17am in summer (cron does not follow clock changes).
+    # Mondays 15:23 UTC: 7:23am Pacific in winter, 8:23am in summer (cron does not follow clock changes).
     # Off the hour on purpose: GitHub can skip runs scheduled for the top of the hour.
-    - cron: "17 17 * * 1"
+    - cron: "23 15 * * 1"
   workflow_dispatch:
 
 permissions:
