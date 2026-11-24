@@ -14,7 +14,7 @@ The team's own use is left out of every metric (via PostHog's "internal and test
 | Term in the post    | Meaning                                                     | PostHog definition                                          |
 |---------------------|-------------------------------------------------------------|-------------------------------------------------------------|
 | Weekly active       | People who saw[^1] at least one post                        | Distinct people with `interactionSeen`                      |
-| Daily active (avg)  | People who saw[^1] at least one post, average per day       | Distinct people with `interactionSeen` per day, summed, / 7 |
+| Daily active (avg)  | People who saw[^1] at least one post, averaged over days of the week       | Distinct people with `interactionSeen` per day, summed, / 7 |
 | New users           | People who saw[^1] their first MySky post ever              | People whose earliest `interactionSeen` is in the week      |
 | Feed loads          | Times a feed was opened (scrolling further is not counted)  | `feedLoaded` first pages asking for more than 8 posts       |
 | Feed users          | People who opened a feed                                    | Distinct people behind Feed loads                           |
