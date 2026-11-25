@@ -337,6 +337,31 @@ needed. Output goes to `fixtures/data/` (gitignored).
 The full procedure — generating, sanity-checking, and publishing a fixture
 for the team — is in [docs/runbooks.md](docs/runbooks.md).
 
+### Synthetic Diverse Approval scores
+
+Both source modes also write `da_post_scores.jsonl.gz`: one row per unique
+fixture post, with `post_uri`, a random `score` between 0 and 1, and the post's
+original `created_at`, normalized to UTC seconds as ES ingestion does.
+These scores are synthetic test data, not calculated
+from the social graph. The same posts and `--seed` produce the same scores;
+the default seed is 42. The manifest's `diverse_approval` block records the
+source, seed, filename, and count.
+
+To add or regenerate scores for an existing downloaded fixture without
+fetching posts again, run from `devenv/`:
+
+```bash
+python3 fixtures/generate_da_scores.py fixtures/data --seed 42
+```
+
+The sidecar is included automatically when the fixture directory is published
+and fetched through the existing archive. Fetching replaces `fixtures/data/`,
+so local scores are replaced by the downloaded bundle too.
+
+With `bridg-eu` checked out, `./devctl seed` loads these scores into the local
+Postgres database. It shifts `created_at` by the same delta as the
+Elasticsearch posts, leaving URIs and scores unchanged.
+
 ## Models
 
 The environment runs the real `inference-service` from your checkout, serving
@@ -578,8 +603,20 @@ it needs a public tunnel, not just a key.
    The seed then publishes and refreshes `posts_recent_quality`, the alias
    searched by two-tower retrieval. An empty, mapped quality index keeps this
    alias queryable even when no seeded posts qualify.
+5. **bridgeu-seed-da-scores** — when the `bridg-eu` checkout is present,
+   applies its DA table definition, then replaces `da_post_scores` with the
+   rebased `da_post_scores.jsonl.gz`. This uses the API's Python dev runner
+   and psycopg dependency. The connection always targets this instance's
+   local Postgres, including in live mode.
 
 Fixture personas are also written to the Firestore emulator after rebasing.
+DA replacement is transactional: malformed rows, duplicate URIs, or a count
+mismatch roll back that load and preserve the previous scores. An older
+fixture with neither a DA file nor DA manifest metadata clears the DA table
+with a notice, so stale candidates don't refer to the previous ES fixture.
+A fixture that declares DA scores but is missing its file fails instead.
+Other Postgres tables are untouched. The whole ES/Firestore/Postgres seed
+pipeline is not a single transaction; fix a failed step and rerun `devctl seed`.
 
 A seeded window drifts stale as real time moves on: the api's recency windows
 are anchored to *now* (popularity looks back 24h), so from about a day after a
@@ -894,8 +931,8 @@ environment keeps that boundary instead of flattening it:
 
 It's optional, because the repo is private to another org. With the checkout
 next to the others (`git clone git@github.com:eurosky-social/bridg-eu.git`),
-`devctl up` starts `bridgeu-api` too; without it devctl notes the missing
-checkout and runs mysky alone.
+`devctl up` starts `bridgeu-api` and `bridgeu-postgres` too; without the
+checkout devctl notes it and runs mysky alone.
 
 The API lives in `bridg-eu/api/`; the container mounts the whole checkout at
 `/app` and runs commands from `/app/api`. Dependencies are cached in a named
@@ -915,8 +952,39 @@ curl http://127.0.0.1:8400/health
 
 `bridgeu-api` answers as `did:web:localhost` with a placeholder publisher DID;
 `GE_DEV_BRIDGEU_HOSTNAME` and `GE_DEV_BRIDGEU_PUBLISHER_DID` in
-`devenv.local.env` override them. Its datastores and fixtures will be added
-here as those components are chosen.
+`devenv.local.env` override them.
+
+### BridgEU Postgres database
+
+`bridgeu-postgres` runs PostgreSQL 18 on the `bridgeu` network, with database,
+username, and password all `bridgeu`. `devctl setup` pulls PostgreSQL. Each
+`devctl up` waits for the database to be healthy, then runs `bridgeu-db-init`
+to apply `bridg-eu/db/001_da_post_scores.sql` before starting the APIs. The
+table definition lives in the BridgEU checkout; applying it again preserves
+existing rows. A SQL error stops startup before the APIs are started.
+
+`bridgeu-api` receives `BRIDGEU_DATABASE_URL` pointing at this instance's
+local database. This overrides any value in the checkout's `.env` and stays
+local even with `--live mysky`.
+
+The default host address is `127.0.0.1:55432`; override its base port with
+`GE_DEV_PORT_BRIDGEU_POSTGRES`. BridgEU containers use
+`bridgeu-postgres:5432`. To connect from the host or inside the container:
+
+```bash
+./devctl ports bridgeu-postgres
+psql "postgres://bridgeu:bridgeu@127.0.0.1:$(./devctl ports bridgeu-postgres)/bridgeu?sslmode=disable"
+./devctl exec bridgeu-postgres psql -U bridgeu -d bridgeu
+./devctl --name featurework ports bridgeu-postgres   # another instance's port
+```
+
+Each instance has its own database volume, including named instances that
+share `dev`'s Elasticsearch. `devctl down` preserves it; `devctl nuke`
+removes it for the selected instance. A fresh volume contains the database
+and an empty `da_post_scores` table after `devctl up`. `devctl seed` populates
+it from the DA fixture; no graph migrations, ingestion or export run here.
+Instances sharing Elasticsearch still cannot run `devctl seed`; use a
+dedicated-ES instance to seed both its posts and its own DA table together.
 
 ### BridgEU feeds
 
@@ -1024,6 +1092,7 @@ pipenv run pytest devenv          # devctl's tests and the rest of devenv's
 | megastream-ingest | internal only | `--with-ingest`; live posts from the archives |
 | jetstream-ingest | internal only | `--with-ingest`; live likes from the public firehose |
 | bridgeu-api | `http://127.0.0.1:8400` | only with bridg-eu checked out; see [BridgEU](#bridgeu) |
+| bridgeu-postgres | `127.0.0.1:55432` | database/username/password `bridgeu`; only with bridg-eu checked out |
 
 These are the default instance's ports; a named instance's are these plus its
 offset (`devctl ports --name <n>`). Everything binds `127.0.0.1` only —
@@ -1034,7 +1103,7 @@ see [docs/remote.md](docs/remote.md).
 Override the bases in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 `GE_DEV_PORT_ES`, `GE_DEV_PORT_FIRESTORE`, `GE_DEV_PORT_FRONTEND`,
 `GE_DEV_PORT_FIREBASE_AUTH`, `GE_DEV_PORT_FUNCTIONS`, `GE_DEV_PORT_FIREBASE_UI`,
-`GE_DEV_PORT_BRIDGEU_API`.
+`GE_DEV_PORT_BRIDGEU_API`, `GE_DEV_PORT_BRIDGEU_POSTGRES`.
 Other settings in the same file: `GE_DEV_ES_HEAP`, `GE_DEV_INSTANCE` (default
 instance name, same as passing `--name`), `GE_DEV_API_RELOAD=1` /
 `GE_DEV_INFERENCE_RELOAD=1` (what `--watch` sets),

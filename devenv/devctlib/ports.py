@@ -44,6 +44,7 @@ BASE_PORTS = {
     # BridgEU's api (docker-compose.bridgeu.yml). A hundred above the mysky
     # api, which is clear of its whole offset range.
     "BRIDGEU_API": 8400,
+    "BRIDGEU_POSTGRES": 55432,
 }
 
 STRIDE = 10

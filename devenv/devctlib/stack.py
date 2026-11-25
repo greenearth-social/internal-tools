@@ -57,9 +57,13 @@ def cmd_setup(ctx: Ctx, args: list[str]) -> None:
     check_repos(ctx)
     ensure_runtime(ctx)
     print("devctl: pulling and building images (first run takes a few minutes)...")
-    builds = [*BUILT, *(["bridgeu-api"] if have_bridgeu(ctx) else [])]
+    builds = [
+        *BUILT,
+        *(["bridgeu-api", "bridgeu-seed-da-scores"] if have_bridgeu(ctx) else []),
+    ]
+    pulls = [*PULLED, *(["bridgeu-postgres"] if have_bridgeu(ctx) else [])]
     compose(ctx, "--profile", "tools", "build", *builds)
-    compose(ctx, "--profile", "tools", "pull", *PULLED, "--ignore-buildable")
+    compose(ctx, "--profile", "tools", "pull", *pulls, "--ignore-buildable")
 
     if not have_models(ctx):
         cmd_fetch_models(ctx, [])
@@ -201,6 +205,8 @@ def cmd_up(ctx: Ctx, args: list[str]) -> None:
     # --remove-orphans leaves it running, and it would go on answering
     # nothing. A sharing instance runs no Elasticsearch at all.
     local_services = ["firebase", "dev-auth"]
+    if have_bridgeu(ctx):
+        local_services.append("bridgeu-postgres")
     if not share_es(ctx):
         local_services.append("elasticsearch")
     for service in ("inference", "perspective-stub"):
@@ -240,6 +246,10 @@ def cmd_up(ctx: Ctx, args: list[str]) -> None:
     # --wait because the api doesn't depends_on the swappable ones, so this is
     # what guarantees they're serving before it starts.
     compose(ctx, "up", "-d", "--remove-orphans", "--wait", *local_services)
+    if have_bridgeu(ctx):
+        # Run the idempotent schema initializer on every up, including when
+        # this instance already has a persistent PostgreSQL volume.
+        compose(ctx, "run", "--rm", "bridgeu-db-init")
     # Before the api starts: on a first run both would otherwise install the
     # api's dependencies into the same volume at once.
     issue_bridgeu_key(ctx)
@@ -264,7 +274,9 @@ def cmd_up(ctx: Ctx, args: list[str]) -> None:
     else:
         # A container left from a repo root that had the checkout would
         # otherwise go on serving code this instance no longer mounts.
-        compose(ctx, "stop", "bridgeu-api", check=False, quiet=True, quiet_err=True)
+        compose(
+            ctx, "stop", "bridgeu-api", "bridgeu-postgres", check=False, quiet=True, quiet_err=True
+        )
     compose(ctx, *api_up, *app_services)
 
     print_up_summary(ctx, opts)
@@ -329,6 +341,10 @@ def print_up_summary(ctx: Ctx, opts: UpOptions) -> None:
         print(
             f"  bridgeu-api   http://127.0.0.1:{p('BRIDGEU_API')}"
             "    (BridgEU; reaches the api as http://mysky-api:8000)"
+        )
+        print(
+            f"  bridgeu-postgres 127.0.0.1:{p('BRIDGEU_POSTGRES')}"
+            "    (database bridgeu, user bridgeu / bridgeu)"
         )
     if ctx.live_has("mysky"):
         url = ctx.get("GE_DEV_BRIDGEU_MYSKY_API_URL")
@@ -457,6 +473,13 @@ def cmd_seed(ctx: Ctx, args: list[str]) -> None:
     for message, run in SEED_STEPS:
         print(f"devctl: {message}")
         compose(ctx, "run", "--rm", *run)
+
+    if have_bridgeu(ctx):
+        # The DA scores reference the posts just loaded into Elasticsearch.
+        # Reapply the idempotent schema before loading this instance's scores.
+        compose(ctx, "run", "--rm", "bridgeu-db-init")
+        print("devctl: loading Diverse Approval scores into local Postgres...")
+        compose(ctx, "run", "--rm", "bridgeu-seed-da-scores")
 
     persona = env_file_value(ctx.runtime / "probe.env", "GE_PROBE_USER_DID")
     # Restart the api so it picks up the new persona from .runtime/probe.env —

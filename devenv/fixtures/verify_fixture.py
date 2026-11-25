@@ -33,7 +33,10 @@ import tempfile
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from pathlib import Path
+
+from generate_da_scores import SCORES_FILE, read_fixture_posts
 
 PLC_DIRECTORY = "https://plc.directory"
 PERSONAS_TO_CHECK = 5
@@ -94,6 +97,72 @@ def read_jsonl_gz(path: Path) -> list[dict]:
         return []
     with gzip.open(path, "rt") as fh:
         return [json.loads(line) for line in fh if line.strip()]
+
+
+def validate_da_scores(fixture_dir: Path, manifest: dict) -> list[str]:
+    """Require one finite synthetic score for each original fixture post.
+
+    Older fixtures can omit both the artifact and its manifest metadata. When
+    either is present, validate the complete pair against the original posts.
+    """
+    path = fixture_dir / SCORES_FILE
+    if not path.exists() and "diverse_approval" not in manifest:
+        return []
+    metadata = manifest.get("diverse_approval")
+    if not isinstance(metadata, dict):
+        return ["Diverse Approval scores require diverse_approval manifest metadata"]
+    if not path.is_file():
+        return [f"Diverse Approval scores file is missing: {SCORES_FILE}"]
+    if (
+        metadata.get("source") != "synthetic-random"
+        or metadata.get("file") != SCORES_FILE
+        or type(metadata.get("seed")) is not int
+        or type(metadata.get("count")) is not int
+        or metadata["count"] < 0
+    ):
+        return ["invalid Diverse Approval manifest metadata"]
+
+    try:
+        posts = read_fixture_posts(fixture_dir)
+        seen: set[str] = set()
+        count = 0
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            for line_number, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if not isinstance(row, dict) or set(row) != {"post_uri", "score", "created_at"}:
+                    return [f"invalid Diverse Approval score fields on line {line_number}"]
+                uri, score = row["post_uri"], row["score"]
+                if not isinstance(uri, str) or uri not in posts:
+                    return [f"unknown Diverse Approval post on line {line_number}"]
+                if uri in seen:
+                    return [f"duplicate Diverse Approval post on line {line_number}"]
+                if (
+                    not isinstance(score, (int, float))
+                    or isinstance(score, bool)
+                    or not 0 <= score <= 1
+                    or not math.isfinite(score)
+                ):
+                    return [
+                        f"invalid Diverse Approval score on line {line_number}: expected [0, 1]"
+                    ]
+                if row["created_at"] != posts[uri]:
+                    return [f"Diverse Approval post timestamp mismatch on line {line_number}"]
+                seen.add(uri)
+                count += 1
+    except (OSError, EOFError, ValueError, sqlite3.Error, zipfile.BadZipFile, zlib.error) as exc:
+        return [f"could not inspect Diverse Approval scores: {exc}"]
+
+    failures = []
+    if count != metadata["count"]:
+        failures.append(
+            f"Diverse Approval manifest says {metadata['count']} scores but file holds {count}"
+        )
+    missing = len(posts.keys() - seen)
+    if missing:
+        failures.append(f"Diverse Approval scores are missing {missing} fixture posts")
+    return failures
 
 
 def did_resolves(did: str, timeout: float = 10.0) -> bool | None:
@@ -168,6 +237,8 @@ def main() -> int:
                 messages.append("no posts have topic scores; use a capture with scored posts")
         except (OSError, ValueError, sqlite3.Error, zipfile.BadZipFile) as exc:
             failures.append(f"could not inspect fixture topic scores: {exc}")
+
+    failures.extend(validate_da_scores(d, manifest))
 
     # Likes must point at posts that are actually in the set, or the seeded
     # environment ends up with likes referencing nothing.
