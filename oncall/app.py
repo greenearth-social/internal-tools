@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import google.cloud.firestore as fs
 from discord_utils import (
@@ -21,7 +21,9 @@ from firestore import (
     list_registered_users,
     register_user,
     resolve_alert,
+    rotate_oncall_schedule,
     set_current_oncall,
+    sync_rotation_queue,
 )
 from github_utils import (
     add_pr_to_project,
@@ -76,9 +78,52 @@ def health():
     return {"status": "ok"}
 
 
+def check_and_rotate_oncall(db, now: datetime | None = None) -> dict | None:
+    """Checks if current oncall shift has expired, transitions to the next engineer,
+    and posts a hand-off announcement in #oncall.
+    """
+    try:
+        new_oncall, prev_oncall = rotate_oncall_schedule(db, now)
+    except Exception:
+        logger.exception("Failed checking or rotating oncall schedule")
+        return None
+
+    if not new_oncall:
+        return None
+
+    prev_user_id = prev_oncall.get("user_id") if prev_oncall else None
+    next_user_id = new_oncall.get("user_id")
+
+    prev_user = get_user(db, prev_user_id) if prev_user_id else None
+    next_user = get_user(db, next_user_id) if next_user_id else None
+
+    prev_name = prev_user["name"] if prev_user else (prev_user_id or "Unknown")
+    next_name = next_user["name"] if next_user else (next_user_id or "Unknown")
+    until_dt = datetime.fromisoformat(new_oncall["until"])
+
+    message = (
+        f"🔄 **Oncall Rotation Hand-off**\n"
+        f"**{prev_name}**'s shift has ended. "
+        f"**{next_name}** is now oncall until {format_ts(until_dt)}."
+    )
+    try:
+        send_channel_message(DISCORD_ONCALL_CHANNEL_ID, DISCORD_BOT_TOKEN, message)
+    except Exception:
+        logger.exception("Failed to post oncall rotation hand-off to Discord")
+
+    return new_oncall
+
+
+@app.post("/check-rotation")
+async def check_rotation(request: Request):
+    rotated = check_and_rotate_oncall(request.app.state.db)
+    return {"status": "ok", "rotated": rotated is not None}
+
+
 @app.post("/check-escalations")
 async def check_escalations(request: Request):
     db = request.app.state.db
+    check_and_rotate_oncall(db)
     threshold = datetime.now(UTC) - timedelta(minutes=ESCALATION_THRESHOLD_MINUTES)
     stale = get_stale_alerts(db, threshold)
 
@@ -182,8 +227,8 @@ def _interaction_response(rtype: int, content: str = "", **extra) -> dict:
     return {"type": rtype, "data": {"content": content, **extra}}
 
 
-def _end_of_week_utc() -> datetime:
-    today = date.today()
+def _end_of_week_utc(now: datetime | None = None) -> datetime:
+    today = (now or datetime.now(UTC)).date()
     days_until_sunday = (6 - today.weekday()) % 7 or 7
     end = today + timedelta(days=days_until_sunday)
     return datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=UTC)
@@ -235,6 +280,7 @@ async def _handle_command(request: Request, payload: dict) -> dict:
         sub_name = subcommand["name"]
 
         if sub_name == "who":
+            check_and_rotate_oncall(db)
             oncall = get_current_oncall(db)
             if not oncall:
                 return _interaction_response(
@@ -243,9 +289,21 @@ async def _handle_command(request: Request, payload: dict) -> dict:
             oncall_user = get_user(db, oncall["user_id"])
             until_dt = datetime.fromisoformat(oncall["until"])
             name_str = oncall_user["name"] if oncall_user else oncall["user_id"]
+
+            queue = oncall.get("rotation_queue")
+            if not queue:
+                queue = sync_rotation_queue(db, oncall["user_id"])
+
+            if queue:
+                next_user = get_user(db, queue[0])
+                next_name = next_user["name"] if next_user else queue[0]
+                next_str = f"\n**Next in line:** {next_name}"
+            else:
+                next_str = ""
+
             return _interaction_response(
                 _MESSAGE,
-                f"**Current oncall:** {name_str} — until {format_ts(until_dt)}",
+                f"**Current oncall:** {name_str} — until {format_ts(until_dt)}{next_str}",
             )
 
         if sub_name == "set":
@@ -257,17 +315,86 @@ async def _handle_command(request: Request, payload: dict) -> dict:
                 "username", target_user_id
             )
 
+            target_user = get_user(db, target_user_id)
+            if target_user is None:
+                return _interaction_response(
+                    _MESSAGE,
+                    f"**{target_name}** is not registered in the oncall system. "
+                    "They must run `/register` first.",
+                )
+
+            if isinstance(target_user, dict) and isinstance(target_user.get("name"), str):
+                target_name = target_user["name"]
+
             if "until" in opts:
                 y, m, d = (int(p) for p in opts["until"].split("-"))
                 until_dt = datetime(y, m, d, 23, 59, 59, tzinfo=UTC)
             else:
                 until_dt = _end_of_week_utc()
 
-            set_current_oncall(db, target_user_id, until_dt)
+            queue = sync_rotation_queue(db, target_user_id)
+            set_current_oncall(db, target_user_id, until_dt, rotation_queue=queue)
+
+            if queue:
+                next_user = get_user(db, queue[0])
+                next_name = next_user["name"] if next_user else queue[0]
+                next_str = f" Next in line: **{next_name}**."
+            else:
+                next_str = ""
+
             return _interaction_response(
                 _MESSAGE,
-                f"**{target_name}** is now oncall until {format_ts(until_dt)}",
+                f"**{target_name}** is now oncall until {format_ts(until_dt)}.{next_str}",
             )
+
+        if sub_name == "list":
+            check_and_rotate_oncall(db)
+            registered = list_registered_users(db)
+            if not registered:
+                return _interaction_response(
+                    _MESSAGE,
+                    "No registered oncall engineers. Use `/register` to join the rotation.",
+                )
+
+            users_by_id = {u["user_id"]: u for u in registered}
+            oncall = get_current_oncall(db)
+            current_uid = oncall.get("user_id") if oncall else None
+
+            lines = ["📋 **Oncall Engineers & Rotation Order**\n"]
+
+            if current_uid and current_uid in users_by_id:
+                curr_user = users_by_id[current_uid]
+                until_dt = datetime.fromisoformat(oncall["until"])
+                c_disc = curr_user.get("discord_handle", "")
+                c_gh = curr_user.get("github_handle", "")
+                lines.append(
+                    f"**Current Oncall:**\n"
+                    f"👉 **{curr_user['name']}** (@{c_disc} | GitHub: `{c_gh}`) — "
+                    f"until {format_ts(until_dt)}\n"
+                )
+            else:
+                lines.append("*(No current oncall set — run `/oncall set` to assign someone)*\n")
+
+            queue = oncall.get("rotation_queue") if oncall else None
+            if not queue and current_uid:
+                queue = sync_rotation_queue(db, current_uid)
+            if not queue:
+                queue = [uid for uid in users_by_id if uid != current_uid]
+
+            if queue:
+                lines.append("**Upcoming Rotation Sequence:**")
+                for i, uid in enumerate(queue, 1):
+                    u = users_by_id.get(uid)
+                    if u:
+                        u_disc = u.get("discord_handle", "")
+                        u_gh = u.get("github_handle", "")
+                        lines.append(f"{i}. **{u['name']}** (@{u_disc} | GitHub: `{u_gh}`)")
+                    else:
+                        lines.append(f"{i}. `{uid}`")
+            elif len(registered) == 1 and current_uid:
+                lines.append("*(No other engineers in rotation queue)*")
+
+            return _interaction_response(_MESSAGE, "\n".join(lines))
 
     if name == "ack":
         alert_id = payload["data"]["options"][0]["value"]

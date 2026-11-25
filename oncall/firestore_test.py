@@ -10,7 +10,9 @@ from firestore import (
     list_registered_users,
     register_user,
     resolve_alert,
+    rotate_oncall_schedule,
     set_current_oncall,
+    sync_rotation_queue,
 )
 
 NOW = datetime(2026, 8, 10, 20, 0, 0, tzinfo=UTC)
@@ -95,6 +97,95 @@ def test_set_current_oncall_stores_utc_iso():
     db.collection("oncall_schedule").document("current").set.assert_called_once_with(
         {"user_id": "user123", "until": "2026-08-10T20:00:00+00:00"}
     )
+
+
+def test_set_current_oncall_with_rotation_queue():
+    db = MagicMock()
+    set_current_oncall(db, "user123", NOW, rotation_queue=["user456", "user789"])
+    db.collection("oncall_schedule").document("current").set.assert_called_once_with(
+        {
+            "user_id": "user123",
+            "until": "2026-08-10T20:00:00+00:00",
+            "rotation_queue": ["user456", "user789"],
+        }
+    )
+
+
+def test_sync_rotation_queue_round_robin():
+    db = MagicMock()
+    u1, u2, u3 = MagicMock(), MagicMock(), MagicMock()
+    u1.id, u1.to_dict.return_value = "uid1", {"name": "User 1"}
+    u2.id, u2.to_dict.return_value = "uid2", {"name": "User 2"}
+    u3.id, u3.to_dict.return_value = "uid3", {"name": "User 3"}
+    db.collection.return_value.get.return_value = [u1, u2, u3]
+
+    assert sync_rotation_queue(db, "uid1") == ["uid2", "uid3"]
+    assert sync_rotation_queue(db, "uid2") == ["uid3", "uid1"]
+    assert sync_rotation_queue(db, "uid3") == ["uid1", "uid2"]
+
+
+def test_rotate_oncall_schedule_rotates_when_expired():
+    db = MagicMock()
+    doc = MagicMock()
+    doc.exists = True
+    doc.to_dict.return_value = {
+        "user_id": "uid1",
+        "until": "2026-08-01T00:00:00+00:00",
+        "rotation_queue": ["uid2", "uid3"],
+    }
+    db.collection.return_value.document.return_value.get.return_value = doc
+
+    # Registered users
+    u1, u2, u3 = MagicMock(), MagicMock(), MagicMock()
+    u1.id, u1.to_dict.return_value = "uid1", {"name": "User 1"}
+    u2.id, u2.to_dict.return_value = "uid2", {"name": "User 2"}
+    u3.id, u3.to_dict.return_value = "uid3", {"name": "User 3"}
+    db.collection.return_value.get.return_value = [u1, u2, u3]
+
+    new_oncall, prev_oncall = rotate_oncall_schedule(db, now=NOW)
+    assert prev_oncall["user_id"] == "uid1"
+    assert new_oncall["user_id"] == "uid2"
+    assert new_oncall["rotation_queue"] == ["uid3", "uid1"]
+    # Verify saved
+    db.collection("oncall_schedule").document("current").set.assert_called_once_with(new_oncall)
+
+
+def test_rotate_oncall_schedule_noop_when_not_expired():
+    db = MagicMock()
+    doc = MagicMock()
+    doc.exists = True
+    doc.to_dict.return_value = {
+        "user_id": "uid1",
+        "until": "2026-08-15T00:00:00+00:00",
+        "rotation_queue": ["uid2"],
+    }
+    db.collection.return_value.document.return_value.get.return_value = doc
+
+    new_oncall, prev_oncall = rotate_oncall_schedule(db, now=NOW)
+    assert new_oncall is None
+    assert prev_oncall is None
+    db.collection("oncall_schedule").document("current").set.assert_not_called()
+
+
+def test_get_current_oncall_rotates_when_expired():
+    db = MagicMock()
+    doc = MagicMock()
+    doc.exists = True
+    doc.to_dict.return_value = {
+        "user_id": "uid1",
+        "until": "2026-08-01T00:00:00+00:00",
+        "rotation_queue": ["uid2"],
+    }
+    db.collection.return_value.document.return_value.get.return_value = doc
+
+    u1, u2 = MagicMock(), MagicMock()
+    u1.id, u1.to_dict.return_value = "uid1", {"name": "User 1"}
+    u2.id, u2.to_dict.return_value = "uid2", {"name": "User 2"}
+    db.collection.return_value.get.return_value = [u1, u2]
+
+    oncall = get_current_oncall(db, now=NOW)
+    assert oncall["user_id"] == "uid2"
+    assert oncall["rotation_queue"] == ["uid1"]
 
 
 def test_create_alert_stores_open_status():

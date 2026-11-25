@@ -51,7 +51,7 @@ GCP_CLOSED_PAYLOAD = {
 def test_alert_critical_posts_to_discord_and_stores(client, mock_db):
     oncall_doc = MagicMock()
     oncall_doc.exists = True
-    oncall_doc.to_dict.return_value = {"user_id": "uid1", "until": "2026-08-15T23:59:59+00:00"}
+    oncall_doc.to_dict.return_value = {"user_id": "uid1", "until": "2029-08-15T23:59:59+00:00"}
     user_doc = MagicMock()
     user_doc.exists = True
     user_doc.to_dict.return_value = {"name": "Inseon", "discord_handle": "inthree3"}
@@ -265,6 +265,15 @@ ONCALL_SET_PAYLOAD = {
     "member": {"user": {"id": "uid1", "username": "inthree3", "global_name": "Inseon"}},
 }
 
+ONCALL_LIST_PAYLOAD = {
+    "type": 2,
+    "data": {
+        "name": "oncall",
+        "options": [{"name": "list", "type": 1, "options": []}],
+    },
+    "member": {"user": {"id": "uid1", "username": "inthree3", "global_name": "Inseon"}},
+}
+
 
 def _post_interaction(client, payload):
     body = json.dumps(payload).encode()
@@ -311,17 +320,111 @@ def test_oncall_who_no_oncall_set(client, mock_db):
     assert "no oncall" in response.json()["data"]["content"].lower()
 
 
-def test_oncall_set_stores_and_replies(client, mock_db):
-    with patch("app.set_current_oncall") as mock_set:
+def test_oncall_who_shows_next_in_line(client, mock_db):
+    oncall = {
+        "user_id": "uid2",
+        "until": "2029-08-15T23:59:59+00:00",
+        "rotation_queue": ["uid3", "uid1"],
+    }
+    user_ian = {"name": "Ian", "discord_handle": "raindrift"}
+    user_max = {"name": "Max", "discord_handle": "maxdisc"}
+
+    with (
+        patch("app.get_current_oncall", return_value=oncall),
+        patch("app.get_user", side_effect=lambda db, uid: user_ian if uid == "uid2" else user_max),
+    ):
+        response = _post_interaction(client, ONCALL_WHO_PAYLOAD)
+
+    assert response.status_code == 200
+    content = response.json()["data"]["content"]
+    assert "Current oncall:** Ian" in content
+    assert "Next in line:** Max" in content
+
+
+def test_oncall_set_unregistered_user_fails(client, mock_db):
+    with (
+        patch("app.get_user", return_value=None),
+        patch("app.set_current_oncall") as mock_set,
+    ):
         response = _post_interaction(client, ONCALL_SET_PAYLOAD)
+
+    assert response.status_code == 200
+    content = response.json()["data"]["content"]
+    assert "not registered in the oncall system" in content
+    assert "/register" in content
+    mock_set.assert_not_called()
+
+
+def test_oncall_set_stores_and_replies(client, mock_db):
+    user_ian = {"name": "Ian", "discord_handle": "raindrift", "github_handle": "ian-gh"}
+    user_max = {"name": "Max", "discord_handle": "maxdisc", "github_handle": "max-gh"}
+
+    with (
+        patch("app.get_user", side_effect=lambda db, uid: user_ian if uid == "uid2" else user_max),
+        patch("app.sync_rotation_queue", return_value=["uid3", "uid1"]),
+        patch("app.set_current_oncall") as mock_set,
+    ):
+        response = _post_interaction(client, ONCALL_SET_PAYLOAD)
+
     assert response.status_code == 200
     data = response.json()
     assert data["type"] == 4
     assert "Ian" in data["data"]["content"]
+    assert "Next in line: **Max**" in data["data"]["content"]
     mock_set.assert_called_once()
     args = mock_set.call_args[0]
+    kwargs = mock_set.call_args[1]
     assert args[1] == "uid2"
     assert args[2].year == 2026 and args[2].month == 8 and args[2].day == 15
+    assert kwargs.get("rotation_queue") == ["uid3", "uid1"]
+
+
+def test_oncall_list_empty(client, mock_db):
+    with patch("app.list_registered_users", return_value=[]):
+        response = _post_interaction(client, ONCALL_LIST_PAYLOAD)
+
+    assert response.status_code == 200
+    content = response.json()["data"]["content"]
+    assert "No registered oncall engineers" in content
+    assert "/register" in content
+
+
+def test_oncall_list_with_current_and_upcoming_sequence(client, mock_db):
+    users = [
+        {
+            "user_id": "uid1",
+            "name": "Inseon",
+            "discord_handle": "inthree3",
+            "github_handle": "inseon-hwang",
+        },
+        {
+            "user_id": "uid2",
+            "name": "Ian",
+            "discord_handle": "raindrift",
+            "github_handle": "ian-gh",
+        },
+        {"user_id": "uid3", "name": "Max", "discord_handle": "maxdisc", "github_handle": "max-gh"},
+    ]
+    current = {
+        "user_id": "uid1",
+        "until": "2029-08-15T23:59:59+00:00",
+        "rotation_queue": ["uid2", "uid3"],
+    }
+    with (
+        patch("app.list_registered_users", return_value=users),
+        patch("app.get_current_oncall", return_value=current),
+    ):
+        response = _post_interaction(client, ONCALL_LIST_PAYLOAD)
+
+    assert response.status_code == 200
+    content = response.json()["data"]["content"]
+    assert "Current Oncall:" in content
+    assert "Inseon" in content
+    assert "@inthree3" in content
+    assert "inseon-hwang" in content
+    assert "Upcoming Rotation Sequence:" in content
+    assert "1. **Ian** (@raindrift | GitHub: `ian-gh`)" in content
+    assert "2. **Max** (@maxdisc | GitHub: `max-gh`)" in content
 
 
 ACK_PAYLOAD = {
@@ -629,3 +732,51 @@ def test_check_escalations_no_stale_alerts_sends_nothing(client, mock_db):
         response = client.post("/check-escalations")
     assert response.status_code == 200
     mock_send.assert_not_called()
+
+
+def test_check_rotation_endpoint_when_not_expired(client):
+    with patch("app.rotate_oncall_schedule", return_value=(None, None)):
+        response = client.post("/check-rotation")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "rotated": False}
+
+
+def test_check_rotation_endpoint_when_rotated(client):
+    new_oncall = {"user_id": "uid2", "until": "2029-08-22T23:59:59+00:00"}
+    prev_oncall = {"user_id": "uid1"}
+    with (
+        patch("app.rotate_oncall_schedule", return_value=(new_oncall, prev_oncall)),
+        patch(
+            "app.get_user",
+            side_effect=lambda db, uid: {"name": "Ian" if uid == "uid2" else "Inseon"},
+        ),
+        patch("app.send_channel_message") as mock_send,
+    ):
+        response = client.post("/check-rotation")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "rotated": True}
+    mock_send.assert_called_once()
+    msg = mock_send.call_args[0][2]
+    assert "Oncall Rotation Hand-off" in msg
+    assert "Inseon" in msg
+    assert "Ian" in msg
+
+
+def test_check_escalations_triggers_rotation_handoff(client):
+    new_oncall = {"user_id": "uid2", "until": "2029-08-22T23:59:59+00:00"}
+    prev_oncall = {"user_id": "uid1"}
+    with (
+        patch("app.rotate_oncall_schedule", return_value=(new_oncall, prev_oncall)),
+        patch(
+            "app.get_user",
+            side_effect=lambda db, uid: {"name": "Ian" if uid == "uid2" else "Inseon"},
+        ),
+        patch("app.get_stale_alerts", return_value=[]),
+        patch("app.send_channel_message") as mock_send,
+    ):
+        response = client.post("/check-escalations")
+
+    assert response.status_code == 200
+    mock_send.assert_called_once()
+    msg = mock_send.call_args[0][2]
+    assert "Oncall Rotation Hand-off" in msg
