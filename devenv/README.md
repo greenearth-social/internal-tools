@@ -1050,6 +1050,10 @@ with:
 ./devctl test bridgeu-da                     # bridg-eu/algo's tests, in the same image
 ```
 
+`devctl test bridgeu-da` leaves out `test_lake.py`: DuckDB segfaults under
+amd64 emulation, and the lake path needs bridg-eu's native `Dockerfile.lake-dev`
+image (#118).
+
 The image is bridg-eu's release `algo/Dockerfile`, built by `devctl setup` from
 the checkout for `linux/amd64` only (graph-tool has no arm64 build), so it runs
 emulated on Apple silicon. `bridg-eu/algo` is mounted over the image's copy, so

@@ -32,7 +32,9 @@ IN_CONTAINER = {
 def suite_argv(ctx: Ctx, suite: str) -> list[str]:
     if suite == "bridgeu-da":
         # bridg-eu/algo's tests, in the DA pipeline image: a one-off container,
-        # so nothing has to be running.
+        # so nothing has to be running. Not test_lake.py: DuckDB segfaults
+        # under amd64 emulation (Apple silicon); the lake path needs the native
+        # lake-dev image, #118.
         return compose_argv(
             ctx,
             "run",
@@ -46,6 +48,7 @@ def suite_argv(ctx: Ctx, suite: str) -> list[str]:
             "-p",
             "no:cacheprovider",
             "/app/algo/tests",
+            "--ignore=/app/algo/tests/test_lake.py",
         )
     if suite == "ingex":
         tty = ["-t"] if sys.stdout.isatty() else []
