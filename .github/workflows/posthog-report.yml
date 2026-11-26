@@ -1,0 +1,33 @@
+name: PostHog weekly report
+
+on:
+  schedule:
+    # Mondays 15:23 UTC: 7:23am Pacific in winter, 8:23am in summer (cron does not follow clock changes).
+    # Off the hour on purpose: GitHub can skip runs scheduled for the top of the hour.
+    - cron: "23 15 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  post:
+    name: Post to Discord
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+
+    # Post only: this repository's Action logs are public, so never print the report here.
+    - name: Post the report
+      run: python posthog-report/report.py --post
+      env:
+        POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+        POSTHOG_PROJECT_ID: ${{ secrets.POSTHOG_PROJECT_ID }}
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}

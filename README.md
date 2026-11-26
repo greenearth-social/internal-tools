@@ -37,6 +37,11 @@ pipenv run jupyter notebook notebooks/velocity.ipynb
 See [`velocity/README.md`](velocity/README.md) for setup, assumptions, and how
 the projection is computed.
 
+## [`posthog-report/`](posthog-report/README.md) — weekly PostHog numbers in Discord
+
+One script that posts MySky's last 8 weeks of PostHog numbers to Discord, run
+every Monday by a GitHub Action.
+
 ## Shared Python setup
 
 Both subprojects share one `pipenv` environment defined at the repo root
