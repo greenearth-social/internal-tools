@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from .assets import (
     cmd_fetch_fixture,
     cmd_fetch_models,
     fixtures_hint,
+    fixtures_manifest,
     have_fixtures,
     have_models,
     models_hint,
@@ -59,7 +61,11 @@ def cmd_setup(ctx: Ctx, args: list[str]) -> None:
     print("devctl: pulling and building images (first run takes a few minutes)...")
     builds = [
         *BUILT,
-        *(["bridgeu-api", "bridgeu-seed-da-scores"] if have_bridgeu(ctx) else []),
+        *(
+            ["bridgeu-api", "bridgeu-seed-da-scores", "bridgeu-da-pipeline"]
+            if have_bridgeu(ctx)
+            else []
+        ),
     ]
     pulls = [*PULLED, *(["bridgeu-postgres"] if have_bridgeu(ctx) else [])]
     compose(ctx, "--profile", "tools", "build", *builds)
@@ -475,11 +481,7 @@ def cmd_seed(ctx: Ctx, args: list[str]) -> None:
         compose(ctx, "run", "--rm", *run)
 
     if have_bridgeu(ctx):
-        # The DA scores reference the posts just loaded into Elasticsearch.
-        # Reapply the idempotent schema before loading this instance's scores.
-        compose(ctx, "run", "--rm", "bridgeu-db-init")
-        print("devctl: loading Diverse Approval scores into local Postgres...")
-        compose(ctx, "run", "--rm", "bridgeu-seed-da-scores")
+        seed_bridgeu(ctx)
 
     persona = env_file_value(ctx.runtime / "probe.env", "GE_PROBE_USER_DID")
     # Restart the api so it picks up the new persona from .runtime/probe.env —
@@ -497,6 +499,37 @@ def cmd_seed(ctx: Ctx, args: list[str]) -> None:
     else:
         # Don't suggest a feed request with nothing to serve it.
         print("The api isn't running — start it with: devctl up")
+
+
+def seed_bridgeu(ctx: Ctx) -> None:
+    """BridgEU's graph and Diverse Approval scores, over the posts just loaded
+    into Elasticsearch. With a graph in the fixture, the real pipeline computes
+    the scores: load the graph, snapshot, fit communities, score. Without one
+    (older fixtures), the fixture's synthetic scores stand in."""
+    # Reapply the idempotent schemas first: the checkout may have new ones.
+    compose(ctx, "run", "--rm", "bridgeu-db-init")
+    if not fixture_has_graph(ctx):
+        print("devctl: this fixture has no BridgEU graph; loading synthetic DA scores...")
+        # Empty the graph tables, so nothing scores a previous fixture's graph.
+        compose(ctx, "run", "--rm", *DA_PIPELINE_SCRIPT, "/seedscripts/load_graph.py")
+        compose(ctx, "run", "--rm", "bridgeu-seed-da-scores")
+        return
+    for message, argv in BRIDGEU_SEED_STEPS:
+        print(f"devctl: {message}")
+        compose(ctx, "run", "--rm", *DA_PIPELINE_SCRIPT, *argv)
+
+
+DA_PIPELINE_SCRIPT = ("bridgeu-da-pipeline", "python")
+BRIDGEU_SEED_STEPS = (
+    ("loading the BridgEU graph into local Postgres...", ("/seedscripts/load_graph.py",)),
+    ("snapshotting the follow graph...", ("-m", "pipeline", "snapshot")),
+    ("fitting communities...", ("-m", "pipeline", "fit")),
+    ("scoring posts into da_post_scores...", ("/seedscripts/da_score.py",)),
+)
+
+
+def fixture_has_graph(ctx: Ctx) -> bool:
+    return "graph" in json.loads(fixtures_manifest(ctx).read_text())
 
 
 # --- restart, down, nuke -------------------------------------------------------

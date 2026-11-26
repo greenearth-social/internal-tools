@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import assets, bsky, doctor, eurosky, info, live, pull, stack, suites
+from . import assets, bridgeu, bsky, doctor, eurosky, info, live, pull, stack, suites
 from .ctx import DEFAULT_INSTANCE, Ctx, Die, die
 from .envfiles import load_local_env
 from .instance import load_state, resolve_ports, set_instance
@@ -69,6 +69,7 @@ COMMANDS: dict[str, Command] = {
     "feed": Command(info.cmd_feed, passthrough=True),
     "bsky": Command(bsky.cmd_bsky),
     "eurosky": Command(eurosky.cmd_eurosky),
+    "da-pipeline": Command(bridgeu.cmd_da_pipeline, passthrough=True),
 }
 
 

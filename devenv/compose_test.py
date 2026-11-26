@@ -124,16 +124,42 @@ def test_bridgeu_schema_init_applies_the_checkout_sql_to_the_local_database():
     assert init["image"] == services["bridgeu-postgres"]["image"]
     assert init["profiles"] == ["tools"]
     assert init["depends_on"] == {"bridgeu-postgres": {"condition": "service_healthy"}}
-    assert init["volumes"] == ["${GE_DEV_REPO_ROOT:-../..}/bridg-eu/db:/schema:ro"]
-    assert "env_file" not in init
-    assert init["command"] == [
-        "psql",
-        "-X",
-        "--set=ON_ERROR_STOP=1",
-        "--single-transaction",
-        "--dbname=postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable",
-        "--file=/schema/001_da_post_scores.sql",
+    assert init["volumes"] == [
+        "${GE_DEV_REPO_ROOT:-../..}/bridg-eu/db:/schema:ro",
+        "${GE_DEV_REPO_ROOT:-../..}/bridg-eu/graph/internal/store/migrations:/graph-migrations:ro",
     ]
+    assert "env_file" not in init
+    # The graph migrations in order, then the serving table, in one transaction.
+    script = init["command"][-1]
+    assert init["command"][:2] == ["sh", "-c"]
+    assert "set -- /graph-migrations/*.sql /schema/001_da_post_scores.sql" in script
+    assert "--single-transaction" in script
+    assert "--set=ON_ERROR_STOP=1" in script
+    assert "postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable" in script
+
+
+def test_bridgeu_da_pipeline_builds_the_checkout_image_and_writes_only_local_stores():
+    services = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["services"]
+    pipeline = services["bridgeu-da-pipeline"]
+    local = "postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable"
+
+    assert pipeline["build"]["context"] == "${GE_DEV_REPO_ROOT:-../..}/bridg-eu"
+    assert pipeline["build"]["dockerfile"] == "algo/Dockerfile"
+    # graph-tool has no arm64 build; DuckDB's extension signatures fail emulated.
+    assert pipeline["platform"] == "linux/amd64"
+    assert pipeline["build"]["args"] == {"DUCKDB_PREINSTALL_EXTENSIONS": "0"}
+    assert pipeline["profiles"] == ["tools"]
+    assert pipeline["depends_on"] == {"bridgeu-postgres": {"condition": "service_healthy"}}
+    env = dict(item.split("=", 1) for item in pipeline["environment"])
+    assert env["GRAPH_DATABASE_URL"] == local
+    assert env["BRIDGEU_DATABASE_URL"] == local
+    assert env["PIPELINE_STORE_URL"] == "file:///store"
+    assert "${GE_DEV_REPO_ROOT:-../..}/bridg-eu/algo:/app/algo:ro" in pipeline["volumes"]
+    assert "bridgeu_pipeline_store:/store" in pipeline["volumes"]
+    assert (
+        yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["volumes"]["bridgeu_pipeline_store"]
+        is None
+    )
 
 
 def test_bridgeu_api_database_url_overrides_the_checkouts_env_with_its_local_database():

@@ -31,7 +31,10 @@ def with_repos(tmp_path, *repos):
 
 @pytest.mark.parametrize(
     ("bridgeu", "built"),
-    [(False, "seed-firestore-users"), (True, "bridgeu-api bridgeu-seed-da-scores")],
+    [
+        (False, "seed-firestore-users"),
+        (True, "bridgeu-api bridgeu-seed-da-scores bridgeu-da-pipeline"),
+    ],
 )
 def test_setup_builds_pulls_and_installs(tmp_path, capsys, bridgeu, built):
     ctx = make_ctx(tmp_path)
@@ -69,7 +72,9 @@ def test_setup_stops_if_the_inference_install_fails(tmp_path):
 # --- seed ----------------------------------------------------------------------
 
 
-def seed_ctx(tmp_path, fail: str = "", running: bool = True, *, bridgeu: bool = False):
+def seed_ctx(
+    tmp_path, fail: str = "", running: bool = True, *, bridgeu: bool = False, graph: bool = False
+):
     def respond(argv):
         line = " ".join(argv)
         if fail and line.endswith(fail):
@@ -84,7 +89,7 @@ def seed_ctx(tmp_path, fail: str = "", running: bool = True, *, bridgeu: bool = 
         (tmp_path / "bridg-eu" / ".git").mkdir(parents=True)
     fixtures = ctx.devenv / "fixtures" / "data"
     fixtures.mkdir(parents=True)
-    (fixtures / "manifest.json").write_text("{}")
+    (fixtures / "manifest.json").write_text(json.dumps({"graph": {}} if graph else {}))
     for name in ("es_key_ro.env", "es_key_rw.env"):
         (ctx.runtime / name).write_text("GE_ELASTICSEARCH_API_KEY=k\n")
     (ctx.runtime / "probe.env").write_text("GE_PROBE_USER_DID=did:plc:p\n")
@@ -110,10 +115,37 @@ def test_seed_runs_post_loaders_before_optional_da_and_api_restart(tmp_path, cap
         "run --rm seed-likes",
         "run --rm seed-quality",
         "run --rm seed-likes python /seedscripts/load_likes.py --aliases-only",
-        *(["run --rm bridgeu-db-init", "run --rm bridgeu-seed-da-scores"] if bridgeu else []),
+        *(BRIDGEU_SYNTHETIC_SEED if bridgeu else []),
         "up -d --force-recreate api",
     ]
     assert "seed complete (persona: did:plc:p)" in capsys.readouterr().out
+
+
+BRIDGEU_SYNTHETIC_SEED = [
+    "run --rm bridgeu-db-init",
+    # Empties the graph tables: nothing may score a previous fixture's graph.
+    "run --rm bridgeu-da-pipeline python /seedscripts/load_graph.py",
+    "run --rm bridgeu-seed-da-scores",
+]
+BRIDGEU_GRAPH_SEED = [
+    "run --rm bridgeu-db-init",
+    "run --rm bridgeu-da-pipeline python /seedscripts/load_graph.py",
+    "run --rm bridgeu-da-pipeline python -m pipeline snapshot",
+    "run --rm bridgeu-da-pipeline python -m pipeline fit",
+    "run --rm bridgeu-da-pipeline python /seedscripts/da_score.py",
+]
+
+
+def test_seed_runs_the_da_pipeline_when_the_fixture_has_a_graph(tmp_path, capsys):
+    ctx = seed_ctx(tmp_path, bridgeu=True, graph=True)
+
+    stack.cmd_seed(ctx, [])
+
+    calls = service_calls(ctx)
+    start = calls.index("run --rm bridgeu-db-init")
+    assert calls[start : start + len(BRIDGEU_GRAPH_SEED)] == BRIDGEU_GRAPH_SEED
+    assert "run --rm bridgeu-seed-da-scores" not in calls
+    assert calls[-1] == "up -d --force-recreate api"
 
 
 @pytest.mark.parametrize(
@@ -123,10 +155,12 @@ def test_seed_runs_post_loaders_before_optional_da_and_api_restart(tmp_path, cap
         "run --rm seed-likes python /seedscripts/load_likes.py --aliases-only",
         "run --rm bridgeu-db-init",
         "run --rm bridgeu-seed-da-scores",
+        "run --rm bridgeu-da-pipeline python -m pipeline fit",
     ],
 )
 def test_seed_stops_if_a_loader_or_schema_init_fails(tmp_path, capsys, failed_command):
-    ctx = seed_ctx(tmp_path, fail=failed_command, bridgeu=True)
+    graph = "bridgeu-da-pipeline" in failed_command
+    ctx = seed_ctx(tmp_path, fail=failed_command, bridgeu=True, graph=graph)
 
     with pytest.raises(CommandFailed) as exc:
         stack.cmd_seed(ctx, [])
@@ -421,3 +455,33 @@ def test_restart_on_a_sharing_instance_points_the_api_at_the_owner(tmp_path):
     env = fake(ctx).calls[-1].env
     assert env["GE_DEV_ES_API_KEY"] == "owner-key"
     assert env["GE_DEV_ES_URL"] == "http://host.docker.internal:9201"
+
+
+# --- da-pipeline ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ([], "run --rm bridgeu-da-pipeline python -m pipeline --help"),
+        (["fit", "--seed", "7"], "run --rm bridgeu-da-pipeline python -m pipeline fit --seed 7"),
+        # score lines rebased dates up with now (seed/da_score.py).
+        (
+            ["score", "--lam", "1"],
+            "run --rm bridgeu-da-pipeline python /seedscripts/da_score.py --lam 1",
+        ),
+    ],
+)
+def test_da_pipeline_runs_a_job_in_the_pipeline_image(tmp_path, args, expected):
+    from devctlib import bridgeu
+
+    ctx = seed_ctx(tmp_path, bridgeu=True)
+    bridgeu.cmd_da_pipeline(ctx, args)
+    assert service_calls(ctx) == [expected]
+
+
+def test_da_pipeline_needs_the_checkout(tmp_path):
+    from devctlib import bridgeu
+
+    with pytest.raises(Die, match="needs bridg-eu checked out"):
+        bridgeu.cmd_da_pipeline(seed_ctx(tmp_path), ["fit"])

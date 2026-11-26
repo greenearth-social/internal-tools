@@ -41,14 +41,15 @@ names the fix for what it finds.
 repo's test suite, use `devctl test`, which knows each repo's runner:
 
 ```bash
-devctl test               # every suite: api, inference, ingex, frontend, bridgeu
+devctl test               # every suite: api, inference, ingex, frontend, bridgeu, bridgeu-da
 devctl test api           # just one repo
 devctl test ingex         # Go tests; needs nothing running
 ```
 
 `api`, `inference`, `frontend` and `bridgeu` tests run in the live containers,
 so the stack must be up (`devctl test` says so if it isn't). `ingex` runs in a
-throwaway Go container and needs no running stack. `devctl test` exits nonzero
+throwaway Go container and needs no running stack; `bridgeu-da`
+(bridg-eu/algo's tests) runs in a one-off DA pipeline container. `devctl test` exits nonzero
 if any suite fails and names which.
 
 For finer control — a single file, a `-k` filter, `-v`, a linter, a one-off
@@ -63,11 +64,12 @@ devctl exec inference pipenv run pytest -x
 ```
 
 Service names: `api`, `frontend`, `inference`, `elasticsearch`, `firebase`,
-`bridgeu-api`.
+`bridgeu-api`, `bridgeu-postgres`.
 
 ## BridgEU
 
-BridgEU services (`bridgeu-api` for now) run on their own network, and the
+BridgEU services (`bridgeu-api`, `bridgeu-postgres`, and the one-off
+`bridgeu-da-pipeline` jobs) run on their own network, and the
 only mysky service they can reach is the api, at `http://mysky-api:8000`.
 Elasticsearch and Firebase don't resolve from there. That's deliberate: in
 production BridgEU is on another cloud and talks to mysky only through the
@@ -80,7 +82,15 @@ run gets one service per side. Definitions live in
 devctl test bridgeu
 devctl exec bridgeu-api pipenv run pyright
 devctl restart bridgeu-api      # after editing bridg-eu code
+devctl exec bridgeu-postgres psql -U bridgeu -d bridgeu
 ```
+
+`devctl seed` also loads the fixture's BridgEU social graph into `graph.*`
+and runs the Diverse Approval pipeline on it (snapshot, community fit, score
+into `da_post_scores`), so the `da` feed (`devctl feed --bridgeu da`) serves
+real scores. Rerun one job with `devctl da-pipeline <job>` (`--help` lists
+them); `bridg-eu/algo` edits apply on the next run, no rebuild. A fixture
+without a graph falls back to synthetic DA scores.
 
 BridgEU feeds come from the api's `/slate/generate`. `bridgeu-api` calls the
 local api with a key `devctl up` issues it, and accepts the api's dev session

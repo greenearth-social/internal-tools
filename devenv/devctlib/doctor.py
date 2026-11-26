@@ -13,7 +13,7 @@ from contextlib import redirect_stderr
 from . import http
 from .assets import fixture_counts, have_fixtures, have_models, models_agree, models_tag
 from .bridgeu import BRIDGEU_REPO, clone_hint, have_bridgeu
-from .compose import oom_killed_services, running_services, service_running
+from .compose import compose_exec, oom_killed_services, running_services, service_running
 from .ctx import Ctx, die
 from .envfiles import nonempty
 from .es import (
@@ -207,6 +207,50 @@ def check_data(ctx: Ctx, report: Report) -> None:
         check_answering(ctx, report, "api", ctx.port("API"))
     if service_running(ctx, "bridgeu-api"):
         check_answering(ctx, report, "bridgeu-api", ctx.port("BRIDGEU_API"))
+    if service_running(ctx, "bridgeu-postgres"):
+        check_bridgeu_data(ctx, report)
+
+
+# What the BridgEU feeds read: the graph the DA pipeline scores from, and the
+# scores the `da` feed serves (only posts under 7 days old, by created_at).
+BRIDGEU_DATA_SQL = (
+    "SELECT (SELECT count(*) FROM graph.follow), (SELECT count(*) FROM da_post_scores),"
+    " (SELECT coalesce(floor(extract(epoch FROM now() - max(created_at)) / 3600), -1)"
+    " FROM da_post_scores)"
+)
+
+
+def check_bridgeu_data(ctx: Ctx, report: Report) -> None:
+    result = compose_exec(
+        ctx,
+        "bridgeu-postgres",
+        "psql",
+        "-U",
+        "bridgeu",
+        "-d",
+        "bridgeu",
+        "-At",
+        "-F",
+        " ",
+        "-c",
+        BRIDGEU_DATA_SQL,
+        check=False,
+        capture=True,
+        quiet_err=True,
+    )
+    fields = result.stdout.split()
+    if not result.ok or len(fields) != 3:
+        report.warn("couldn't read the BridgEU tables", "devctl up (reapplies the schemas)")
+        return
+    follows, scores, age = (int(float(f)) for f in fields)
+    if scores == 0:
+        report.warn("da_post_scores is empty — the BridgEU da feed comes back empty", seed_fix(ctx))
+    elif age >= 7 * 24:
+        report.warn(
+            f"newest DA-scored post {age}h old — past the da feed's 7-day window", seed_fix(ctx)
+        )
+    else:
+        report.ok(f"{scores:,} DA-scored posts, over a graph of {follows:,} follows")
 
 
 def check_answering(ctx: Ctx, report: Report, service: str, port: int) -> None:
