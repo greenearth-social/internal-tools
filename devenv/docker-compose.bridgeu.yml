@@ -19,6 +19,129 @@
 # under the repo root.
 
 services:
+  bridgeu-postgres:
+    image: postgres:18
+    environment:
+      - POSTGRES_USER=bridgeu
+      - POSTGRES_PASSWORD=bridgeu
+      - POSTGRES_DB=bridgeu
+    networks:
+      - bridgeu
+    ports:
+      - "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_BRIDGEU_POSTGRES:-55432}:5432"
+    volumes:
+      # Project-scoped: down preserves the database; nuke removes this instance's data.
+      - bridgeu_pgdata:/var/lib/postgresql
+    healthcheck:
+      # The image's temporary initialization server accepts Unix sockets
+      # only. Wait for TCP so other containers can connect too.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U bridgeu -d bridgeu"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Apply the schemas from the bridg-eu checkout on every `devctl up`,
+  # including existing volumes: the graph ingester's migrations (graph.*, what
+  # the DA pipeline reads), then the serving table. All of it is idempotent
+  # and preserves rows. One database holds both, as on UpCloud. The ingester
+  # records the migrations it applied in graph.schema_migrations; these don't,
+  # which is harmless because each one is IF NOT EXISTS.
+  bridgeu-db-init:
+    image: postgres:18
+    profiles: ["tools"]
+    depends_on:
+      bridgeu-postgres:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        set -- /graph-migrations/*.sql /schema/001_da_post_scores.sql
+        exec psql -X --set=ON_ERROR_STOP=1 --single-transaction \
+          --dbname='postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable' \
+          $(printf -- '--file=%s ' "$@")
+    networks:
+      - bridgeu
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/bridg-eu/db:/schema:ro
+      - ${GE_DEV_REPO_ROOT:-../..}/bridg-eu/graph/internal/store/migrations:/graph-migrations:ro
+
+  # Reuse the API's dev runner and psycopg dependency, like seed-firestore-users
+  # does for mysky. The loader has a fixed local DSN and only replaces DA rows.
+  bridgeu-seed-da-scores:
+    build: ./images/pydev
+    profiles: ["tools"]
+    working_dir: /app/api
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        pipenv install --dev
+        exec pipenv run python /seedscripts/load_da_scores.py
+    depends_on:
+      bridgeu-postgres:
+        condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PIPENV_VENV_IN_PROJECT=1
+      - PIPENV_DONT_LOAD_ENV=1
+    networks:
+      - bridgeu
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/bridg-eu:/app
+      - bridgeu_api_venv:/app/api/.venv
+      - ./seed:/seedscripts:ro
+      - ${GE_DEV_RUNTIME:-./.runtime}/seed:/runtime/seed:ro
+
+  # BridgEU's Diverse Approval pipeline (bridg-eu/algo/pipeline): snapshot the
+  # follow graph, fit communities on it, score recently liked posts into
+  # da_post_scores. In production these are CronJobs; here `devctl seed` runs
+  # them once and `devctl da-pipeline <job>` runs any of them by hand. Also
+  # loads the fixture graph (seed/load_graph.py), since psycopg is here.
+  #
+  # The image is the release one built from the checkout, amd64 only because
+  # graph-tool has no arm64 build (emulated on Apple silicon). DuckDB
+  # extensions aren't preinstalled: their signature check fails under
+  # emulation, and only the lake jobs (not wired up here, #118) use them. The
+  # algo source is mounted over the image's copy, so edits apply on the next
+  # run; a pixi.lock change needs `devctl setup` to rebuild. One image for all
+  # instances, like the inference image.
+  bridgeu-da-pipeline:
+    build:
+      context: ${GE_DEV_REPO_ROOT:-../..}/bridg-eu
+      dockerfile: algo/Dockerfile
+      args:
+        DUCKDB_PREINSTALL_EXTENSIONS: "0"
+    image: ge-dev-bridgeu-da-pipeline:local
+    platform: linux/amd64
+    profiles: ["tools"]
+    entrypoint: ["/bin/bash", "/activate.sh"]
+    command: ["python", "-m", "pipeline", "--help"]
+    # Root rather than the image's uid 10001, which can't write the named
+    # store volume Docker creates root-owned.
+    user: "0"
+    depends_on:
+      bridgeu-postgres:
+        condition: service_healthy
+    environment:
+      - GRAPH_DATABASE_URL=postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable
+      - BRIDGEU_DATABASE_URL=postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable
+      # Snapshots, fits and score runs, kept across runs like the bucket is.
+      - PIPELINE_STORE_URL=file:///store
+      - PIPELINE_WORK_DIR=/work
+      - PIPELINE_FIT_THREADS=${GE_DEV_DA_FIT_THREADS:-4}
+    networks:
+      - bridgeu
+    tmpfs:
+      - /work
+    volumes:
+      - ${GE_DEV_REPO_ROOT:-../..}/bridg-eu/algo:/app/algo:ro
+      - bridgeu_pipeline_store:/store
+      - ./seed:/seedscripts:ro
+      - ${GE_DEV_RUNTIME:-./.runtime}/seed:/runtime/seed:ro
+
   bridgeu-api:
     build: ./images/pydev
     working_dir: /app/api
@@ -30,12 +153,16 @@ services:
         pipenv install --dev
         exec pipenv run uvicorn src.app.main:app --host 0.0.0.0 --port 8000 ${GE_DEV_API_RELOAD:+--reload}
     environment:
+      - ENVIRONMENT=local
       - PYTHONUNBUFFERED=1
       - PIPENV_VENV_IN_PROJECT=1
       # As with the mysky api: the checkout may carry a developer's .env, and
       # pipenv would load it over this environment. The app reads .env too,
       # but there the environment already wins.
       - PIPENV_DONT_LOAD_ENV=1
+      # Always use this instance's local database, even if the checkout's
+      # .env points at production or mysky is running in live mode.
+      - BRIDGEU_DATABASE_URL=postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable
       # did:web:localhost, like the mysky api's local default. Nothing here
       # publishes feed records, so the publisher is a well-formed placeholder.
       - BRIDGEU_HOSTNAME=${GE_DEV_BRIDGEU_HOSTNAME:-localhost}
@@ -100,4 +227,6 @@ networks:
   bridgeu:
 
 volumes:
+  bridgeu_pgdata:
+  bridgeu_pipeline_store:
   bridgeu_api_venv:

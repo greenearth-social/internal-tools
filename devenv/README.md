@@ -101,7 +101,7 @@ runs through `devctl`.
 with no argument:
 
 ```bash
-./devctl test               # api, inference, ingex, frontend, bridgeu
+./devctl test               # api, inference, ingex, frontend, bridgeu, bridgeu-da
 ./devctl test api           # one repo
 ./devctl test ingex         # Go tests, in a throwaway container — no stack needed
 ```
@@ -336,6 +336,65 @@ needed. Output goes to `fixtures/data/` (gitignored).
 
 The full procedure — generating, sanity-checking, and publishing a fixture
 for the team — is in [docs/runbooks.md](docs/runbooks.md).
+
+### BridgEU social graph
+
+BridgEU's Diverse Approval (DA) pipeline fits communities on the follow graph
+and scores posts by which communities liked them, so the fixture also carries
+a graph over its own posts: `graph_actors.jsonl.gz`, `graph_follows.jsonl.gz`
+and `graph_likes.jsonl.gz`, recorded in the manifest's `graph` block. `devctl
+seed` loads it and runs the real pipeline on it (see [the DA
+pipeline](#bridgeu-diverse-approval-pipeline)).
+
+By default it comes from **prod BridgEU's graph database**: every live like on
+the fixture's posts in the fixture window (from far more likers than the ES
+cohort, capped at `--max-likers`, 20,000 most active by default; the cohort and
+dev users always stay), and the follows among those likers and the posts'
+authors. That needs a read-only URL for it in `--graph-url` or
+`GE_GRAPH_DATABASE_URL`, and `psql` on your PATH; `generate_sample.py` checks
+for the URL before its long ES run. The graph only has likes since its
+ingester started (2026-11-15), so a fixture window before that has no graph
+likes to find.
+
+**No prod graph access?** `--graph-source synthetic` plants communities
+instead (`--communities`, default 8) over the fixture's post authors, the
+cohort and `--synthetic-likers` invented accounts (default 3,000): follows
+mostly within a community, likes mostly on posts by the liker's community. The
+fit at seed time should recover roughly that structure. `--source
+megastream-files` always uses it. Note that the published fixture already
+carries the real graph, so you only need this when generating one yourself.
+
+To add or replace the graph of an existing fixture, run from `devenv/`:
+
+```bash
+python3 fixtures/generate_graph.py fixtures/data --graph-url "$GE_GRAPH_DATABASE_URL"
+python3 fixtures/generate_graph.py fixtures/data --source synthetic --seed 42
+```
+
+### Synthetic Diverse Approval scores
+
+Both source modes also write `da_post_scores.jsonl.gz`: one row per unique
+fixture post, with `post_uri`, a random `score` between 0 and 1, and the post's
+original `created_at`, normalized to UTC seconds as ES ingestion does.
+These scores are synthetic test data, not calculated
+from the social graph. Seeding uses them only for a fixture without a graph. The same posts and `--seed` produce the same scores;
+the default seed is 42. The manifest's `diverse_approval` block records the
+source, seed, filename, and count.
+
+To add or regenerate scores for an existing downloaded fixture without
+fetching posts again, run from `devenv/`:
+
+```bash
+python3 fixtures/generate_da_scores.py fixtures/data --seed 42
+```
+
+The sidecar is included automatically when the fixture directory is published
+and fetched through the existing archive. Fetching replaces `fixtures/data/`,
+so local scores are replaced by the downloaded bundle too.
+
+With `bridg-eu` checked out, `./devctl seed` loads these scores into the local
+Postgres database. It shifts `created_at` by the same delta as the
+Elasticsearch posts, leaving URIs and scores unchanged.
 
 ## Models
 
@@ -578,8 +637,25 @@ it needs a public tunnel, not just a key.
    The seed then publishes and refreshes `posts_recent_quality`, the alias
    searched by two-tower retrieval. An empty, mapped quality index keeps this
    alias queryable even when no seeded posts qualify.
+5. **BridgEU** — when the `bridg-eu` checkout is present, reapplies its
+   schemas, then, for a fixture with a graph, loads the rebased graph into
+   `graph.*` and runs the DA pipeline's `snapshot`, `fit` and `score` jobs,
+   which replace `da_post_scores` (see [the DA
+   pipeline](#bridgeu-diverse-approval-pipeline)). For a fixture without a
+   graph it empties `graph.*` and **bridgeu-seed-da-scores** replaces
+   `da_post_scores` with the rebased synthetic `da_post_scores.jsonl.gz`
+   instead, using the API's Python dev runner and psycopg dependency. Either
+   way the connection targets this instance's local Postgres, including in
+   live mode.
 
 Fixture personas are also written to the Firestore emulator after rebasing.
+DA replacement is transactional: malformed rows, duplicate URIs, or a count
+mismatch roll back that load and preserve the previous scores. An older
+fixture with neither a DA file nor DA manifest metadata clears the DA table
+with a notice, so stale candidates don't refer to the previous ES fixture.
+A fixture that declares DA scores but is missing its file fails instead.
+Other Postgres tables are untouched. The whole ES/Firestore/Postgres seed
+pipeline is not a single transaction; fix a failed step and rerun `devctl seed`.
 
 A seeded window drifts stale as real time moves on: the api's recency windows
 are anchored to *now* (popularity looks back 24h), so from about a day after a
@@ -894,8 +970,8 @@ environment keeps that boundary instead of flattening it:
 
 It's optional, because the repo is private to another org. With the checkout
 next to the others (`git clone git@github.com:eurosky-social/bridg-eu.git`),
-`devctl up` starts `bridgeu-api` too; without it devctl notes the missing
-checkout and runs mysky alone.
+`devctl up` starts `bridgeu-api` and `bridgeu-postgres` too; without the
+checkout devctl notes it and runs mysky alone.
 
 The API lives in `bridg-eu/api/`; the container mounts the whole checkout at
 `/app` and runs commands from `/app/api`. Dependencies are cached in a named
@@ -915,8 +991,79 @@ curl http://127.0.0.1:8400/health
 
 `bridgeu-api` answers as `did:web:localhost` with a placeholder publisher DID;
 `GE_DEV_BRIDGEU_HOSTNAME` and `GE_DEV_BRIDGEU_PUBLISHER_DID` in
-`devenv.local.env` override them. Its datastores and fixtures will be added
-here as those components are chosen.
+`devenv.local.env` override them.
+
+### BridgEU Postgres database
+
+`bridgeu-postgres` runs PostgreSQL 18 on the `bridgeu` network, with database,
+username, and password all `bridgeu`. `devctl setup` pulls PostgreSQL. Each
+`devctl up` waits for the database to be healthy, then runs `bridgeu-db-init`
+to apply the graph ingester's migrations
+(`bridg-eu/graph/internal/store/migrations/*.sql`, the `graph.*` tables) and
+`bridg-eu/db/001_da_post_scores.sql` before starting the APIs, in one
+transaction. The definitions live in the BridgEU checkout; applying them again
+preserves existing rows. A SQL error stops startup before the APIs are started.
+
+`bridgeu-api` receives `BRIDGEU_DATABASE_URL` pointing at this instance's
+local database. This overrides any value in the checkout's `.env` and stays
+local even with `--live mysky`.
+
+The default host address is `127.0.0.1:55432`; override its base port with
+`GE_DEV_PORT_BRIDGEU_POSTGRES`. BridgEU containers use
+`bridgeu-postgres:5432`. To connect from the host or inside the container:
+
+```bash
+./devctl ports bridgeu-postgres
+psql "postgres://bridgeu:bridgeu@127.0.0.1:$(./devctl ports bridgeu-postgres)/bridgeu?sslmode=disable"
+./devctl exec bridgeu-postgres psql -U bridgeu -d bridgeu
+./devctl --name featurework ports bridgeu-postgres   # another instance's port
+```
+
+Each instance has its own database volume, including named instances that
+share `dev`'s Elasticsearch. `devctl down` preserves it; `devctl nuke`
+removes it for the selected instance. A fresh volume contains the database, the empty
+`graph.*` tables and an empty `da_post_scores` table after `devctl up`.
+`devctl seed` populates them from the fixture. The graph ingester and the
+DuckLake path don't run here yet (#117, #118).
+Instances sharing Elasticsearch still cannot run `devctl seed`; use a
+dedicated-ES instance to seed both its posts and its own DA table together.
+
+### BridgEU Diverse Approval pipeline
+
+`bridgeu-da-pipeline` runs BridgEU's DA jobs (`bridg-eu/algo/pipeline`), which
+production runs as Kubernetes CronJobs:
+
+| job | reads | writes |
+| --- | --- | --- |
+| `snapshot` | `graph.actor`, `graph.follow` | the follow graph as `snapshots/latest/` in the store |
+| `fit` | the snapshot | communities (Leiden by default) as `fits/<fit_id>/`, `fits/latest.json` |
+| `score` | the latest fit, the last 168 h of `graph.likes` | `da_post_scores` (all rows replaced), `scores/<run_id>/` |
+
+The store is the `bridgeu_pipeline_store` volume (`file:///store`), kept per
+instance like the database. `devctl seed` runs all three; run one by hand
+with:
+
+```bash
+./devctl da-pipeline --help                  # every job and its flags
+./devctl da-pipeline fit --algorithm sbm     # refit with graph-tool's SBM instead
+./devctl da-pipeline score --lam 0.5         # rescore with the distance bonus
+./devctl test bridgeu-da                     # bridg-eu/algo's tests, in the same image
+```
+
+`devctl test bridgeu-da` leaves out `test_lake.py`: DuckDB segfaults under
+amd64 emulation, and the lake path needs bridg-eu's native `Dockerfile.lake-dev`
+image (#118).
+
+The image is bridg-eu's release `algo/Dockerfile`, built by `devctl setup` from
+the checkout for `linux/amd64` only (graph-tool has no arm64 build), so it runs
+emulated on Apple silicon. `bridg-eu/algo` is mounted over the image's copy, so
+code edits apply on the next run; a `pixi.lock` change needs `devctl setup`.
+
+**Dates.** The score job dates a post by the TID in its record key, as in
+production. Rebasing can't move those (the URIs must match Elasticsearch), so
+`devctl da-pipeline score` goes through `seed/da_score.py`: it widens the age
+window by the rebase shift, then moves `da_post_scores.created_at` forward by
+the same shift, so the api's 7-day filter sees the posts as recent.
 
 ### BridgEU feeds
 
@@ -1024,6 +1171,7 @@ pipenv run pytest devenv          # devctl's tests and the rest of devenv's
 | megastream-ingest | internal only | `--with-ingest`; live posts from the archives |
 | jetstream-ingest | internal only | `--with-ingest`; live likes from the public firehose |
 | bridgeu-api | `http://127.0.0.1:8400` | only with bridg-eu checked out; see [BridgEU](#bridgeu) |
+| bridgeu-postgres | `127.0.0.1:55432` | database/username/password `bridgeu`; only with bridg-eu checked out |
 
 These are the default instance's ports; a named instance's are these plus its
 offset (`devctl ports --name <n>`). Everything binds `127.0.0.1` only —
@@ -1034,7 +1182,7 @@ see [docs/remote.md](docs/remote.md).
 Override the bases in `devenv.local.env` (gitignored): `GE_DEV_PORT_API`,
 `GE_DEV_PORT_ES`, `GE_DEV_PORT_FIRESTORE`, `GE_DEV_PORT_FRONTEND`,
 `GE_DEV_PORT_FIREBASE_AUTH`, `GE_DEV_PORT_FUNCTIONS`, `GE_DEV_PORT_FIREBASE_UI`,
-`GE_DEV_PORT_BRIDGEU_API`.
+`GE_DEV_PORT_BRIDGEU_API`, `GE_DEV_PORT_BRIDGEU_POSTGRES`.
 Other settings in the same file: `GE_DEV_ES_HEAP`, `GE_DEV_INSTANCE` (default
 instance name, same as passing `--name`), `GE_DEV_API_RELOAD=1` /
 `GE_DEV_INFERENCE_RELOAD=1` (what `--watch` sets),

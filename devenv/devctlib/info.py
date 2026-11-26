@@ -31,6 +31,7 @@ SSH_PORTS = (
     "FIREBASE_UI",
     "FIREBASE_UI_WS",
     "BRIDGEU_API",
+    "BRIDGEU_POSTGRES",
 )
 
 # The service is called elasticsearch everywhere else in this tool; the port
@@ -67,6 +68,7 @@ def cmd_ports(ctx: Ctx, args: list[str]) -> None:
         ("functions", "FUNCTIONS"),
         ("firebase_ui", "FIREBASE_UI"),
         ("bridgeu-api", "BRIDGEU_API"),
+        ("bridgeu-postgres", "BRIDGEU_POSTGRES"),
     ):
         print(f"{label:<13} {ctx.port(name)}")
 

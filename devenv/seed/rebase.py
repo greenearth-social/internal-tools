@@ -21,6 +21,9 @@ What gets shifted:
   (`message.time_us`, `message.commit.record.createdAt`), and the filename
   timestamp (the spooler orders/filters files by it).
 - likes.jsonl.gz: `created_at` / `indexed_at` per like.
+- da_post_scores.jsonl.gz: `created_at`, using the same shift as the posts.
+- graph_follows.jsonl.gz / graph_likes.jsonl.gz (BridgEU's graph):
+  `created_at` / `indexed_at`; graph_actors.jsonl.gz copied unchanged.
 - like_counts.jsonl.gz: copied unchanged (no timestamps).
 - manifest.json: copied with a `rebased` block recording the shift.
 
@@ -206,6 +209,21 @@ def main() -> None:
         print(f"  likes.jsonl.gz: {n} likes rebased")
     else:
         print("  WARNING: no likes.jsonl.gz fixture; like-driven feeds will be empty")
+
+    scores_src = FIXTURES_DIR / "da_post_scores.jsonl.gz"
+    if scores_src.exists():
+        n = rebase_jsonl(scores_src, OUT_DIR / scores_src.name, delta, ("created_at",))
+        print(f"  da_post_scores.jsonl.gz: {n} scores rebased")
+    else:
+        print("  WARNING: no da_post_scores.jsonl.gz fixture; Diverse Approval feed will be empty")
+
+    for name in ("graph_follows.jsonl.gz", "graph_likes.jsonl.gz"):
+        src = FIXTURES_DIR / name
+        if src.exists():
+            n = rebase_jsonl(src, OUT_DIR / name, delta, ("created_at", "indexed_at"))
+            print(f"  {name}: {n} rows rebased")
+    if (FIXTURES_DIR / "graph_actors.jsonl.gz").exists():
+        shutil.copyfile(FIXTURES_DIR / "graph_actors.jsonl.gz", OUT_DIR / "graph_actors.jsonl.gz")
 
     counts_src = FIXTURES_DIR / "like_counts.jsonl.gz"
     if counts_src.exists():

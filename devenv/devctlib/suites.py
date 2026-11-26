@@ -13,11 +13,12 @@ from __future__ import annotations
 import sys
 
 from .bridgeu import BRIDGEU_REPO, clone_hint, have_bridgeu
-from .compose import exec_argv, service_running
+from .compose import compose_argv, exec_argv, service_running
 from .ctx import Ctx, die, warn
 from .instance import GO_IMAGE, check_docker, ensure_go_caches
 
-TEST_SUITES = ("api", "inference", "ingex", "frontend", "bridgeu")
+TEST_SUITES = ("api", "inference", "ingex", "frontend", "bridgeu", "bridgeu-da")
+BRIDGEU_SUITES = ("bridgeu", "bridgeu-da")
 
 # The container each in-stack suite runs in, and how.
 IN_CONTAINER = {
@@ -29,6 +30,26 @@ IN_CONTAINER = {
 
 
 def suite_argv(ctx: Ctx, suite: str) -> list[str]:
+    if suite == "bridgeu-da":
+        # bridg-eu/algo's tests, in the DA pipeline image: a one-off container,
+        # so nothing has to be running. Not test_lake.py: DuckDB segfaults
+        # under amd64 emulation (Apple silicon); the lake path needs the native
+        # lake-dev image, #118.
+        return compose_argv(
+            ctx,
+            "run",
+            "--rm",
+            "--no-deps",
+            "bridgeu-da-pipeline",
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "/app/algo/tests",
+            "--ignore=/app/algo/tests/test_lake.py",
+        )
     if suite == "ingex":
         tty = ["-t"] if sys.stdout.isatty() else []
         return [
@@ -65,8 +86,11 @@ def cmd_test(ctx: Ctx, args: list[str]) -> None:
         suites = list(TEST_SUITES)
         # "Every suite" means every suite this checkout can run.
         if not have_bridgeu(ctx):
-            suites.remove("bridgeu")
-            warn(f"devctl: skipping bridgeu ({BRIDGEU_REPO} not checked out)")
+            for suite in BRIDGEU_SUITES:
+                suites.remove(suite)
+            warn(
+                f"devctl: skipping {' and '.join(BRIDGEU_SUITES)} ({BRIDGEU_REPO} not checked out)"
+            )
 
     for suite in suites:
         if suite not in TEST_SUITES:
@@ -78,8 +102,8 @@ def cmd_test(ctx: Ctx, args: list[str]) -> None:
     # first suite after ingex has already run.
     need_up = []
     for suite in suites:
-        if suite == "bridgeu" and not have_bridgeu(ctx):
-            die(f"the bridgeu suite needs {BRIDGEU_REPO} checked out:\n        {clone_hint(ctx)}")
+        if suite in BRIDGEU_SUITES and not have_bridgeu(ctx):
+            die(f"the {suite} suite needs {BRIDGEU_REPO} checked out:\n        {clone_hint(ctx)}")
         if suite in IN_CONTAINER and not service_running(ctx, IN_CONTAINER[suite][0]):
             need_up.append(suite)
     if need_up:

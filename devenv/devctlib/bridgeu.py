@@ -75,3 +75,19 @@ def bridgeu_feed_args(publisher: str, args: list[str]) -> list[str]:
     if not feed.startswith("at://"):
         feed = f"at://{publisher}/app.bsky.feed.generator/{feed}"
     return [feed, *viewer]
+
+
+# `devctl da-pipeline <job> [flags]`: one of BridgEU's Diverse Approval jobs
+# (bridg-eu/algo/pipeline), the stand-ins for its CronJobs. `score` goes
+# through seed/da_score.py, which lines the dates of rebased fixture posts up
+# with now (see that script); every other job runs as is.
+def cmd_da_pipeline(ctx: Ctx, args: list[str]) -> None:
+    if not have_bridgeu(ctx):
+        die(f"the DA pipeline needs {BRIDGEU_REPO} checked out:\n        {clone_hint(ctx)}")
+    if not args or args[0] in ("-h", "--help", "help"):
+        argv = ["-m", "pipeline", "--help"]
+    elif args[0] == "score":
+        argv = ["/seedscripts/da_score.py", *args[1:]]
+    else:
+        argv = ["-m", "pipeline", *args]
+    compose(ctx, "run", "--rm", "bridgeu-da-pipeline", "python", *argv)

@@ -30,18 +30,22 @@ Run the stack:
                      --dedicated-es                   own Elasticsearch, not shared
                      --repo-root <dir>                mount checkouts from another
                        working copy (sticks per instance; default: this repo's parent)
-  seed             load fixtures: rebase timestamps, ingest posts, load likes
+  seed             load fixtures: rebase timestamps, ingest posts, load likes;
+                   for BridgEU, load the graph and run the DA pipeline
   restart <svc>    recreate one service, picking up code and config changes
   down             stop containers (data volumes survive)
   nuke             stop and delete everything (volumes, minted keys, seed state)
 
 Work with it:
   test [svc]       run a repo's tests inside the env, or all with no arg
-                     (api, inference, ingex, frontend, bridgeu)
+                     (api, inference, ingex, frontend, bridgeu, bridgeu-da)
   exec <svc> ...   run any command in a service (e.g. exec api pipenv run pytest)
   feed [feed]      view a hydrated feed in the terminal (default: your-feed;
                    --user <did>, --limit, --pages, --json for raw skeleton;
                    --bridgeu for a BridgEU feed, default: passthrough)
+  da-pipeline <job> [flags]
+                   run a BridgEU Diverse Approval job: snapshot, fit (communities),
+                   score (into da_post_scores); --help lists them all
   es <path>        query this instance's Elasticsearch (read-only key, e.g.
                    devctl es /posts/_count)
   login [did]      print a sign-in URL for the frontend as the seeded persona

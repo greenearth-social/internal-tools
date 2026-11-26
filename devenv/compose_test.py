@@ -87,8 +87,111 @@ def test_bridgeu_api_runs_from_its_service_directory():
     # Publishing dev feeds needs the parent checkout's .git directory.
     assert "${GE_DEV_REPO_ROOT:-../..}/bridg-eu:/app" in api["volumes"]
     assert "PIPENV_VENV_IN_PROJECT=1" in api["environment"]
+    assert "ENVIRONMENT=local" in api["environment"]
     assert "bridgeu_api_venv:/app/api/.venv" in api["volumes"]
     assert "bridgeu_api_venv" in compose["volumes"]
+
+
+def test_bridgeu_postgres_is_local_and_its_data_belongs_to_the_instance():
+    compose = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())
+    postgres = compose["services"]["bridgeu-postgres"]
+
+    assert postgres["image"] == "postgres:18"
+    assert set(postgres["environment"]) == {
+        "POSTGRES_USER=bridgeu",
+        "POSTGRES_PASSWORD=bridgeu",
+        "POSTGRES_DB=bridgeu",
+    }
+    assert "env_file" not in postgres
+    assert postgres["ports"] == [
+        "${GE_DEV_BIND:-127.0.0.1}:${GE_DEV_PORT_BRIDGEU_POSTGRES:-55432}:5432"
+    ]
+    assert postgres["volumes"] == ["bridgeu_pgdata:/var/lib/postgresql"]
+    # Explicit global names would make separate devctl instances share data or containers.
+    assert "container_name" not in postgres
+    assert compose["volumes"]["bridgeu_pgdata"] is None
+    assert postgres["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        "pg_isready -h 127.0.0.1 -U bridgeu -d bridgeu",
+    ]
+
+
+def test_bridgeu_schema_init_applies_the_checkout_sql_to_the_local_database():
+    services = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["services"]
+    init = services["bridgeu-db-init"]
+
+    # setup already pulls the server image; schema setup needs no extra build.
+    assert init["image"] == services["bridgeu-postgres"]["image"]
+    assert init["profiles"] == ["tools"]
+    assert init["depends_on"] == {"bridgeu-postgres": {"condition": "service_healthy"}}
+    assert init["volumes"] == [
+        "${GE_DEV_REPO_ROOT:-../..}/bridg-eu/db:/schema:ro",
+        "${GE_DEV_REPO_ROOT:-../..}/bridg-eu/graph/internal/store/migrations:/graph-migrations:ro",
+    ]
+    assert "env_file" not in init
+    # The graph migrations in order, then the serving table, in one transaction.
+    script = init["command"][-1]
+    assert init["command"][:2] == ["sh", "-c"]
+    assert "set -- /graph-migrations/*.sql /schema/001_da_post_scores.sql" in script
+    assert "--single-transaction" in script
+    assert "--set=ON_ERROR_STOP=1" in script
+    assert "postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable" in script
+
+
+def test_bridgeu_da_pipeline_builds_the_checkout_image_and_writes_only_local_stores():
+    services = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["services"]
+    pipeline = services["bridgeu-da-pipeline"]
+    local = "postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable"
+
+    assert pipeline["build"]["context"] == "${GE_DEV_REPO_ROOT:-../..}/bridg-eu"
+    assert pipeline["build"]["dockerfile"] == "algo/Dockerfile"
+    # graph-tool has no arm64 build; DuckDB's extension signatures fail emulated.
+    assert pipeline["platform"] == "linux/amd64"
+    assert pipeline["build"]["args"] == {"DUCKDB_PREINSTALL_EXTENSIONS": "0"}
+    assert pipeline["profiles"] == ["tools"]
+    assert pipeline["depends_on"] == {"bridgeu-postgres": {"condition": "service_healthy"}}
+    env = dict(item.split("=", 1) for item in pipeline["environment"])
+    assert env["GRAPH_DATABASE_URL"] == local
+    assert env["BRIDGEU_DATABASE_URL"] == local
+    assert env["PIPELINE_STORE_URL"] == "file:///store"
+    assert "${GE_DEV_REPO_ROOT:-../..}/bridg-eu/algo:/app/algo:ro" in pipeline["volumes"]
+    assert "bridgeu_pipeline_store:/store" in pipeline["volumes"]
+    assert (
+        yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["volumes"]["bridgeu_pipeline_store"]
+        is None
+    )
+
+
+def test_bridgeu_api_database_url_overrides_the_checkouts_env_with_its_local_database():
+    api = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["services"]["bridgeu-api"]
+
+    assert "PIPENV_DONT_LOAD_ENV=1" in api["environment"]
+    assert (
+        "BRIDGEU_DATABASE_URL=postgresql://bridgeu:bridgeu@bridgeu-postgres:5432/bridgeu?sslmode=disable"
+        in api["environment"]
+    )
+
+
+def test_bridgeu_da_seed_reuses_api_dependencies_and_reads_only_rebased_fixtures():
+    services = yaml.safe_load(BRIDGEU_COMPOSE_FILE.read_text())["services"]
+    seed = services["bridgeu-seed-da-scores"]
+
+    assert seed["build"] == services["bridgeu-api"]["build"]
+    assert seed["working_dir"] == "/app/api"
+    assert seed["profiles"] == ["tools"]
+    assert seed["depends_on"] == {"bridgeu-postgres": {"condition": "service_healthy"}}
+    assert seed["networks"] == ["bridgeu"]
+    assert seed["volumes"] == [
+        "${GE_DEV_REPO_ROOT:-../..}/bridg-eu:/app",
+        "bridgeu_api_venv:/app/api/.venv",
+        "./seed:/seedscripts:ro",
+        "${GE_DEV_RUNTIME:-./.runtime}/seed:/runtime/seed:ro",
+    ]
+    assert "PIPENV_DONT_LOAD_ENV=1" in seed["environment"]
+    assert "PIPENV_VENV_IN_PROJECT=1" in seed["environment"]
+    assert "env_file" not in seed
+    assert "pipenv install --dev" in seed["command"][2]
+    assert "exec pipenv run python /seedscripts/load_da_scores.py" in seed["command"][2]
 
 
 def test_bridgeu_key_issuer_is_a_mysky_side_tool():

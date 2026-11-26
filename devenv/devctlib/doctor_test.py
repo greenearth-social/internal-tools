@@ -66,3 +66,18 @@ def test_summary():
     with pytest.raises(Die, match=r"^1 problem\(s\) and 1 warning\(s\) found$"):
         report.fail("bad")
         report.summary()
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        ("120 500 3", "ok    500 DA-scored posts, over a graph of 120 follows"),
+        ("120 0 -1", "warn  da_post_scores is empty"),
+        ("120 500 200", "warn  newest DA-scored post 200h old"),
+        ("", "warn  couldn't read the BridgEU tables"),
+    ],
+)
+def test_bridgeu_data_check(tmp_path, capsys, row, expected):
+    ctx = make_ctx(tmp_path, runner=FakeRunner(lambda argv: row if "psql" in argv else None))
+    doctor.check_bridgeu_data(ctx, doctor.Report())
+    assert expected in capsys.readouterr().out

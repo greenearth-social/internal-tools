@@ -6,6 +6,9 @@ Produces, in fixtures/data/:
   (chunked), ingested by the real megastream_ingest binary at seed time
 - likes.jsonl.gz        — like documents (LikeDoc schema)
 - like_counts.jsonl.gz  — per-post like_count to apply after ingest
+- da_post_scores.jsonl.gz — synthetic Diverse Approval scores for every post
+- graph_*.jsonl.gz      — BridgEU's follow/like graph over the same posts
+  (generate_graph.py), from which `devctl seed` computes real DA scores
 - manifest.json         — window, counts, dev personas, generation metadata
 
 Two source modes:
@@ -40,6 +43,15 @@ Two source modes:
     use. Deterministic under --seed. Liker DIDs here are invented, apart from
     the dev-team accounts, which get a synthesized history like everyone else
     so that logging in as yourself works in this mode too.
+
+Both modes add reproducible random Diverse Approval scores in [0, 1], using
+--seed; seeding falls back to these when a fixture has no graph.
+
+Both modes also add BridgEU's social graph (generate_graph.py). With prod-es
+it comes from prod BridgEU's graph database by default (--graph-url or
+GE_GRAPH_DATABASE_URL, read-only, psql on PATH); --graph-source synthetic
+plants communities instead, for anyone without that access. megastream-files
+always defaults to synthetic.
 
 Identities are real
 -------------------
@@ -88,6 +100,9 @@ import zipfile
 import zlib
 from collections import Counter
 from pathlib import Path
+
+import generate_da_scores
+import generate_graph
 
 EMBED_MODEL = "all-MiniLM-L12-v2"
 EMBED_FIELD = "embeddings.all_MiniLM_L12_v2"
@@ -334,6 +349,9 @@ def write_fixture_set(
     window_end: dt.datetime,
     cohort_size: int,
     dev_users: list[dict] | None = None,
+    *,
+    da_seed: int = generate_da_scores.DEFAULT_SEED,
+    graph: dict | None = None,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("*.db.zip"):
@@ -364,6 +382,12 @@ def write_fixture_set(
         "dev_users": dev_users or [],
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    # Read the finished chunks so DA rows match the exact post set and
+    # timestamps that the Elasticsearch seed will ingest.
+    generate_da_scores.generate(out_dir, seed=da_seed)
+    if graph is not None:
+        # Last: it reads the finished chunks, the likes and the manifest.
+        generate_graph.generate(out_dir, **graph)
     print(f"Fixture set written to {out_dir}")
     print(f"  posts={len(posts)} likes={len(likes)} cohort={cohort_size}")
     for persona in personas:
@@ -676,6 +700,8 @@ def run_prod_es(args: argparse.Namespace, out_dir: Path, dev_users: list[dict]) 
         window_end,
         len(cohort),
         dev_user_rows,
+        da_seed=args.seed,
+        graph=generate_graph.graph_kwargs(args),
     )
 
 
@@ -845,6 +871,8 @@ def run_megastream_files(args: argparse.Namespace, out_dir: Path, dev_users: lis
         window_end,
         len(cohort),
         dev_user_rows,
+        da_seed=args.seed,
+        graph=generate_graph.graph_kwargs(args),
     )
 
 
@@ -882,8 +910,13 @@ def main() -> None:
     parser.add_argument("--cohort", type=int, default=50)
     parser.add_argument("--min-likes", type=int, default=30)
     parser.add_argument("--max-likes", type=int, default=80)
-    parser.add_argument("--seed", type=int, default=42)
     # common
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=generate_da_scores.DEFAULT_SEED,
+        help="random seed for DA scores in both modes and synthetic megastream-file likes",
+    )
     parser.add_argument("--personas", type=int, default=5)
     parser.add_argument(
         "--dev-users",
@@ -895,7 +928,16 @@ def main() -> None:
         action="store_true",
         help="don't mix the dev team's own accounts into the sample",
     )
+    generate_graph.add_arguments(parser, default_source=None)
     args = parser.parse_args()
+    if args.graph_source is None:
+        args.graph_source = "prod-graph" if args.source == "prod-es" else "synthetic"
+    # Before the long Elasticsearch run, not after it.
+    if args.graph_source == "prod-graph" and not args.graph_url:
+        parser.error(
+            f"the prod graph needs --graph-url or ${generate_graph.GRAPH_URL_ENV}"
+            " (no access? add --graph-source synthetic)"
+        )
 
     dev_users = [] if args.no_dev_users else load_dev_users(Path(args.dev_users).expanduser())
 
